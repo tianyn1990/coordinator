@@ -1,0 +1,19 @@
+{
+  "name": "@coordinator/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "coordinator": "./dist/index.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@coordinator/db": "workspace:*",
+    "@coordinator/shared": "workspace:*"
+  }
+}

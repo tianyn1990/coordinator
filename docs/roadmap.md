@@ -103,7 +103,75 @@ P2 只预留接口和规划，不进入 V1 完成标准：
 - GitHub/GitLab、Codex/Claude Code 都是第一版长期目标，但可按 milestone 分阶段验收。第一条 E2E 可先完成一个真实 provider/平台，另一个以 contract stub 起步，随后补齐。
 - P2 能力必须写清规划和验收标准，可以在第一版后段继续完成，但不得阻塞 P0 可靠性底座。
 
-## 4. 实现顺序
+## 4. 迭代推进固定动作
+
+后续每一轮实现都必须按固定动作推进。固定动作的目标不是增加流程负担，而是让长期设计心智持续进入实现过程，避免代码在不知不觉中偏离已确认边界。
+
+### 4.1 每轮开始
+
+1. 根据本文档的开发进度记录，确认当前要执行的下一阶段或下一项迭代任务。
+2. 根据本轮任务影响范围，先读取根目录 `AGENTS.md`、`docs/AGENTS.md`，再读取相关专题设计文档。
+3. 明确本轮任务是否涉及边界、协议、状态机、数据模型、agent 可见性、工具参数、外部副作用或持久化语义。
+4. 如果本轮可能改变既有设计文档、设计边界或核心方案，必须先向用户说明冲突点和取舍，获得确认后再继续。
+5. 创建对应 OpenSpec change，写清 proposal、spec、design 和 tasks。
+
+### 4.2 每轮实现中
+
+1. 按 OpenSpec tasks 实现本阶段开发任务。
+2. 写必要注释，优先解释关键设计原因，而不是逐行解释代码。
+3. 为本轮能力补充合适单测、fixture 或 contract test。
+4. 在遇到以下决策点时，必须重新阅读相关 `docs/` 文档，并确认实现仍符合总体设计心智：
+   - 新增或修改核心对象、状态、状态迁移。
+   - 新增或修改 agent surface、agent tools、operator tools。
+   - 新增或修改 workflow protocol、provider、workspace、daemon、operation、lock、event、artifact。
+   - 引入新依赖或新模块边界。
+   - 处理 review 意见时可能扩大范围。
+5. 如果出现不确定是否偏离设计的地方，先暂停并与用户确认，再修改设计文档或代码。
+
+### 4.3 每轮验证与 review
+
+1. 运行本轮对应测试、类型检查、构建或 OpenSpec validate。
+2. 修复发现的问题并再次验证。
+3. 交给独立 `gpt-5.5 high` subagent review。
+4. subagent review 请求必须显式要求检查：
+   - 是否符合 `docs/` 下总体设计心智和边界约束。
+   - 是否在实现过程中持续对齐必要设计文档，而不是只在开始时读过。
+   - 是否过度设计。
+   - 是否偏离已有协议。
+   - 是否污染分层边界。
+   - 是否让 agent surface/tools 暴露过多内部字段或复杂 JSON。
+5. 主 agent 评估 review 结论。确认合理的问题必须修复，修复后回到 review 步骤，直到没有必须修复的问题。
+
+### 4.4 每轮收尾
+
+1. 归档当前 OpenSpec change。
+2. 更新本文档的开发进度和重点事项记录。
+3. 更新相关架构、设计或契约文档中必要的已落地事实；凡涉及改变设计边界或核心方案，仍必须先获得用户确认。
+4. 提交本轮相关代码和文档改动。提交前必须检查 `git status`，避免裹入无关历史改动。
+5. 进入下一轮前，确认本轮没有未归档 change、未记录事项或未提交的相关改动。
+
+## 5. 开发进度与重点事项记录
+
+本节用于持续记录每轮开发进度、当前重点、遗留风险和下一步。每轮结束时必须更新。
+
+### 当前进度
+
+- 当前阶段：`Iteration 1: 项目骨架` 已完成。
+- 当前 OpenSpec change：`add-project-skeleton` 已归档为 `openspec/changes/archive/2026-05-03-add-project-skeleton`。
+- 当前正式规格：`openspec/specs/project-skeleton/spec.md`。
+- 下一阶段：`Iteration 2: 数据模型与 Event Store`。
+- 下一阶段重点：在不破坏 `Coordinator Core` 状态所有权的前提下，建立 P0 必需核心表、append-only events、repository 基础、operation/idempotency、state_version/CAS、必要 lock 和 active 唯一性约束。
+
+### 重点关注事项
+
+- 已建立 `apps/api`、`apps/web`、`packages/cli`、`packages/db`、`packages/shared` 的单仓分层骨架。
+- 已实现 Fastify `/health`、Vite + React 最小 Web 入口、CLI `health` / `migrate`、SQLite migration runner 和 `0001_metadata.sql`。
+- SQLite 当前使用 Node 内置 `node:sqlite`，并通过 `engines.node >=22.22.2` 明确运行时约束；测试仍会出现 Node 的 ExperimentalWarning。后续如部署环境或稳定性要求变化，应在独立 change 中评估替换 driver。
+- Iteration 1 未实现完整数据模型、Event Store、operation ledger、daemon、provider、workflow adapter、Coordinator Agent tools 或 agent surface，后续不得把这些能力视为已存在。
+- 本轮验证通过：`openspec validate add-project-skeleton --strict`、`pnpm typecheck`、`pnpm test`、`pnpm build`。
+- 本轮已经过独立 `gpt-5.5 high` subagent review，两轮 review 后无必须修复问题；review 明确检查了是否符合 `docs/` 总体设计心智、是否过度设计、是否污染分层边界。
+
+## 6. 实现顺序
 
 ### Iteration 0: 文档基线
 

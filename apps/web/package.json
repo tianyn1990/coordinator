@@ -1,0 +1,22 @@
+{
+  "name": "@coordinator/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json && vite build",
+    "dev": "vite --host 127.0.0.1"
+  },
+  "dependencies": {
+    "@coordinator/shared": "workspace:*",
+    "@vitejs/plugin-react": "^4.4.1",
+    "vite": "^6.3.4",
+    "typescript": "^5.8.3",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.2",
+    "@types/react-dom": "^19.1.2"
+  }
+}

@@ -10,6 +10,8 @@
 # 本地依赖与通用产物
 node_modules/
 dist/
+dist-types/
+*.tsbuildinfo
 .pnpm-store/
 .DS_Store
 *.log
