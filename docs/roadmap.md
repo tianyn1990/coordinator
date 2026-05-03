@@ -156,11 +156,11 @@ P2 只预留接口和规划，不进入 V1 完成标准：
 
 ### 当前进度
 
-- 当前阶段：`Iteration 3: Project Registry` 已完成。
-- 当前 OpenSpec change：`add-project-registry` 已归档为 `openspec/changes/archive/2026-05-03-add-project-registry`。
-- 当前正式规格：`openspec/specs/project-registry/spec.md`。
-- 下一阶段：`Iteration 4: Coordinator Surface`。
-- 下一阶段重点：将数据库状态翻译成 agent-facing Markdown surface，建立 tool visibility、autonomy guidance、human waiting / review / merge waiting 等 surface fixture。
+- 当前阶段：`Iteration 4: Coordinator Surface` 已完成。
+- 当前 OpenSpec change：`add-coordinator-surface` 已归档为 `openspec/changes/archive/2026-05-03-add-coordinator-surface`。
+- 当前正式规格：`openspec/specs/coordinator-surface/spec.md`。
+- 下一阶段：`Iteration 5: Workspace Manager`。
+- 下一阶段重点：实现 LocalWorker、git worktree workspace、branch 创建、workspace lock、path realpath containment、checkpoint artifact 和 resume preflight。
 
 ### 重点关注事项
 
@@ -168,9 +168,15 @@ P2 只预留接口和规划，不进入 V1 完成标准：
 - 已为 `projects` 补充 registry 相关字段，并通过 `packages/core` 作为业务层统一承载注册逻辑；CLI/API 只调用 service，不直接拼接注册规则。
 - 已实现 CLI `register` / `projects` 和 API `/projects` / `/projects/:projectId` / `/projects/register` 的最小入口。
 - Project Registry 仍遵守默认分支显式确认原则；GitHub/GitLab 自动识别失败时可显式选择。
+- 已建立 `Coordinator Surface` builder，支持 machine JSON 与 agent-facing Markdown 同源生成，并覆盖 bootstrap / planning / execution / human_waiting / human_answered / review / merge_waiting / completed / failure / resume fixture。
+- 已实现最小 DB task surface 入口：`buildTaskSurfaceFromDb` 只读取当前已有 task/project 机器事实，不提前把 human request、workflow run、PR/MR 等未来 repository 逻辑塞入 DB loader。
+- 已实现 CLI `surface --db <path> --task <task-id> [--format json|markdown]` 和 API `GET /tasks/:taskId/surface`，二者都是 operator 调试入口，不是 agent tool。
+- Tool visibility 已按 `contracts.md` 收窄，显式排除 operator-only tools；普通 PR/MR open、merge_waiting、human_waiting、completed/failure 等关键窗口已由 fixture tests 覆盖。
+- Merge approval 可见性已改为显式 `mergeApproval` snapshot 校验，只有匹配当前 PR/MR 且 head/base/validation/merge strategy 有效时才暴露 `merge_after_approval`。
+- Tool 参数已对齐 `agent-tools.md` 的窄参数契约，复杂内容仍通过 artifact path 引用，不使用复杂 JSON 作为主交互方式。
 - SQLite 当前使用 Node 内置 `node:sqlite`，并通过 `engines.node >=22.22.2` 明确运行时约束；测试仍会出现 Node 的 ExperimentalWarning。后续如部署环境或稳定性要求变化，应在独立 change 中评估替换 driver。
 - 本轮验证通过：`openspec validate --all --strict`、`pnpm typecheck`、`pnpm test`、`pnpm build`。
-- 本轮已经过独立 `gpt-5.5 high` subagent review，两轮 review 后无必须修复问题；review 明确检查了是否符合 `docs/` 总体设计心智、是否过度设计、是否污染分层边界。
+- 本轮已经过独立 `gpt-5.5 high` subagent review；review 明确检查了是否符合 `docs/` 总体设计心智、是否过度设计、是否污染分层边界、是否存在协议漂移和过度暴露复杂 JSON。review 提出的 merge approval visibility、PR/MR open tool visibility、tool args contract drift 已修复并复验。
 
 ## 6. 实现顺序
 

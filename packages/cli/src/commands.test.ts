@@ -103,4 +103,57 @@ describe("runCli", () => {
       projects: [{ id: "project-cli", defaultBranch: "main" }]
     });
   });
+
+  it("支持 surface 命令查看 JSON surface", () => {
+    const databasePath = join(mkdtempSync(join(tmpdir(), "coordinator-cli-surface-")), "surface.sqlite");
+    runMigrations(databasePath);
+    withDatabase(databasePath, (context) => {
+      const project = createProject(context, {
+        id: "project-cli-surface",
+        name: "coordinator",
+        defaultBranch: "main",
+        workflowLauncher: "workflow"
+      });
+      createTask(context, {
+        id: "task-cli-surface",
+        projectId: project.id,
+        title: "surface",
+        description: "surface",
+        autonomy: "balanced"
+      });
+    });
+
+    const result = runCli(["surface", "--db", databasePath, "--task", "task-cli-surface"]);
+
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      surface_kind: "bootstrap",
+      available_tools: [{ name: "write_execution_plan" }, { name: "ask_human" }]
+    });
+  });
+
+  it("支持 surface 命令查看 Markdown surface", () => {
+    const databasePath = join(mkdtempSync(join(tmpdir(), "coordinator-cli-surface-")), "surface.sqlite");
+    runMigrations(databasePath);
+    withDatabase(databasePath, (context) => {
+      const project = createProject(context, {
+        id: "project-cli-surface-md",
+        name: "coordinator",
+        defaultBranch: "main"
+      });
+      createTask(context, {
+        id: "task-cli-surface-md",
+        projectId: project.id,
+        title: "surface md",
+        description: "surface",
+        autonomy: "conservative"
+      });
+    });
+
+    const result = runCli(["surface", "--db", databasePath, "--task", "task-cli-surface-md", "--format", "markdown"]);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain("# Coordinator Surface");
+    expect(result.stdout).toContain("当前自主级别：conservative。");
+  });
 });

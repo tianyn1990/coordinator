@@ -1,5 +1,5 @@
 import { listTaskEvents, runMigrations, withDatabase } from "@coordinator/db";
-import { ProjectRegistryInputError, registerProject, viewProjectRegistry } from "@coordinator/core";
+import { ProjectRegistryInputError, buildTaskSurfaceFromDb, registerProject, viewProjectRegistry } from "@coordinator/core";
 import { getHealthStatus } from "@coordinator/shared";
 
 export type CliResult = {
@@ -56,6 +56,33 @@ export function runCli(args: string[]): CliResult {
     return {
       exitCode: 0,
       stdout: `${JSON.stringify({ taskId, events })}\n`,
+      stderr: ""
+    };
+  }
+
+  if (command === "surface") {
+    const databasePathResult = readRequiredOption(rest, "--db");
+    const taskIdResult = readRequiredOption(rest, "--task");
+    const formatResult = readOption(rest, "--format");
+    const error = databasePathResult.error ?? taskIdResult.error ?? formatResult.error;
+    if (error) {
+      return { exitCode: 1, stdout: "", stderr: `${error}\n` };
+    }
+
+    const databasePath = databasePathResult.value;
+    const taskId = taskIdResult.value;
+    const format = formatResult.value ?? "json";
+    if (!databasePath || !taskId) {
+      return { exitCode: 1, stdout: "", stderr: "surface 参数不完整\n" };
+    }
+    if (format !== "json" && format !== "markdown") {
+      return { exitCode: 1, stdout: "", stderr: `不支持的 surface format：${format}\n` };
+    }
+
+    const surface = withDatabase(databasePath, (context) => buildTaskSurfaceFromDb(context, taskId));
+    return {
+      exitCode: 0,
+      stdout: format === "markdown" ? surface.markdown : `${JSON.stringify(surface.json)}\n`,
       stderr: ""
     };
   }
@@ -132,7 +159,7 @@ export function runCli(args: string[]): CliResult {
   return {
     exitCode: 1,
     stdout: "",
-    stderr: `未知命令：${command}\n可用命令：health, migrate --db <path>, timeline --db <path> --task <task-id>, register --db <path> --repo <path>, projects --db <path>\n`
+    stderr: `未知命令：${command}\n可用命令：health, migrate --db <path>, timeline --db <path> --task <task-id>, surface --db <path> --task <task-id>, register --db <path> --repo <path>, projects --db <path>\n`
   };
 }
 

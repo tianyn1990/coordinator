@@ -66,7 +66,10 @@ export type CreateTaskInput = {
 export type TaskRecord = {
   id: string;
   projectId: string;
+  sourceKind: string;
   title: string;
+  description: string;
+  autonomy: string;
   status: string;
   stateVersion: number;
 };
@@ -247,6 +250,11 @@ export function listProjects(context: DbContext): ProjectRecord[] {
 
 export function createTask(context: DbContext, input: CreateTaskInput): TaskRecord {
   return withTransaction(context, () => insertTask(context, input));
+}
+
+export function getTask(context: DbContext, id: string): TaskRecord | undefined {
+  const row = context.db.prepare("SELECT * FROM tasks WHERE id = ?").get(id);
+  return row ? mapTaskRow(row) : undefined;
 }
 
 export function updateTaskStatus(
@@ -480,9 +488,7 @@ function requireProject(context: DbContext, id: string): ProjectRecord {
 }
 
 function requireTask(context: DbContext, id: string): TaskRecord {
-  const row = context.db
-    .prepare("SELECT id, project_id, title, status, state_version FROM tasks WHERE id = ?")
-    .get(id);
+  const row = context.db.prepare("SELECT * FROM tasks WHERE id = ?").get(id);
   if (!row) {
     throw new Error(`task not found: ${id}`);
   }
@@ -577,11 +583,23 @@ function mapProjectRow(row: unknown): ProjectRecord {
 }
 
 function mapTaskRow(row: unknown): TaskRecord {
-  const value = row as { id: string; project_id: string; title: string; status: string; state_version: number };
+  const value = row as {
+    id: string;
+    project_id: string;
+    source_kind: string;
+    title: string;
+    description: string;
+    autonomy: string;
+    status: string;
+    state_version: number;
+  };
   return {
     id: value.id,
     projectId: value.project_id,
+    sourceKind: value.source_kind,
     title: value.title,
+    description: value.description,
+    autonomy: value.autonomy,
     status: value.status,
     stateVersion: value.state_version
   };

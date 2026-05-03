@@ -103,4 +103,46 @@ describe("API health", () => {
       }
     }
   });
+
+  it("可以查看 task surface", async () => {
+    const databasePath = join(mkdtempSync(join(tmpdir(), "coordinator-api-surface-")), "api.sqlite");
+    runMigrations(databasePath);
+    withDatabase(databasePath, (context) => {
+      const project = createProject(context, {
+        id: "project-surface-api",
+        name: "coordinator",
+        defaultBranch: "main",
+        workflowLauncher: "workflow"
+      });
+      createTask(context, {
+        id: "task-surface-api",
+        projectId: project.id,
+        title: "surface api",
+        description: "surface",
+        autonomy: "balanced"
+      });
+    });
+
+    const previous = process.env.COORDINATOR_DB_PATH;
+    process.env.COORDINATOR_DB_PATH = databasePath;
+    try {
+      const server = buildServer();
+      const response = await server.inject({ method: "GET", url: "/tasks/task-surface-api/surface" });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({
+        surfaceKind: "bootstrap",
+        json: {
+          surface_kind: "bootstrap",
+          available_tools: [{ name: "write_execution_plan" }, { name: "ask_human" }]
+        }
+      });
+    } finally {
+      if (previous === undefined) {
+        delete process.env.COORDINATOR_DB_PATH;
+      } else {
+        process.env.COORDINATOR_DB_PATH = previous;
+      }
+    }
+  });
 });

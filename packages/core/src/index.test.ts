@@ -2,8 +2,14 @@ import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { createProject, runMigrations, withDatabase } from "@coordinator/db";
-import { ProjectRegistryInputError, detectGitProvider, registerProject, viewProjectRegistry } from "./index.js";
+import { createProject, createTask, runMigrations, withDatabase } from "@coordinator/db";
+import {
+  ProjectRegistryInputError,
+  buildTaskSurfaceFromDb,
+  detectGitProvider,
+  registerProject,
+  viewProjectRegistry
+} from "./index.js";
 
 function createGitRepoFixture(providerUrl = "git@github.com:hetao/coordinator.git"): string {
   const repoPath = mkdtempSync(join(tmpdir(), "coordinator-registry-"));
@@ -133,5 +139,66 @@ describe("project registry", () => {
       kind: "gitlab",
       host: "my.gitlab.example.com"
     });
+  });
+
+  it("task surface 以 JSON + Markdown 同源输出 bootstrap surface", () => {
+    const databasePath = join(mkdtempSync(join(tmpdir(), "coordinator-surface-db-")), "surface.sqlite");
+    runMigrations(databasePath);
+
+    const surface = withDatabase(databasePath, (context) => {
+      const project = createProject(context, {
+        id: "project-surface",
+        name: "coordinator",
+        defaultBranch: "main",
+        workflowLauncher: "workflow"
+      });
+      const task = createTask(context, {
+        id: "task-surface",
+        projectId: project.id,
+        title: "surface",
+        description: "build surface",
+        autonomy: "balanced"
+      });
+      return buildTaskSurfaceFromDb(context, task.id);
+    });
+
+    expect(surface.surfaceKind).toBe("bootstrap");
+    expect(surface.json.surface_id).toBe(surface.surfaceId);
+    expect(surface.markdown).toContain("# Coordinator Surface");
+    expect(surface.json.available_tools.map((tool) => tool.name)).toEqual(["write_execution_plan", "ask_human"]);
+    expect(surface.json.denied_actions).toContain("不要绕过 workflow protocol。");
+    expect(surface.json.artifact_root).toBe("coordinator/artifacts/");
+  });
+
+  it("task status 为 waiting_human 时 surface 会收窄为 inspect-only", () => {
+    const databasePath = join(mkdtempSync(join(tmpdir(), "coordinator-surface-db-")), "surface.sqlite");
+    runMigrations(databasePath);
+
+    const surface = withDatabase(databasePath, (context) => {
+      const project = createProject(context, {
+        id: "project-human",
+        name: "coordinator",
+        defaultBranch: "main"
+      });
+      const task = createTask(context, {
+        id: "task-human",
+        projectId: project.id,
+        title: "human",
+        description: "human wait",
+        autonomy: "conservative"
+      });
+      context.db
+        .prepare("UPDATE tasks SET status = ? WHERE id = ?")
+        .run("waiting_human", task.id);
+      context.db
+        .prepare(
+          `INSERT INTO human_requests (id, project_id, task_id, blocked_key, kind, status, question_artifact_path)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run("human-request-1", project.id, task.id, "gate:clarify", "requirements-clarification", "pending", "human-question.md");
+      return buildTaskSurfaceFromDb(context, task.id);
+    });
+
+    expect(surface.json.available_tools.map((tool) => tool.name)).toEqual(["inspect_workflow_run"]);
   });
 });

@@ -2,6 +2,29 @@ import { existsSync, statSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { createProject, getProject, listProjects, type DbContext, type ProjectRecord } from "@coordinator/db";
+export { buildCoordinatorSurface, buildTaskSurfaceFromDb, renderSurfaceMarkdown } from "./surface.js";
+export type {
+  AgentSessionSnapshot,
+  AutonomyGuidanceSnapshot,
+  CoordinatorSurfaceJson,
+  CurrentStateSnapshot,
+  EntitySnapshot,
+  ExecutionPlanSnapshot,
+  HumanRequestSnapshot,
+  MemoryTrustBoundarySnapshot,
+  MergeApprovalSnapshot,
+  NoPrCompletionSnapshot,
+  PullRequestSnapshot,
+  ProjectSnapshot,
+  SurfaceEnvelope,
+  SurfaceKind,
+  SurfaceSnapshot,
+  SurfaceToolJson,
+  TaskSnapshot,
+  ValidationContractSnapshot,
+  WorkflowRunSnapshot,
+  WorkspaceSnapshot
+} from "./surface.js";
 
 export type GitProviderKind = "github" | "gitlab";
 
