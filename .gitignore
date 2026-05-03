@@ -1,0 +1,15 @@
+# workflow runtime 状态目录，不入版本控制
+.workflow/
+.dist/
+.worktrees/
+
+# 本地 IDE / agent 安装与调试目录，不入版本控制
+.codex/
+.claude/
+
+# 本地依赖与通用产物
+node_modules/
+dist/
+.pnpm-store/
+.DS_Store
+*.log

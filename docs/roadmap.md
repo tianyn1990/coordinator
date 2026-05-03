@@ -114,7 +114,7 @@ P2 只预留接口和规划，不进入 V1 完成标准：
 
 完成标准：
 
-- `docs/README.md`
+- `docs/AGENTS.md`
 - `docs/architecture.md`
 - `docs/coordinator-surface.md`
 - `docs/agent-tools.md`

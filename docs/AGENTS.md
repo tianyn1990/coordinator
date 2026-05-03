@@ -1,7 +1,28 @@
-# coordinator 设计文档索引
+# coordinator 设计文档索引与 Agent 约束
 
 > 状态：初始方案基线  
 > 目的：记录 `coordinator` 的长期设计、第一版范围、与 `workflow` 的协议边界，以及后续实现时必须遵守的工程约束。
+
+## 0. 使用约束
+
+本文件是 `docs/` 目录的入口，也是本项目实现前必须对齐的设计心智索引。
+
+所有 agent 在实现、review、调研、写 OpenSpec change 或调整架构前，必须：
+
+- 先阅读根目录 `AGENTS.md`。
+- 再阅读本文件。
+- 按任务影响范围继续阅读下方专题文档。
+- 把专题文档里的边界和契约视为实现约束，而不是背景资料。
+
+如果代码实现、OpenSpec change 或外部调研建议与这些文档冲突，应先指出冲突点和可选取舍。凡是涉及修改设计文档、改变既有设计边界或调整核心方案的，必须先与用户确认；确认后再修改设计文档或代码。若不需要改设计，应明确说明实现如何在既有设计内完成。
+
+每次使用 subagent 做 review，都必须要求它检查：
+
+- 是否符合本文件和 `docs/` 下的总体设计心智。
+- 是否过度设计。
+- 是否违背 `Coordinator Core`、`Daemon`、`Execution Adapters`、`workflow protocol`、`AgentProvider`、`GitProvider` 等边界。
+- 是否让 agent surface/tools 暴露了过多内部字段或复杂 JSON。
+- 是否引入了未被文档允许的隐式状态机、hidden memory、通用 DAG、persona role system 或高信任自动 merge。
 
 ## 1. 项目定位
 
