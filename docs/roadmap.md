@@ -156,11 +156,11 @@ P2 只预留接口和规划，不进入 V1 完成标准：
 
 ### 当前进度
 
-- 当前阶段：`Iteration 9: Daemon` 已完成。
-- 当前 OpenSpec change：`add-daemon-runtime` 已归档为 `openspec/changes/archive/2026-05-04-add-daemon-runtime`。
-- 当前正式规格：`openspec/specs/daemon-runtime/spec.md`。
-- 下一阶段：`Iteration 10: PR/MR Provider`。
-- 下一阶段重点：在不扩大 daemon 和 agent tools 边界的前提下，落地 P0 一个真实 PR/MR provider 路径，并为另一个 provider 保留 contract stub / fake adapter；继续保持 PR/MR 创建、review、merge approval 和 merge 边界清晰。
+- 当前阶段：`Iteration 10: PR/MR Provider` 已完成。
+- 当前 OpenSpec change：`add-pr-mr-provider` 已归档为 `openspec/changes/archive/2026-05-04-add-pr-mr-provider`。
+- 当前正式规格：归档后同步到 `openspec/specs/pr-mr-provider/spec.md`、`openspec/specs/coordinator-agent-tools/spec.md`、`openspec/specs/coordinator-surface/spec.md`、`openspec/specs/core-data-model/spec.md`。
+- 下一阶段：`Iteration 11: Web UI / Human Review 操作面`。
+- 下一阶段重点：在不扩大 Core/agent 边界的前提下，让 Web UI 能查看 PR/MR、review、merge approval snapshot、human request 和关键 operation/event，支持 operator 显式 answer/approve/reject/merge 调试闭环。
 
 ### 重点关注事项
 
@@ -211,7 +211,18 @@ P2 只预留接口和规划，不进入 V1 完成标准：
 - 已实现 CLI/API operator-only daemon tick 调试入口：`daemon tick` 和 `POST /daemon/tick`；这些入口未进入 Coordinator Surface，也不是 agent tools。
 - 已补充 Daemon Runtime tests：artifact bridge、surface/tool gate 串联、无 tool 请求不猜测下一步、稳定 idempotency、workflow protocol reconciliation 不猜 completed、human answer wake-up、retry budget、CLI/API operator-only 入口。
 - 第九轮独立 `gpt-5.5 high` review 已完成，先后指出 artifact bridge、稳定 requestId、watchdog/retry_due、symlink containment 等问题，均已修复并复验；最终 review 已确认无必须修复项，可以归档。
-- 本轮验证通过：`openspec validate --all --strict`、`pnpm typecheck`、`pnpm test`、`pnpm build`。
+- 已实现 PR/MR Provider Runtime：新增 `PullRequestProvider` interface、`CliPullRequestProvider`、`FakePullRequestProvider`，支持 create/update/inspect review/request merge approval/operator approve/reject/merge after approval。
+- PR/MR provider 仍是 execution adapter：Core 负责 task/attempt/workspace/workflow handoff gate、operation idempotency、approval snapshot、merge policy、event 记录和状态迁移；provider 只执行外部平台动作。
+- `createPullRequestRuntime` 强制当前 attempt 必须已有 workflow protocol handoff `pr_ready`；不会从 workflow stage/substate/gate 推导 PR readiness，也不读写 `.workflow` private state。
+- PR/MR create 已实现 inspect-before-create：provider inspect 明确区分 `found` 与 `absent`；inspect 失败或 malformed output 不会被当成 absent，避免重复创建；running operation 可在 inspect 到匹配外部 PR/MR 后 reconcile。
+- Merge approval 已落地为有效 snapshot，而不是布尔值：必须绑定 `pr_id + head_sha + base_sha + validation_run_id + merge_strategy`，且 PR status 可 merge、review status 为 `clean`/`approved` 时才允许 request approval 或暴露 merge 工具。
+- `requestMergeApprovalRuntime` 已 operation 化；同 snapshot 的 pending/approved request 可复用，不同 snapshot 的旧 pending/approved request 会失效后再创建新 request，避免 stale approval 阻塞或被误用。
+- `mergeAfterApprovalRuntime` 在获取 PR merge lock 后会先重新 inspect review/PR snapshot，刷新本地记录并重新校验 approval；provider inspect/merge 失败会受控标记 operation `failed`/`unknown`、释放 lock、记录 failure event。
+- Coordinator Surface 已接入 PR/MR snapshot、review summary 和 merge approval snapshot；只有 Core 同等严格语义下有效的 approval 才暴露 `merge_after_approval`。operator-only 的 approve/reject 不进入 surface。
+- Coordinator Agent Tools 已接入 `create_pr`、`update_pr`、`inspect_review`、`request_merge_approval`、`merge_after_approval`；参数保持 `title/pr/artifact path` 等窄参数，复杂 PR body、approval 问题和 review 内容继续走 artifact。
+- CLI/API 已新增 operator-only PR/MR 调试入口，覆盖 create/update/inspect-review/request-approval/approve/reject/merge；这些入口只调用 Core policy gate，不是 agent tools。
+- 第十轮经过多轮独立 `gpt-5.5 high` subagent review，所有必须修复项已处理并复验。关键修复包括：`pr_ready` Core gate、inspect-before-create、running operation replay reconcile、merge 前重新 inspect、完整 approval snapshot、旧 pending/approved approval 失效、surface 与 Core merge readiness 对齐、provider failure operation/lock 收口。
+- 本轮验证通过：`openspec validate --all --strict`、`pnpm typecheck`、`pnpm test`（148 passed）、`pnpm build`。
 
 ## 6. 实现顺序
 
@@ -473,7 +484,27 @@ P2 只预留接口和规划，不进入 V1 完成标准：
 - concurrency 可配置。
 - claim/CAS/lock/idempotency 的最小故障注入测试通过。
 
-### Iteration 10: Web UI
+### Iteration 10: GitHub/GitLab PR/MR Provider
+
+目标：
+
+- 创建 PR/MR。
+- 更新 PR/MR。
+- inspect review。
+- merge after approval。
+- conflict detection。
+- approval snapshot 校验。
+- merge result reconciliation。
+
+完成标准：
+
+- P0 至少一个平台可创建并 merge。
+- P1 GitHub 和 GitLab 都可创建并 merge。
+- 默认 squash merge。
+- merge 前重新验证。
+- head/base/checks 变化后 approval 失效。
+
+### Iteration 11: Web UI
 
 目标：
 
@@ -493,26 +524,6 @@ P2 只预留接口和规划，不进入 V1 完成标准：
 - 能显式批准 merge。
 - approval snapshot 在 UI 可见。
 - HumanRequest 生命周期可追踪。
-
-### Iteration 11: GitHub/GitLab PR/MR Provider
-
-目标：
-
-- 创建 PR/MR。
-- 更新 PR/MR。
-- inspect review。
-- merge after approval。
-- conflict detection。
-- approval snapshot 校验。
-- merge result reconciliation。
-
-完成标准：
-
-- P0 至少一个平台可创建并 merge。
-- P1 GitHub 和 GitLab 都可创建并 merge。
-- 默认 squash merge。
-- merge 前重新验证。
-- head/base/checks 变化后 approval 失效。
 
 ### Iteration 12: P1 / P2 Hardening
 

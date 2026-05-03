@@ -7,13 +7,17 @@ import {
   createProject,
   createTask,
   createWorkspace,
+  createPullRequest,
+  createHumanRequest,
   listTaskEvents,
   runMigrations,
+  updateHumanRequest,
   withDatabase,
   type DbContext
 } from "@coordinator/db";
 import {
   CoordinatorAgentToolError,
+  FakePullRequestProvider,
   buildTaskSurfaceFromDb,
   executeCoordinatorAgentTool,
   type WorkflowProtocolRunner
@@ -33,7 +37,8 @@ function createTaskFixture(databasePath: string) {
       name: "tools",
       workspaceRoot,
       defaultBranch: "main",
-      workflowLauncher: "workflow"
+      workflowLauncher: "workflow",
+      prProviderKind: "github"
     });
     const task = createTask(context, {
       id: "task-tools",
@@ -238,6 +243,104 @@ describe("coordinator agent tools executor", () => {
     expect(result.result).toMatchObject({ kind: "workflow_run", id: "workflow-run-inspect", status: "running" });
     expect(JSON.stringify(result.result)).not.toContain("debug-only");
     expect(JSON.stringify(result.result)).not.toContain("allowedActions");
+  });
+
+  it("create_pr 通过 body artifact 创建 PR/MR，并返回 sanitized result", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createTaskFixture(databasePath);
+    const workspacePath = mkdtempSync(join(tmpdir(), "coordinator-agent-tools-pr-workspace-"));
+    const repoPath = join(workspacePath, "repo");
+    const artifactRoot = join(workspacePath, "coordinator", "artifacts");
+    mkdirSync(join(repoPath, ".git"), { recursive: true });
+    mkdirSync(artifactRoot, { recursive: true });
+    writeFileSync(join(artifactRoot, "pr-body.md"), "# PR\n");
+
+    const result = withDatabase(databasePath, (context) => {
+      const task = createTask(context, { id: "task-pr-tool", projectId: fixture.projectId, title: "pr" });
+      createExecutionPlanForTest(context, fixture.projectId, task.id);
+      const attempt = createAttempt(context, { id: "attempt-pr-tool", projectId: fixture.projectId, taskId: task.id });
+      createWorkspace(context, {
+        projectId: fixture.projectId,
+        taskId: task.id,
+        attemptId: attempt.id,
+        status: "ready",
+        workspacePath,
+        repoPath,
+        branch: "coordinator/task-pr-tool/attempt-pr-tool",
+        baseBranch: "main"
+      });
+      context.db
+        .prepare(
+          `INSERT INTO workflow_runs (id, project_id, task_id, attempt_id, profile_id, status, external_id, handoff_kind)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run("workflow-pr-tool", fixture.projectId, task.id, attempt.id, "feature", "handoff", "inner-pr", "pr_ready");
+      return executeCoordinatorAgentTool(context, {
+        taskId: task.id,
+        toolName: "create_pr",
+        args: { title: "创建 PR", "body-artifact": "pr-body.md" },
+        pullRequest: { provider: new FakePullRequestProvider() }
+      });
+    });
+
+    expect(result.result).toMatchObject({ kind: "pull_request", status: "open" });
+    expect(JSON.stringify(result.result)).not.toContain("externalId");
+  });
+
+  it("merge_after_approval 只有 surface 暴露后才能执行", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createTaskFixture(databasePath);
+
+    const result = withDatabase(databasePath, (context) => {
+      const task = createTask(context, { id: "task-merge-tool", projectId: fixture.projectId, title: "merge" });
+      const attempt = createAttempt(context, { id: "attempt-merge-tool", projectId: fixture.projectId, taskId: task.id });
+      const pr = createPullRequest(context, {
+        id: "pr-merge-tool",
+        projectId: fixture.projectId,
+        taskId: task.id,
+        attemptId: attempt.id,
+        providerKind: "github",
+        status: "open",
+        headSha: "head-1",
+        baseSha: "base-1",
+        reviewStatus: "clean",
+        validationRunId: "validation-1",
+        mergeStrategy: "squash"
+      });
+      const approval = createHumanRequest(context, {
+        id: "approval-merge-tool",
+        projectId: fixture.projectId,
+        taskId: task.id,
+        attemptId: attempt.id,
+        prId: pr.id,
+        blockedKey: `merge:${pr.id}`,
+        kind: "merge_approval",
+        status: "pending",
+        approvalSnapshot: {
+          headSha: "head-1",
+          baseSha: "base-1",
+          validationRunId: "validation-1",
+          mergeStrategy: "squash",
+          valid: true
+        }
+      });
+      updateHumanRequest(context, {
+        humanRequestId: approval.id,
+        expectedStateVersion: approval.stateVersion,
+        status: "approved",
+        approvedBy: "operator",
+        approvedAt: "2026-05-04T00:00:00.000Z"
+      });
+      context.db.prepare("UPDATE tasks SET status = ? WHERE id = ?").run("merge_waiting", task.id);
+      return executeCoordinatorAgentTool(context, {
+        taskId: task.id,
+        toolName: "merge_after_approval",
+        args: { pr: pr.id },
+        pullRequest: { provider: new FakePullRequestProvider() }
+      });
+    });
+
+    expect(result.result).toMatchObject({ kind: "pull_request_merge", status: "merged" });
   });
 });
 

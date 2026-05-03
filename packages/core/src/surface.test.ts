@@ -119,7 +119,7 @@ describe("Coordinator Surface", () => {
     expect(surface.json.available_tools.map((tool) => tool.name)).not.toContain("record_human_answer");
   });
 
-  it("PR/MR open surface 在当前 executor 阶段只暴露 ask_human", () => {
+  it("PR/MR open surface 暴露 review/update 相关工具", () => {
     const surface = buildCoordinatorSurface(
       baseSnapshot({
         surfaceKind: "review",
@@ -133,10 +133,10 @@ describe("Coordinator Surface", () => {
       })
     );
 
-    expect(surface.json.available_tools.map((tool) => tool.name)).toEqual(["ask_human"]);
+    expect(surface.json.available_tools.map((tool) => tool.name)).toEqual(["inspect_review", "update_pr", "ask_human"]);
   });
 
-  it("merge_waiting surface 在当前 executor 阶段不暴露 merge 工具", () => {
+  it("merge_waiting surface 未审批时暴露 request approval 而不暴露 merge", () => {
     const surface = buildCoordinatorSurface(
       baseSnapshot({
         surfaceKind: "merge_waiting",
@@ -152,10 +152,15 @@ describe("Coordinator Surface", () => {
       })
     );
 
-    expect(surface.json.available_tools.map((tool) => tool.name)).toEqual(["ask_human"]);
+    expect(surface.json.available_tools.map((tool) => tool.name)).toEqual([
+      "request_merge_approval",
+      "inspect_review",
+      "ask_human"
+    ]);
+    expect(surface.json.available_tools.map((tool) => tool.name)).not.toContain("merge_after_approval");
   });
 
-  it("merge_waiting surface 即使 approval snapshot 有效也不提前暴露 merge", () => {
+  it("merge_waiting surface 在 approval snapshot 有效时暴露 merge_after_approval", () => {
     const surface = buildCoordinatorSurface(
       baseSnapshot({
         surfaceKind: "merge_waiting",
@@ -166,7 +171,9 @@ describe("Coordinator Surface", () => {
           headBranch: "feature",
           baseBranch: "main",
           headSha: "head-1",
-          baseSha: "base-1"
+          baseSha: "base-1",
+          reviewStatus: "clean",
+          validationRunId: "validation-1"
         },
         mergeApproval: {
           prId: "pr-1",
@@ -188,7 +195,35 @@ describe("Coordinator Surface", () => {
       })
     );
 
-    expect(surface.json.available_tools.map((tool) => tool.name)).toEqual(["ask_human"]);
+    expect(surface.json.available_tools.map((tool) => tool.name)).toEqual(["merge_after_approval", "inspect_review"]);
+  });
+
+  it("merge_waiting surface 即使 approval 匹配但 review 未 clean 也不暴露 merge", () => {
+    const surface = buildCoordinatorSurface(
+      baseSnapshot({
+        surfaceKind: "merge_waiting",
+        pullRequest: {
+          id: "pr-1",
+          providerKind: "github",
+          status: "open",
+          headSha: "head-1",
+          baseSha: "base-1",
+          reviewStatus: "changes_requested",
+          validationRunId: "validation-1"
+        },
+        mergeApproval: {
+          prId: "pr-1",
+          status: "approved",
+          valid: true,
+          headSha: "head-1",
+          baseSha: "base-1",
+          validationRunId: "validation-1",
+          mergeStrategy: "squash"
+        }
+      })
+    );
+
+    expect(surface.json.available_tools.map((tool) => tool.name)).not.toContain("merge_after_approval");
   });
 
   it("merge_waiting surface 在 approval snapshot 不匹配时不暴露 merge", () => {

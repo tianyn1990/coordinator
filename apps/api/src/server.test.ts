@@ -326,4 +326,41 @@ describe("API health", () => {
       }
     }
   });
+
+  it("PR/MR API 入口存在且是 operator-only", async () => {
+    const databasePath = join(mkdtempSync(join(tmpdir(), "coordinator-api-pr-")), "pr.sqlite");
+    runMigrations(databasePath);
+    withDatabase(databasePath, (context) => {
+      const project = createProject(context, {
+        id: "project-api-pr",
+        name: "pr",
+        repoPath: mkdtempSync(join(tmpdir(), "coordinator-api-pr-repo-")),
+        defaultBranch: "main",
+        prProviderKind: "github"
+      });
+      createTask(context, { id: "task-api-pr", projectId: project.id, title: "pr api" });
+    });
+
+    const previous = process.env.COORDINATOR_DB_PATH;
+    process.env.COORDINATOR_DB_PATH = databasePath;
+    try {
+      const server = buildServer();
+      const response = await server.inject({
+        method: "POST",
+        url: "/tasks/task-api-pr/pull-requests",
+        payload: {
+          title: "PR",
+          bodyArtifact: "body.md"
+        }
+      });
+
+      expect(response.statusCode).toBe(400);
+    } finally {
+      if (previous === undefined) {
+        delete process.env.COORDINATOR_DB_PATH;
+      } else {
+        process.env.COORDINATOR_DB_PATH = previous;
+      }
+    }
+  });
 });

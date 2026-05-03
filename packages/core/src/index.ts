@@ -36,6 +36,19 @@ export {
   listWorkflowEvents,
   startWorkflowRun
 } from "./workflow-protocol-adapter.js";
+export {
+  CliPullRequestProvider,
+  FakePullRequestProvider,
+  PullRequestProviderError,
+  approveMergeRuntime,
+  createPullRequestProvider,
+  createPullRequestRuntime,
+  inspectPullRequestReviewRuntime,
+  mergeAfterApprovalRuntime,
+  rejectMergeRuntime,
+  requestMergeApprovalRuntime,
+  updatePullRequestRuntime
+} from "./pr-mr-provider.js";
 export type {
   CoordinatorAgentToolArgs,
   CoordinatorAgentToolFailureCode,
@@ -80,6 +93,27 @@ export type {
   WorkflowRunResult,
   WorkflowStatus
 } from "./workflow-protocol-adapter.js";
+export type {
+  ApproveMergeRuntimeInput,
+  CreatePullRequestRuntimeInput,
+  InspectPullRequestReviewRuntimeInput,
+  MergeAfterApprovalRuntimeInput,
+  PullRequestProvider,
+  PullRequestProviderCreateInput,
+  PullRequestProviderCreateResult,
+  PullRequestProviderInspectExistingInput,
+  PullRequestProviderInspectExistingResult,
+  PullRequestProviderKind,
+  PullRequestProviderMergeInput,
+  PullRequestProviderMergeResult,
+  PullRequestProviderReviewInput,
+  PullRequestProviderReviewResult,
+  PullRequestProviderRunner,
+  PullRequestProviderUpdateInput,
+  PullRequestProviderUpdateResult,
+  RequestMergeApprovalRuntimeInput,
+  UpdatePullRequestRuntimeInput
+} from "./pr-mr-provider.js";
 export type {
   AgentSessionSnapshot,
   AutonomyGuidanceSnapshot,

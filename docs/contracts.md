@@ -444,6 +444,16 @@ merge 前必须：
 5. 执行默认 squash merge。
 6. reconcile merge result。
 
+### 10.4 P0 已落地约束
+
+当前 P0 实现已经落地以下硬约束：
+
+- `create_pr` 必须基于 workflow protocol handoff `pr_ready`，不得由 workflow stage/substate/gate 推导。
+- PR/MR create 必须 inspect-before-create；inspect 失败或输出不可解析时不能当成外部 PR/MR 不存在。
+- `request_merge_approval` 必须 operation 化，并绑定当前 PR/MR snapshot；不同 snapshot 的旧 pending/approved approval 必须先失效，再创建新 approval。
+- Surface 只有在 PR/MR status 可 merge、review status 为 `clean`/`approved`，且 approval 的 `head_sha/base_sha/validation_run_id/merge_strategy` 全部存在并匹配时，才允许暴露 `merge_after_approval`。
+- merge 前必须重新 inspect PR/MR 并刷新 snapshot；如 snapshot 与 approval 不匹配，必须拒绝 merge。
+
 ## 11. Artifact Path Contract
 
 canonical artifact root：

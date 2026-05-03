@@ -28,7 +28,8 @@ describe("runCli", () => {
         { id: "0002_core_data_model.sql", applied: true },
         { id: "0003_project_registry.sql", applied: true },
         { id: "0004_workflow_protocol_adapter.sql", applied: true },
-        { id: "0005_agent_provider_runtime.sql", applied: true }
+        { id: "0005_agent_provider_runtime.sql", applied: true },
+        { id: "0006_pr_mr_provider.sql", applied: true }
       ]
     });
   });
@@ -298,5 +299,30 @@ describe("runCli", () => {
         expect.objectContaining({ kind: "agent_tool_skipped", status: "skipped" })
       ])
     });
+  });
+
+  it("pr create 命令要求 title 和 body artifact 参数", () => {
+    const databasePath = join(mkdtempSync(join(tmpdir(), "coordinator-cli-pr-")), "pr.sqlite");
+    runMigrations(databasePath);
+
+    const result = runCli(["pr", "create", "--db", databasePath, "--task", "task-pr"]);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("缺少 --title 参数");
+  });
+
+  it("pr approve 命令是 operator-only，不会作为 surface tool 出现", () => {
+    const databasePath = join(mkdtempSync(join(tmpdir(), "coordinator-cli-pr-surface-")), "pr.sqlite");
+    runMigrations(databasePath);
+    withDatabase(databasePath, (context) => {
+      const project = createProject(context, { id: "project-cli-pr-surface", name: "pr" });
+      createTask(context, { id: "task-cli-pr-surface", projectId: project.id, title: "pr surface" });
+    });
+
+    const result = runCli(["surface", "--db", databasePath, "--task", "task-cli-pr-surface"]);
+
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout).available_tools.map((tool: { name: string }) => tool.name)).not.toContain("approve_merge");
+    expect(JSON.parse(result.stdout).available_tools.map((tool: { name: string }) => tool.name)).not.toContain("pr approve");
   });
 });

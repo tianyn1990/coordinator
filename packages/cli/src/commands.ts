@@ -4,22 +4,30 @@ import {
   CoordinatorAgentToolError,
   DaemonRuntimeError,
   ProjectRegistryInputError,
+  PullRequestProviderError,
   WorkspaceManagerError,
   WorkflowProtocolError,
+  approveMergeRuntime,
   buildTaskSurfaceFromDb,
   createAttemptWorkspace,
+  createPullRequestRuntime,
   executeCoordinatorAgentTool,
   inspectAgentSession,
+  inspectPullRequestReviewRuntime,
   inspectWorkflowCapabilities,
   inspectWorkflowRun,
   invokeWorkflowAction,
   listWorkflowArtifacts,
   listWorkflowEvents,
+  mergeAfterApprovalRuntime,
   registerProject,
+  rejectMergeRuntime,
+  requestMergeApprovalRuntime,
   resumeWorkspacePreflight,
   runDaemonTick,
   runCoordinatorAgentSession,
   startWorkflowRun,
+  updatePullRequestRuntime,
   viewProjectRegistry
 } from "@coordinator/core";
 import { getHealthStatus } from "@coordinator/shared";
@@ -530,10 +538,124 @@ export function runCli(args: string[]): CliResult {
     };
   }
 
+  if (command === "pr") {
+    const [subcommand, ...prArgs] = rest;
+    const databasePathResult = readRequiredOption(prArgs, "--db");
+    const taskIdResult = readRequiredOption(prArgs, "--task");
+    const baseError = databasePathResult.error ?? taskIdResult.error;
+    if (baseError) {
+      return { exitCode: 1, stdout: "", stderr: `${baseError}\n` };
+    }
+    const databasePath = databasePathResult.value;
+    const taskId = taskIdResult.value;
+    if (!databasePath || !taskId) {
+      return { exitCode: 1, stdout: "", stderr: "pr 参数不完整\n" };
+    }
+    try {
+      if (subcommand === "create") {
+        const title = readRequiredOption(prArgs, "--title");
+        const bodyArtifact = readRequiredOption(prArgs, "--body-artifact");
+        const error = title.error ?? bodyArtifact.error;
+        if (error) return { exitCode: 1, stdout: "", stderr: `${error}\n` };
+        if (!title.value || !bodyArtifact.value) return { exitCode: 1, stdout: "", stderr: "pr create 参数不完整\n" };
+        const result = withDatabase(databasePath, (context) =>
+          createPullRequestRuntime(context, {
+            taskId,
+            title: title.value,
+            bodyArtifact: bodyArtifact.value,
+            actor: readOption(prArgs, "--actor").value ?? "cli"
+          })
+        );
+        return { exitCode: 0, stdout: `${JSON.stringify(result)}\n`, stderr: "" };
+      }
+      if (subcommand === "update") {
+        const prId = readRequiredOption(prArgs, "--pr");
+        if (prId.error) return { exitCode: 1, stdout: "", stderr: `${prId.error}\n` };
+        if (!prId.value) return { exitCode: 1, stdout: "", stderr: "pr update 参数不完整\n" };
+        const result = withDatabase(databasePath, (context) =>
+          updatePullRequestRuntime(context, {
+            taskId,
+            prId: prId.value,
+            title: readOption(prArgs, "--title").value,
+            bodyArtifact: readOption(prArgs, "--body-artifact").value,
+            actor: readOption(prArgs, "--actor").value ?? "cli"
+          })
+        );
+        return { exitCode: 0, stdout: `${JSON.stringify(result)}\n`, stderr: "" };
+      }
+      if (subcommand === "inspect-review") {
+        const prId = readRequiredOption(prArgs, "--pr");
+        if (prId.error) return { exitCode: 1, stdout: "", stderr: `${prId.error}\n` };
+        if (!prId.value) return { exitCode: 1, stdout: "", stderr: "pr inspect-review 参数不完整\n" };
+        const result = withDatabase(databasePath, (context) =>
+          inspectPullRequestReviewRuntime(context, { taskId, prId: prId.value, actor: "cli" })
+        );
+        return { exitCode: 0, stdout: `${JSON.stringify(result)}\n`, stderr: "" };
+      }
+      if (subcommand === "request-approval") {
+        const prId = readRequiredOption(prArgs, "--pr");
+        const artifact = readRequiredOption(prArgs, "--artifact");
+        const error = prId.error ?? artifact.error;
+        if (error) return { exitCode: 1, stdout: "", stderr: `${error}\n` };
+        if (!prId.value || !artifact.value) return { exitCode: 1, stdout: "", stderr: "pr request-approval 参数不完整\n" };
+        const result = withDatabase(databasePath, (context) =>
+          requestMergeApprovalRuntime(context, {
+            taskId,
+            prId: prId.value,
+            bodyArtifact: artifact.value,
+            actor: readOption(prArgs, "--actor").value ?? "cli"
+          })
+        );
+        return { exitCode: 0, stdout: `${JSON.stringify(result)}\n`, stderr: "" };
+      }
+      if (subcommand === "approve" || subcommand === "reject") {
+        const prId = readRequiredOption(prArgs, "--pr");
+        const humanRequestId = readRequiredOption(prArgs, "--human-request");
+        const error = prId.error ?? humanRequestId.error;
+        if (error) return { exitCode: 1, stdout: "", stderr: `${error}\n` };
+        if (!prId.value || !humanRequestId.value) return { exitCode: 1, stdout: "", stderr: `pr ${subcommand} 参数不完整\n` };
+        const fn = subcommand === "approve" ? approveMergeRuntime : rejectMergeRuntime;
+        const result = withDatabase(databasePath, (context) =>
+          fn(context, {
+            taskId,
+            prId: prId.value,
+            humanRequestId: humanRequestId.value,
+            actor: readOption(prArgs, "--actor").value ?? "cli",
+            mergeStrategy: "squash"
+          })
+        );
+        return { exitCode: 0, stdout: `${JSON.stringify(result)}\n`, stderr: "" };
+      }
+      if (subcommand === "merge") {
+        const prId = readRequiredOption(prArgs, "--pr");
+        if (prId.error) return { exitCode: 1, stdout: "", stderr: `${prId.error}\n` };
+        if (!prId.value) return { exitCode: 1, stdout: "", stderr: "pr merge 参数不完整\n" };
+        const result = withDatabase(databasePath, (context) =>
+          mergeAfterApprovalRuntime(context, {
+            taskId,
+            prId: prId.value,
+            actor: readOption(prArgs, "--actor").value ?? "cli"
+          })
+        );
+        return { exitCode: 0, stdout: `${JSON.stringify(result)}\n`, stderr: "" };
+      }
+    } catch (error) {
+      if (error instanceof PullRequestProviderError || error instanceof ActiveResourceConflictError) {
+        return { exitCode: 1, stdout: "", stderr: `${error.message}\n` };
+      }
+      throw error;
+    }
+    return {
+      exitCode: 1,
+      stdout: "",
+      stderr: "未知 pr 子命令，可用：pr create, pr update, pr inspect-review, pr request-approval, pr approve, pr reject, pr merge\n"
+    };
+  }
+
   return {
     exitCode: 1,
       stdout: "",
-      stderr: `未知命令：${command}\n可用命令：health, migrate --db <path>, timeline --db <path> --task <task-id>, surface --db <path> --task <task-id>, register --db <path> --repo <path>, projects --db <path>, workspace create, workspace preflight, workflow <subcommand>, agent <subcommand>, agent-tool <subcommand>, daemon <subcommand>\n`
+      stderr: `未知命令：${command}\n可用命令：health, migrate --db <path>, timeline --db <path> --task <task-id>, surface --db <path> --task <task-id>, register --db <path> --repo <path>, projects --db <path>, workspace create, workspace preflight, workflow <subcommand>, agent <subcommand>, agent-tool <subcommand>, daemon <subcommand>, pr <subcommand>\n`
   };
 }
 

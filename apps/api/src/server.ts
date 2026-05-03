@@ -5,22 +5,30 @@ import {
   CoordinatorAgentToolError,
   DaemonRuntimeError,
   ProjectRegistryInputError,
+  PullRequestProviderError,
   WorkspaceManagerError,
   WorkflowProtocolError,
+  approveMergeRuntime,
   buildTaskSurfaceFromDb,
   createAttemptWorkspace,
+  createPullRequestRuntime,
   executeCoordinatorAgentTool,
   inspectAgentSession,
+  inspectPullRequestReviewRuntime,
   inspectWorkflowCapabilities,
   inspectWorkflowRun,
   invokeWorkflowAction,
   listWorkflowArtifacts,
   listWorkflowEvents,
+  mergeAfterApprovalRuntime,
   registerProject,
+  rejectMergeRuntime,
+  requestMergeApprovalRuntime,
   resumeWorkspacePreflight,
   runDaemonTick,
   runCoordinatorAgentSession,
   startWorkflowRun,
+  updatePullRequestRuntime,
   viewProjectRegistry,
   type GitProviderKind
 } from "@coordinator/core";
@@ -465,6 +473,199 @@ export function buildServer(): FastifyInstance {
     }
   );
 
+  server.post<{ Params: { taskId: string }; Body: CreatePrBody }>(
+    "/tasks/:taskId/pull-requests",
+    {
+      schema: {
+        body: {
+          type: "object",
+          required: ["title", "bodyArtifact"],
+          additionalProperties: false,
+          properties: {
+            title: { type: "string", minLength: 1 },
+            bodyArtifact: { type: "string", minLength: 1 },
+            actor: { type: "string", minLength: 1 }
+          }
+        }
+      }
+    },
+    async (request, reply) => {
+      const databasePath = process.env.COORDINATOR_DB_PATH;
+      if (!databasePath) return reply.code(503).send({ error: "COORDINATOR_DB_PATH 未配置" });
+      try {
+        return withDatabase(databasePath, (context) =>
+          createPullRequestRuntime(context, {
+            taskId: request.params.taskId,
+            title: request.body.title,
+            bodyArtifact: request.body.bodyArtifact,
+            actor: request.body.actor ?? "api"
+          })
+        );
+      } catch (error) {
+        if (error instanceof PullRequestProviderError || error instanceof ActiveResourceConflictError) {
+          return reply.code(400).send({ error: error.message });
+        }
+        throw error;
+      }
+    }
+  );
+
+  server.patch<{ Params: { taskId: string; prId: string }; Body: UpdatePrBody }>(
+    "/tasks/:taskId/pull-requests/:prId",
+    {
+      schema: {
+        body: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            title: { type: "string", minLength: 1 },
+            bodyArtifact: { type: "string", minLength: 1 },
+            actor: { type: "string", minLength: 1 }
+          }
+        }
+      }
+    },
+    async (request, reply) => {
+      const databasePath = process.env.COORDINATOR_DB_PATH;
+      if (!databasePath) return reply.code(503).send({ error: "COORDINATOR_DB_PATH 未配置" });
+      try {
+        return withDatabase(databasePath, (context) =>
+          updatePullRequestRuntime(context, {
+            taskId: request.params.taskId,
+            prId: request.params.prId,
+            title: request.body.title,
+            bodyArtifact: request.body.bodyArtifact,
+            actor: request.body.actor ?? "api"
+          })
+        );
+      } catch (error) {
+        if (error instanceof PullRequestProviderError || error instanceof ActiveResourceConflictError) {
+          return reply.code(400).send({ error: error.message });
+        }
+        throw error;
+      }
+    }
+  );
+
+  server.post<{ Params: { taskId: string; prId: string } }>(
+    "/tasks/:taskId/pull-requests/:prId/inspect-review",
+    async (request, reply) => {
+      const databasePath = process.env.COORDINATOR_DB_PATH;
+      if (!databasePath) return reply.code(503).send({ error: "COORDINATOR_DB_PATH 未配置" });
+      try {
+        return withDatabase(databasePath, (context) =>
+          inspectPullRequestReviewRuntime(context, {
+            taskId: request.params.taskId,
+            prId: request.params.prId,
+            actor: "api"
+          })
+        );
+      } catch (error) {
+        if (error instanceof PullRequestProviderError || error instanceof ActiveResourceConflictError) {
+          return reply.code(400).send({ error: error.message });
+        }
+        throw error;
+      }
+    }
+  );
+
+  server.post<{ Params: { taskId: string; prId: string }; Body: RequestMergeApprovalBody }>(
+    "/tasks/:taskId/pull-requests/:prId/request-merge-approval",
+    {
+      schema: {
+        body: {
+          type: "object",
+          required: ["artifact"],
+          additionalProperties: false,
+          properties: {
+            artifact: { type: "string", minLength: 1 },
+            actor: { type: "string", minLength: 1 }
+          }
+        }
+      }
+    },
+    async (request, reply) => {
+      const databasePath = process.env.COORDINATOR_DB_PATH;
+      if (!databasePath) return reply.code(503).send({ error: "COORDINATOR_DB_PATH 未配置" });
+      try {
+        return withDatabase(databasePath, (context) =>
+          requestMergeApprovalRuntime(context, {
+            taskId: request.params.taskId,
+            prId: request.params.prId,
+            bodyArtifact: request.body.artifact,
+            actor: request.body.actor ?? "api"
+          })
+        );
+      } catch (error) {
+        if (error instanceof PullRequestProviderError || error instanceof ActiveResourceConflictError) {
+          return reply.code(400).send({ error: error.message });
+        }
+        throw error;
+      }
+    }
+  );
+
+  server.post<{ Params: { taskId: string; prId: string }; Body: MergeApprovalBody }>(
+    "/tasks/:taskId/pull-requests/:prId/merge-approval",
+    {
+      schema: {
+        body: {
+          type: "object",
+          required: ["humanRequestId", "decision"],
+          additionalProperties: false,
+          properties: {
+            humanRequestId: { type: "string", minLength: 1 },
+            decision: { type: "string", enum: ["approve", "reject"] },
+            actor: { type: "string", minLength: 1 }
+          }
+        }
+      }
+    },
+    async (request, reply) => {
+      const databasePath = process.env.COORDINATOR_DB_PATH;
+      if (!databasePath) return reply.code(503).send({ error: "COORDINATOR_DB_PATH 未配置" });
+      try {
+        const fn = request.body.decision === "approve" ? approveMergeRuntime : rejectMergeRuntime;
+        return withDatabase(databasePath, (context) =>
+          fn(context, {
+            taskId: request.params.taskId,
+            prId: request.params.prId,
+            humanRequestId: request.body.humanRequestId,
+            actor: request.body.actor ?? "api",
+            mergeStrategy: "squash"
+          })
+        );
+      } catch (error) {
+        if (error instanceof PullRequestProviderError || error instanceof ActiveResourceConflictError) {
+          return reply.code(400).send({ error: error.message });
+        }
+        throw error;
+      }
+    }
+  );
+
+  server.post<{ Params: { taskId: string; prId: string } }>(
+    "/tasks/:taskId/pull-requests/:prId/merge",
+    async (request, reply) => {
+      const databasePath = process.env.COORDINATOR_DB_PATH;
+      if (!databasePath) return reply.code(503).send({ error: "COORDINATOR_DB_PATH 未配置" });
+      try {
+        return withDatabase(databasePath, (context) =>
+          mergeAfterApprovalRuntime(context, {
+            taskId: request.params.taskId,
+            prId: request.params.prId,
+            actor: "api"
+          })
+        );
+      } catch (error) {
+        if (error instanceof PullRequestProviderError || error instanceof ActiveResourceConflictError) {
+          return reply.code(400).send({ error: error.message });
+        }
+        throw error;
+      }
+    }
+  );
+
   return server;
 }
 
@@ -511,4 +712,27 @@ type DaemonTickBody = {
   owner?: string;
   retryBudget?: number;
   candidateLimit?: number;
+};
+
+type CreatePrBody = {
+  title: string;
+  bodyArtifact: string;
+  actor?: string;
+};
+
+type UpdatePrBody = {
+  title?: string;
+  bodyArtifact?: string;
+  actor?: string;
+};
+
+type RequestMergeApprovalBody = {
+  artifact: string;
+  actor?: string;
+};
+
+type MergeApprovalBody = {
+  humanRequestId: string;
+  decision: "approve" | "reject";
+  actor?: string;
 };

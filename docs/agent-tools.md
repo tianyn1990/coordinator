@@ -282,6 +282,7 @@ human-question.md
 用途：
 
 - 基于当前 workspace branch 创建 PR/MR。
+- 只有当前 attempt 已收到 workflow protocol handoff `pr_ready` 时，Core 才允许创建。
 
 参数：
 
@@ -297,6 +298,11 @@ body 推荐由 agent 写：
 ```text
 pr-body.md
 ```
+
+说明：
+
+- Core 会先 inspect 同 head/base branch 的外部 PR/MR；只有确定不存在时才 create。
+- inspect 失败或输出不可解析时必须阻断 create，不能让 agent 或 operator 通过重试制造重复 PR/MR。
 
 #### update_pr
 
@@ -347,6 +353,7 @@ feedback summary 写 artifact。
 用途：
 
 - 请求人类批准 merge。
+- 请求绑定当前 PR/MR snapshot，不是简单布尔审批。
 
 参数：
 
@@ -361,6 +368,11 @@ artifact 应包含：
 - validation。
 - risk。
 - merge strategy。
+
+约束：
+
+- Core 只在 PR/MR status 可 merge、review status 为 `clean`/`approved`、head/base/validation snapshot 完整时创建 approval request。
+- 旧 pending/approved approval 如果 snapshot 已过期，必须先失效，再创建新 request。
 
 #### merge_after_approval
 
@@ -380,7 +392,7 @@ artifact 应包含：
 - approval 必须绑定 `pr_id + head_sha + base_sha + validation_run_id + merge_strategy`。
 - PR/MR head/base/checks 或 validation 变化后 approval 失效。
 - 默认 squash merge。
-- merge 前必须同步默认分支并重新验证。
+- merge 前必须重新 inspect PR/MR snapshot 并重新校验 approval。
 - 冲突时不能强行 merge，应进入 conflict-resolution。
 
 ### 3.7 Completion Tools

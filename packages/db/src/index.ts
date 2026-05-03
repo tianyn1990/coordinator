@@ -120,6 +120,7 @@ export type CreateHumanRequestInput = {
   status?: string;
   questionArtifactPath?: string;
   answerArtifactPath?: string;
+  approvalSnapshot?: MergeApprovalSnapshotInput;
 };
 
 export type HumanRequestRecord = {
@@ -133,6 +134,13 @@ export type HumanRequestRecord = {
   status: string;
   questionArtifactPath?: string;
   answerArtifactPath?: string;
+  approvalPrHeadSha?: string;
+  approvalPrBaseSha?: string;
+  approvalValidationRunId?: string;
+  approvalMergeStrategy?: string;
+  approvalValid: boolean;
+  approvedBy?: string;
+  approvedAt?: string;
   stateVersion: number;
 };
 
@@ -141,6 +149,17 @@ export type UpdateHumanRequestInput = {
   expectedStateVersion: number;
   status: string;
   answerArtifactPath?: string;
+  approvalSnapshot?: MergeApprovalSnapshotInput;
+  approvedBy?: string;
+  approvedAt?: string;
+};
+
+export type MergeApprovalSnapshotInput = {
+  headSha?: string;
+  baseSha?: string;
+  validationRunId?: string;
+  mergeStrategy?: string;
+  valid?: boolean;
 };
 
 export type CreateWorkspaceInput = {
@@ -255,6 +274,70 @@ export type WorkflowRunRecord = {
   stateVersion: number;
 };
 
+export type CreatePullRequestInput = {
+  id?: string;
+  projectId: string;
+  taskId: string;
+  attemptId?: string;
+  providerKind: string;
+  externalId?: string;
+  url?: string;
+  status?: string;
+  headBranch?: string;
+  baseBranch?: string;
+  headSha?: string;
+  baseSha?: string;
+  title?: string;
+  bodyArtifactPath?: string;
+  reviewStatus?: string;
+  reviewSummary?: string;
+  validationRunId?: string;
+  mergeStrategy?: string;
+  mergedAt?: string;
+};
+
+export type PullRequestRecord = {
+  id: string;
+  projectId: string;
+  taskId: string;
+  attemptId?: string;
+  providerKind: string;
+  externalId?: string;
+  url?: string;
+  status: string;
+  headBranch?: string;
+  baseBranch?: string;
+  headSha?: string;
+  baseSha?: string;
+  title?: string;
+  bodyArtifactPath?: string;
+  reviewStatus: string;
+  reviewSummary?: string;
+  validationRunId?: string;
+  mergeStrategy?: string;
+  mergedAt?: string;
+  stateVersion: number;
+};
+
+export type UpdatePullRequestInput = {
+  prId: string;
+  expectedStateVersion: number;
+  status?: string;
+  externalId?: string;
+  url?: string;
+  headBranch?: string;
+  baseBranch?: string;
+  headSha?: string;
+  baseSha?: string;
+  title?: string;
+  bodyArtifactPath?: string;
+  reviewStatus?: string;
+  reviewSummary?: string;
+  validationRunId?: string;
+  mergeStrategy?: string;
+  mergedAt?: string;
+};
+
 export type UpdateWorkflowRunInput = {
   workflowRunId: string;
   expectedStateVersion: number;
@@ -299,6 +382,8 @@ export type AppendEventInput = {
   workspaceId?: string;
   agentSessionId?: string;
   workflowRunId?: string;
+  prId?: string;
+  humanRequestId?: string;
   operationId?: string;
   transitionId?: string;
   lockToken?: string;
@@ -314,6 +399,8 @@ export type EventRecord = {
   projectId?: string;
   taskId?: string;
   agentSessionId?: string;
+  prId?: string;
+  humanRequestId?: string;
   severity: string;
   payload?: unknown;
   artifactRefs: string[];
@@ -635,6 +722,89 @@ export function getWorkflowRun(context: DbContext, id: string): WorkflowRunRecor
   return row ? mapWorkflowRunRow(row) : undefined;
 }
 
+export function createPullRequest(context: DbContext, input: CreatePullRequestInput): PullRequestRecord {
+  return withTransaction(context, () => insertPullRequest(context, input));
+}
+
+export function getPullRequest(context: DbContext, id: string): PullRequestRecord | undefined {
+  const row = context.db.prepare("SELECT * FROM pull_requests WHERE id = ?").get(id);
+  return row ? mapPullRequestRow(row) : undefined;
+}
+
+export function getActivePullRequestByAttempt(context: DbContext, attemptId: string): PullRequestRecord | undefined {
+  const row = context.db
+    .prepare(
+      `SELECT * FROM pull_requests
+       WHERE attempt_id = ? AND status IN ('planned', 'creating', 'open', 'review', 'merge_waiting', 'merging')
+       ORDER BY created_at ASC, id ASC
+       LIMIT 1`
+    )
+    .get(attemptId);
+  return row ? mapPullRequestRow(row) : undefined;
+}
+
+export function getLatestPullRequestByTask(context: DbContext, taskId: string): PullRequestRecord | undefined {
+  const row = context.db
+    .prepare(
+      `SELECT * FROM pull_requests
+       WHERE task_id = ?
+       ORDER BY created_at DESC, id DESC
+       LIMIT 1`
+    )
+    .get(taskId);
+  return row ? mapPullRequestRow(row) : undefined;
+}
+
+export function updatePullRequest(context: DbContext, input: UpdatePullRequestInput): PullRequestRecord {
+  return withTransaction(context, () => {
+    const result = context.db
+      .prepare(
+        `UPDATE pull_requests
+         SET status = COALESCE(?, status),
+             external_id = COALESCE(?, external_id),
+             url = COALESCE(?, url),
+             head_branch = COALESCE(?, head_branch),
+             base_branch = COALESCE(?, base_branch),
+             head_sha = COALESCE(?, head_sha),
+             base_sha = COALESCE(?, base_sha),
+             title = COALESCE(?, title),
+             body_artifact_path = COALESCE(?, body_artifact_path),
+             review_status = COALESCE(?, review_status),
+             review_summary = COALESCE(?, review_summary),
+             validation_run_id = COALESCE(?, validation_run_id),
+             merge_strategy = COALESCE(?, merge_strategy),
+             merged_at = COALESCE(?, merged_at),
+             state_version = state_version + 1,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ? AND state_version = ?`
+      )
+      .run(
+        input.status ?? null,
+        input.externalId ?? null,
+        input.url ?? null,
+        input.headBranch ?? null,
+        input.baseBranch ?? null,
+        input.headSha ?? null,
+        input.baseSha ?? null,
+        input.title ?? null,
+        input.bodyArtifactPath ?? null,
+        input.reviewStatus ?? null,
+        input.reviewSummary ?? null,
+        input.validationRunId ?? null,
+        input.mergeStrategy ?? null,
+        input.mergedAt ?? null,
+        input.prId,
+        input.expectedStateVersion
+      );
+
+    if (result.changes === 0) {
+      throw new CasConflictError(`pull request ${input.prId} state_version mismatch`);
+    }
+
+    return requirePullRequest(context, input.prId);
+  });
+}
+
 export function listWorkflowRunsByStatus(context: DbContext, statuses: string[], limit = 50): WorkflowRunRecord[] {
   if (statuses.length === 0) {
     return [];
@@ -771,11 +941,30 @@ export function updateHumanRequest(context: DbContext, input: UpdateHumanRequest
         `UPDATE human_requests
          SET status = ?,
              answer_artifact_path = COALESCE(?, answer_artifact_path),
+             approval_pr_head_sha = COALESCE(?, approval_pr_head_sha),
+             approval_pr_base_sha = COALESCE(?, approval_pr_base_sha),
+             approval_validation_run_id = COALESCE(?, approval_validation_run_id),
+             approval_merge_strategy = COALESCE(?, approval_merge_strategy),
+             approval_valid = COALESCE(?, approval_valid),
+             approved_by = COALESCE(?, approved_by),
+             approved_at = COALESCE(?, approved_at),
              state_version = state_version + 1,
              updated_at = CURRENT_TIMESTAMP
          WHERE id = ? AND state_version = ?`
       )
-      .run(input.status, input.answerArtifactPath ?? null, input.humanRequestId, input.expectedStateVersion);
+      .run(
+        input.status,
+        input.answerArtifactPath ?? null,
+        input.approvalSnapshot?.headSha ?? null,
+        input.approvalSnapshot?.baseSha ?? null,
+        input.approvalSnapshot?.validationRunId ?? null,
+        input.approvalSnapshot?.mergeStrategy ?? null,
+        input.approvalSnapshot?.valid === undefined ? null : input.approvalSnapshot.valid ? 1 : 0,
+        input.approvedBy ?? null,
+        input.approvedAt ?? null,
+        input.humanRequestId,
+        input.expectedStateVersion
+      );
 
     if (result.changes === 0) {
       throw new CasConflictError(`human request ${input.humanRequestId} state_version mismatch`);
@@ -857,9 +1046,9 @@ export function appendEvent(context: DbContext, input: AppendEventInput): EventR
     .prepare(
       `INSERT INTO events (
         operation_id, transition_id, lock_token, project_id, task_id, attempt_id, workspace_id, agent_session_id,
-        workflow_run_id, type, summary,
+        workflow_run_id, pr_id, human_request_id, type, summary,
         payload_json, artifact_refs_json, severity
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       input.operationId ?? null,
@@ -871,6 +1060,8 @@ export function appendEvent(context: DbContext, input: AppendEventInput): EventR
       input.workspaceId ?? null,
       input.agentSessionId ?? null,
       input.workflowRunId ?? null,
+      input.prId ?? null,
+      input.humanRequestId ?? null,
       input.type,
       input.summary,
       input.payload === undefined ? null : JSON.stringify(input.payload),
@@ -1159,9 +1350,11 @@ function insertHumanRequest(context: DbContext, input: CreateHumanRequestInput):
     .prepare(
       `INSERT INTO human_requests (
          id, project_id, task_id, attempt_id, pr_id, blocked_key, kind, status,
-         question_artifact_path, answer_artifact_path
+         question_artifact_path, answer_artifact_path,
+         approval_pr_head_sha, approval_pr_base_sha, approval_validation_run_id,
+         approval_merge_strategy, approval_valid, approved_by, approved_at
        )
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       id,
@@ -1173,7 +1366,14 @@ function insertHumanRequest(context: DbContext, input: CreateHumanRequestInput):
       input.kind,
       input.status ?? "pending",
       input.questionArtifactPath ?? null,
-      input.answerArtifactPath ?? null
+      input.answerArtifactPath ?? null,
+      input.approvalSnapshot?.headSha ?? null,
+      input.approvalSnapshot?.baseSha ?? null,
+      input.approvalSnapshot?.validationRunId ?? null,
+      input.approvalSnapshot?.mergeStrategy ?? null,
+      input.approvalSnapshot?.valid === undefined ? 1 : input.approvalSnapshot.valid ? 1 : 0,
+      null,
+      null
     );
 
   appendEvent(context, {
@@ -1186,7 +1386,8 @@ function insertHumanRequest(context: DbContext, input: CreateHumanRequestInput):
       kind: input.kind,
       status: input.status ?? "pending",
       blockedKey: input.blockedKey,
-      questionArtifactPath: input.questionArtifactPath
+      questionArtifactPath: input.questionArtifactPath,
+      approvalSnapshot: input.approvalSnapshot
     },
     artifactRefs: input.questionArtifactPath ? [input.questionArtifactPath] : undefined
   });
@@ -1299,6 +1500,58 @@ function insertWorkflowRun(context: DbContext, input: CreateWorkflowRunInput): W
   return requireWorkflowRun(context, id);
 }
 
+function insertPullRequest(context: DbContext, input: CreatePullRequestInput): PullRequestRecord {
+  const id = input.id ?? randomUUID();
+  context.db
+    .prepare(
+      `INSERT INTO pull_requests (
+         id, project_id, task_id, attempt_id, provider_kind, external_id, url, status,
+         head_branch, base_branch, head_sha, base_sha, title, body_artifact_path,
+         review_status, review_summary, validation_run_id, merge_strategy, merged_at
+       )
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      id,
+      input.projectId,
+      input.taskId,
+      input.attemptId ?? null,
+      input.providerKind,
+      input.externalId ?? null,
+      input.url ?? null,
+      input.status ?? "open",
+      input.headBranch ?? null,
+      input.baseBranch ?? null,
+      input.headSha ?? null,
+      input.baseSha ?? null,
+      input.title ?? null,
+      input.bodyArtifactPath ?? null,
+      input.reviewStatus ?? "unknown",
+      input.reviewSummary ?? null,
+      input.validationRunId ?? null,
+      input.mergeStrategy ?? null,
+      input.mergedAt ?? null
+    );
+
+  appendEvent(context, {
+    type: "pr.record_created",
+    summary: `PR/MR record created: ${id}`,
+    projectId: input.projectId,
+    taskId: input.taskId,
+    attemptId: input.attemptId,
+    payload: {
+      providerKind: input.providerKind,
+      externalId: input.externalId,
+      url: input.url,
+      status: input.status ?? "open",
+      headBranch: input.headBranch,
+      baseBranch: input.baseBranch
+    }
+  });
+
+  return requirePullRequest(context, id);
+}
+
 function requireProject(context: DbContext, id: string): ProjectRecord {
   const row = context.db.prepare("SELECT * FROM projects WHERE id = ?").get(id);
   if (!row) {
@@ -1361,6 +1614,14 @@ function requireWorkflowRun(context: DbContext, id: string): WorkflowRunRecord {
     throw new Error(`workflow run not found: ${id}`);
   }
   return mapWorkflowRunRow(row);
+}
+
+function requirePullRequest(context: DbContext, id: string): PullRequestRecord {
+  const row = context.db.prepare("SELECT * FROM pull_requests WHERE id = ?").get(id);
+  if (!row) {
+    throw new Error(`pull request not found: ${id}`);
+  }
+  return mapPullRequestRow(row);
 }
 
 function requireArtifact(context: DbContext, id: string): ArtifactRecord {
@@ -1533,6 +1794,13 @@ function mapHumanRequestRow(row: unknown): HumanRequestRecord {
     status: string;
     question_artifact_path: string | null;
     answer_artifact_path: string | null;
+    approval_pr_head_sha?: string | null;
+    approval_pr_base_sha?: string | null;
+    approval_validation_run_id?: string | null;
+    approval_merge_strategy?: string | null;
+    approval_valid?: number | null;
+    approved_by?: string | null;
+    approved_at?: string | null;
     state_version: number;
   };
   return {
@@ -1546,6 +1814,13 @@ function mapHumanRequestRow(row: unknown): HumanRequestRecord {
     status: value.status,
     questionArtifactPath: value.question_artifact_path ?? undefined,
     answerArtifactPath: value.answer_artifact_path ?? undefined,
+    approvalPrHeadSha: value.approval_pr_head_sha ?? undefined,
+    approvalPrBaseSha: value.approval_pr_base_sha ?? undefined,
+    approvalValidationRunId: value.approval_validation_run_id ?? undefined,
+    approvalMergeStrategy: value.approval_merge_strategy ?? undefined,
+    approvalValid: value.approval_valid !== 0,
+    approvedBy: value.approved_by ?? undefined,
+    approvedAt: value.approved_at ?? undefined,
     stateVersion: value.state_version
   };
 }
@@ -1635,6 +1910,53 @@ function mapWorkflowRunRow(row: unknown): WorkflowRunRecord {
   };
 }
 
+function mapPullRequestRow(row: unknown): PullRequestRecord {
+  const value = row as {
+    id: string;
+    project_id: string;
+    task_id: string;
+    attempt_id: string | null;
+    provider_kind: string;
+    external_id: string | null;
+    url: string | null;
+    status: string;
+    head_branch: string | null;
+    base_branch: string | null;
+    head_sha: string | null;
+    base_sha: string | null;
+    title: string | null;
+    body_artifact_path: string | null;
+    review_status: string | null;
+    review_summary: string | null;
+    validation_run_id: string | null;
+    merge_strategy: string | null;
+    merged_at: string | null;
+    state_version: number;
+  };
+  return {
+    id: value.id,
+    projectId: value.project_id,
+    taskId: value.task_id,
+    attemptId: value.attempt_id ?? undefined,
+    providerKind: value.provider_kind,
+    externalId: value.external_id ?? undefined,
+    url: value.url ?? undefined,
+    status: value.status,
+    headBranch: value.head_branch ?? undefined,
+    baseBranch: value.base_branch ?? undefined,
+    headSha: value.head_sha ?? undefined,
+    baseSha: value.base_sha ?? undefined,
+    title: value.title ?? undefined,
+    bodyArtifactPath: value.body_artifact_path ?? undefined,
+    reviewStatus: value.review_status ?? "unknown",
+    reviewSummary: value.review_summary ?? undefined,
+    validationRunId: value.validation_run_id ?? undefined,
+    mergeStrategy: value.merge_strategy ?? undefined,
+    mergedAt: value.merged_at ?? undefined,
+    stateVersion: value.state_version
+  };
+}
+
 function mapArtifactRow(row: unknown): ArtifactRecord {
   const value = row as {
     id: string;
@@ -1664,6 +1986,8 @@ function mapEventRow(row: unknown): EventRecord {
     project_id: string | null;
     task_id: string | null;
     agent_session_id: string | null;
+    pr_id: string | null;
+    human_request_id: string | null;
     severity: string;
     payload_json: string | null;
     artifact_refs_json: string | null;
@@ -1676,6 +2000,8 @@ function mapEventRow(row: unknown): EventRecord {
     projectId: value.project_id ?? undefined,
     taskId: value.task_id ?? undefined,
     agentSessionId: value.agent_session_id ?? undefined,
+    prId: value.pr_id ?? undefined,
+    humanRequestId: value.human_request_id ?? undefined,
     severity: value.severity,
     payload: value.payload_json ? JSON.parse(value.payload_json) : undefined,
     artifactRefs: value.artifact_refs_json ? (JSON.parse(value.artifact_refs_json) as string[]) : [],

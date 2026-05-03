@@ -26,6 +26,15 @@ import {
   type StartWorkflowRunInput,
   type WorkflowRunResult
 } from "./workflow-protocol-adapter.js";
+import {
+  createPullRequestRuntime,
+  inspectPullRequestReviewRuntime,
+  mergeAfterApprovalRuntime,
+  requestMergeApprovalRuntime,
+  updatePullRequestRuntime,
+  type PullRequestProvider,
+  type PullRequestProviderRunner
+} from "./pr-mr-provider.js";
 
 const MAX_ARTIFACT_BYTES = 256 * 1024;
 
@@ -36,7 +45,12 @@ export type CoordinatorAgentToolName =
   | "create_workspace"
   | "start_workflow_run"
   | "inspect_workflow_run"
-  | "ask_human";
+  | "ask_human"
+  | "create_pr"
+  | "update_pr"
+  | "inspect_review"
+  | "request_merge_approval"
+  | "merge_after_approval";
 
 export type CoordinatorAgentToolArgs = Record<string, string | undefined>;
 
@@ -49,6 +63,10 @@ export type ExecuteCoordinatorAgentToolInput = {
   workspace?: Pick<CreateAttemptWorkspaceInput, "worker" | "ttlMs" | "now" | "gitRunner">;
   workflowStart?: Pick<StartWorkflowRunInput, "ttlMs" | "now" | "runner">;
   workflowInspect?: Pick<InspectWorkflowRunInput, "runner">;
+  pullRequest?: {
+    provider?: PullRequestProvider;
+    providerRunner?: PullRequestProviderRunner;
+  };
 };
 
 export type CoordinatorAgentToolResult = {
@@ -67,6 +85,7 @@ export type SanitizedToolOutput = {
   artifactPath?: string;
   reused?: boolean;
   handoffKind?: string;
+  url?: string;
   nextStep: string;
 };
 
@@ -158,6 +177,16 @@ function executeVisibleTool(
       return inspectWorkflowRunFromTool(context, surface, input);
     case "ask_human":
       return askHumanFromTool(context, surface, input, artifactRefs);
+    case "create_pr":
+      return createPullRequestFromTool(context, input, artifactRefs);
+    case "update_pr":
+      return updatePullRequestFromTool(context, input, artifactRefs);
+    case "inspect_review":
+      return inspectReviewFromTool(context, input);
+    case "request_merge_approval":
+      return requestMergeApprovalFromTool(context, input, artifactRefs);
+    case "merge_after_approval":
+      return mergeAfterApprovalFromTool(context, input);
     default:
       throw new CoordinatorAgentToolError(`不支持的 agent tool：${input.toolName}`, "invalid_argument");
   }
@@ -323,6 +352,84 @@ function askHumanFromTool(
     status: request.status,
     questionArtifactPath: artifact.relativePath
   };
+}
+
+function createPullRequestFromTool(
+  context: DbContext,
+  input: ExecuteCoordinatorAgentToolInput & { args: CoordinatorAgentToolArgs; actor: string },
+  artifactRefs: string[]
+) {
+  const artifact = requireArg(input.args, "body-artifact");
+  readToolArtifact(buildTaskSurfaceFromDb(context, input.taskId), artifact, artifactRefs);
+  return createPullRequestRuntime(context, {
+    taskId: input.taskId,
+    title: normalizeShortString(requireArg(input.args, "title"), "title"),
+    bodyArtifact: artifact,
+    actor: input.actor,
+    provider: input.pullRequest?.provider,
+    providerRunner: input.pullRequest?.providerRunner
+  });
+}
+
+function updatePullRequestFromTool(
+  context: DbContext,
+  input: ExecuteCoordinatorAgentToolInput & { args: CoordinatorAgentToolArgs; actor: string },
+  artifactRefs: string[]
+) {
+  const bodyArtifact = input.args["body-artifact"];
+  if (bodyArtifact) {
+    readToolArtifact(buildTaskSurfaceFromDb(context, input.taskId), bodyArtifact, artifactRefs);
+  }
+  return updatePullRequestRuntime(context, {
+    taskId: input.taskId,
+    prId: requireArg(input.args, "pr"),
+    title: input.args.title ? normalizeShortString(input.args.title, "title") : undefined,
+    bodyArtifact,
+    actor: input.actor,
+    provider: input.pullRequest?.provider,
+    providerRunner: input.pullRequest?.providerRunner
+  });
+}
+
+function inspectReviewFromTool(
+  context: DbContext,
+  input: ExecuteCoordinatorAgentToolInput & { args: CoordinatorAgentToolArgs; actor: string }
+) {
+  return inspectPullRequestReviewRuntime(context, {
+    taskId: input.taskId,
+    prId: requireArg(input.args, "pr"),
+    actor: input.actor,
+    provider: input.pullRequest?.provider,
+    providerRunner: input.pullRequest?.providerRunner
+  });
+}
+
+function requestMergeApprovalFromTool(
+  context: DbContext,
+  input: ExecuteCoordinatorAgentToolInput & { args: CoordinatorAgentToolArgs; actor: string },
+  artifactRefs: string[]
+) {
+  const artifact = requireArg(input.args, "artifact");
+  readToolArtifact(buildTaskSurfaceFromDb(context, input.taskId), artifact, artifactRefs);
+  return requestMergeApprovalRuntime(context, {
+    taskId: input.taskId,
+    prId: requireArg(input.args, "pr"),
+    bodyArtifact: artifact,
+    actor: input.actor
+  });
+}
+
+function mergeAfterApprovalFromTool(
+  context: DbContext,
+  input: ExecuteCoordinatorAgentToolInput & { args: CoordinatorAgentToolArgs; actor: string }
+) {
+  return mergeAfterApprovalRuntime(context, {
+    taskId: input.taskId,
+    prId: requireArg(input.args, "pr"),
+    actor: input.actor,
+    provider: input.pullRequest?.provider,
+    providerRunner: input.pullRequest?.providerRunner
+  });
 }
 
 function assertToolVisible(surface: SurfaceEnvelope, toolName: string): void {
@@ -508,6 +615,63 @@ function sanitizeToolOutput(toolName: string, result: unknown): SanitizedToolOut
       status: value.status,
       artifactPath: value.questionArtifactPath,
       nextStep: "等待 human answer；等待期间不要继续执行副作用工具。"
+    };
+  }
+  if (toolName === "create_pr") {
+    const value = result as {
+      pullRequest: { id: string; status: string; url?: string };
+      reused: boolean;
+    };
+    return {
+      kind: "pull_request",
+      id: value.pullRequest.id,
+      status: value.pullRequest.status,
+      url: value.pullRequest.url,
+      reused: value.reused,
+      nextStep: "重新读取 surface，检查 PR/MR review 状态。"
+    };
+  }
+  if (toolName === "update_pr") {
+    const value = result as { pullRequest: { id: string; status: string; url?: string } };
+    return {
+      kind: "pull_request",
+      id: value.pullRequest.id,
+      status: value.pullRequest.status,
+      url: value.pullRequest.url,
+      nextStep: "重新读取 surface，继续 inspect_review 或请求人类确认。"
+    };
+  }
+  if (toolName === "inspect_review") {
+    const value = result as {
+      pullRequest: { id: string; status: string; reviewStatus?: string; url?: string };
+      review: { reviewStatus: string };
+    };
+    return {
+      kind: "pull_request_review",
+      id: value.pullRequest.id,
+      status: value.review.reviewStatus,
+      url: value.pullRequest.url,
+      nextStep: "重新读取 surface；若 review clean 且 validation snapshot 有效，可请求 merge approval。"
+    };
+  }
+  if (toolName === "request_merge_approval") {
+    const value = result as { humanRequest: { id: string; status: string; questionArtifactPath?: string } };
+    return {
+      kind: "merge_approval_request",
+      id: value.humanRequest.id,
+      status: value.humanRequest.status,
+      artifactPath: value.humanRequest.questionArtifactPath,
+      nextStep: "等待 operator 显式 approve/reject；agent 不能自行批准 merge。"
+    };
+  }
+  if (toolName === "merge_after_approval") {
+    const value = result as { pullRequest: { id: string; status: string; url?: string } };
+    return {
+      kind: "pull_request_merge",
+      id: value.pullRequest.id,
+      status: value.pullRequest.status,
+      url: value.pullRequest.url,
+      nextStep: "重新读取 surface，确认 task 是否 completed。"
     };
   }
   return {

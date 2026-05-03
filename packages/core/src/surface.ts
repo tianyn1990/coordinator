@@ -216,6 +216,9 @@ export type PullRequestSnapshot = {
   baseBranch?: string;
   headSha?: string;
   baseSha?: string;
+  reviewStatus?: string;
+  reviewSummary?: string;
+  validationRunId?: string;
   url?: string;
 };
 
@@ -227,6 +230,9 @@ type PullRequestSnapshotJson = {
   base_branch?: string;
   head_sha?: string;
   base_sha?: string;
+  review_status?: string;
+  review_summary?: string;
+  validation_run_id?: string;
   url?: string;
 };
 
@@ -389,6 +395,8 @@ export function buildTaskSurfaceFromDb(context: DbContext, taskId: string): Surf
   const recentAgentSessions = findRecentAgentSessionsForTask(context, task.id);
   const executionPlan = findLatestExecutionPlanForTask(context, task.id);
   const humanRequests = findHumanRequestsForTask(context, task.id);
+  const pullRequest = latestAttempt ? findLatestPullRequestForAttempt(context, latestAttempt.id) : undefined;
+  const mergeApproval = pullRequest ? findLatestMergeApprovalForPr(context, pullRequest.id) : undefined;
 
   return buildCoordinatorSurface({
     surfaceKind: deriveSurfaceKind(task),
@@ -405,6 +413,7 @@ export function buildTaskSurfaceFromDb(context: DbContext, taskId: string): Surf
       taskStatus: task.status,
       attemptStatus: latestAttempt?.status,
       workflowRunStatus: activeWorkflowRun?.status,
+      pullRequestStatus: pullRequest?.status,
       humanRequestStatus: humanRequests.find((request) => request.status === "pending")?.status
     },
     executionPlan: executionPlan
@@ -439,6 +448,34 @@ export function buildTaskSurfaceFromDb(context: DbContext, taskId: string): Surf
       role: session.role,
       status: session.status
     })),
+    pullRequest: pullRequest
+      ? {
+          id: pullRequest.id,
+          providerKind: pullRequest.provider_kind,
+          status: pullRequest.status,
+          headBranch: pullRequest.head_branch ?? undefined,
+          baseBranch: pullRequest.base_branch ?? undefined,
+          headSha: pullRequest.head_sha ?? undefined,
+          baseSha: pullRequest.base_sha ?? undefined,
+          reviewStatus: pullRequest.review_status ?? undefined,
+          reviewSummary: pullRequest.review_summary ?? undefined,
+          validationRunId: pullRequest.validation_run_id ?? undefined,
+          url: pullRequest.url ?? undefined
+        }
+      : undefined,
+    mergeApproval: mergeApproval
+      ? {
+          prId: mergeApproval.pr_id,
+          status: mergeApproval.status as "approved" | "pending" | "rejected",
+          valid: mergeApproval.approval_valid !== 0 && isMergeApprovalSnapshotMatching(pullRequest, mergeApproval),
+          headSha: mergeApproval.approval_pr_head_sha ?? undefined,
+          baseSha: mergeApproval.approval_pr_base_sha ?? undefined,
+          validationRunId: mergeApproval.approval_validation_run_id ?? undefined,
+          mergeStrategy: mergeApproval.approval_merge_strategy ?? undefined,
+          approvedBy: mergeApproval.approved_by ?? undefined,
+          approvedAt: mergeApproval.approved_at ?? undefined
+        }
+      : undefined,
     humanRequests: humanRequests.map((request) => ({
       id: request.id,
       kind: request.kind,
@@ -527,6 +564,17 @@ export function renderSurfaceMarkdown(
     lines.push(`- agent_session: 当前没有 recent agent session。`);
   }
   lines.push(``);
+  if (json.pull_request) {
+    lines.push(`## PR/MR`);
+    lines.push(`- pr_id: ${json.pull_request.id ?? "unknown"}`);
+    lines.push(`- status: ${json.pull_request.status ?? "unknown"}`);
+    if (json.pull_request.url) lines.push(`- url: ${json.pull_request.url}`);
+    if (json.pull_request.head_branch) lines.push(`- head_branch: ${json.pull_request.head_branch}`);
+    if (json.pull_request.base_branch) lines.push(`- base_branch: ${json.pull_request.base_branch}`);
+    if (json.pull_request.review_status) lines.push(`- review_status: ${json.pull_request.review_status}`);
+    if (json.pull_request.validation_run_id) lines.push(`- validation_run_id: ${json.pull_request.validation_run_id}`);
+    lines.push(``);
+  }
   if (json.merge_approval) {
     lines.push(`## Merge Approval`);
     lines.push(`- pr_id: ${json.merge_approval.pr_id}`);
@@ -583,7 +631,20 @@ function deriveVisibleTools(snapshot: SurfaceSnapshot): SurfaceToolJson[] {
   }
 
   if (snapshot.surfaceKind === "merge_waiting") {
-    return [tool("ask_human", "PR/MR 与 merge tools 尚未在当前 executor 落地；需要人类处理 merge 等待。")];
+    if (snapshot.pullRequest && isUsableMergeApproval(snapshot.pullRequest, snapshot.mergeApproval)) {
+      return [
+        tool("merge_after_approval", "在有效 human approval snapshot 后执行 squash merge。"),
+        inspectTool("inspect_review", "重新检查 PR/MR review 状态。")
+      ];
+    }
+    if (snapshot.pullRequest) {
+      return [
+        tool("request_merge_approval", "为当前 PR/MR 请求显式 merge approval。"),
+        inspectTool("inspect_review", "检查 PR/MR review 状态。"),
+        tool("ask_human", "在 approval 信息不足时向人类提问。")
+      ];
+    }
+    return [tool("ask_human", "缺少 PR/MR snapshot，不能进入 merge。")];
   }
 
   if (snapshot.surfaceKind === "review" && isReviewFeedback(snapshot)) {
@@ -594,7 +655,19 @@ function deriveVisibleTools(snapshot: SurfaceSnapshot): SurfaceToolJson[] {
   }
 
   if (hasOpenPullRequest(snapshot)) {
-    return [tool("ask_human", "PR/MR tools 尚未在当前 executor 落地；需要人类处理 review 或 PR 更新。")];
+    if (snapshot.pullRequest?.reviewStatus === "clean" || snapshot.pullRequest?.reviewStatus === "APPROVED") {
+      return [
+        inspectTool("inspect_review", "检查 PR/MR review 状态。"),
+        tool("update_pr", "更新 PR/MR 标题或正文。"),
+        tool("request_merge_approval", "请求显式 merge approval。"),
+        tool("ask_human", "在 review 结论不明确时向人类提问。")
+      ];
+    }
+    return [
+      inspectTool("inspect_review", "检查 PR/MR review 状态。"),
+      tool("update_pr", "更新 PR/MR 标题或正文。"),
+      tool("ask_human", "在 review 结论不明确时向人类提问。")
+    ];
   }
 
   if (!snapshot.executionPlan) {
@@ -630,8 +703,9 @@ function deriveVisibleTools(snapshot: SurfaceSnapshot): SurfaceToolJson[] {
   const handoffRun = snapshot.workflowRuns.find((run) => run.handoffKind);
   if (handoffRun?.handoffKind === "pr_ready") {
     return [
+      tool("create_pr", "根据 workflow handoff 创建 PR/MR。"),
       tool("revise_execution_plan", "在计划需要调整时更新 execution plan。"),
-      tool("ask_human", "PR/MR provider 尚未在当前 executor 落地；需要人类确认后续处理。")
+      tool("ask_human", "PR/MR 信息不足时向人类提问。")
     ];
   }
   if (handoffRun?.handoffKind === "manual_handoff" || handoffRun?.handoffKind === "blocked") {
@@ -771,7 +845,7 @@ function inspectTool(name: string, usage: string): SurfaceToolJson {
   return {
     name,
     usage,
-    args: ["--run <workflow-run-id>"],
+    args: toolArgs(name),
     side_effect: false,
     success_state: "no state transition",
     recovery: "re-read current surface if inspection result is stale."
@@ -810,6 +884,25 @@ function hasOpenPullRequest(snapshot: SurfaceSnapshot): boolean {
 
 function isReviewFeedback(snapshot: SurfaceSnapshot): boolean {
   return snapshot.currentState.blocker === "review_feedback";
+}
+
+function isUsableMergeApproval(
+  pr: PullRequestSnapshot,
+  approval: MergeApprovalSnapshot | undefined
+): approval is MergeApprovalSnapshot {
+  if (!approval || approval.status !== "approved" || !approval.valid) {
+    return false;
+  }
+  if (approval.prId !== pr.id) {
+    return false;
+  }
+  return (
+    Boolean((pr.status === "open" || pr.status === "review" || pr.status === "merge_waiting") && (pr.reviewStatus === "clean" || pr.reviewStatus === "approved")) &&
+    Boolean(approval.headSha && pr.headSha && approval.headSha === pr.headSha) &&
+    Boolean(approval.baseSha && pr.baseSha && approval.baseSha === pr.baseSha) &&
+    Boolean(approval.validationRunId && pr.validationRunId && approval.validationRunId === pr.validationRunId) &&
+    Boolean(approval.mergeStrategy && approval.mergeStrategy === "squash")
+  );
 }
 
 function toMergeApprovalJson(approval: MergeApprovalSnapshot): MergeApprovalSnapshotJson {
@@ -978,6 +1071,115 @@ function findHumanRequestsForTask(
     }>;
 }
 
+function findLatestPullRequestForAttempt(
+  context: DbContext,
+  attemptId: string
+):
+  | {
+      id: string;
+      provider_kind: string;
+      status: string;
+      head_branch: string | null;
+      base_branch: string | null;
+      head_sha: string | null;
+      base_sha: string | null;
+      review_status: string | null;
+      review_summary: string | null;
+      validation_run_id: string | null;
+      url: string | null;
+    }
+  | undefined {
+  return context.db
+    .prepare(
+      `SELECT id, provider_kind, status, head_branch, base_branch, head_sha, base_sha,
+              review_status, review_summary, validation_run_id, url
+       FROM pull_requests
+       WHERE attempt_id = ?
+       ORDER BY created_at DESC, id DESC
+       LIMIT 1`
+    )
+    .get(attemptId) as
+    | {
+        id: string;
+        provider_kind: string;
+        status: string;
+        head_branch: string | null;
+        base_branch: string | null;
+        head_sha: string | null;
+        base_sha: string | null;
+        review_status: string | null;
+        review_summary: string | null;
+        validation_run_id: string | null;
+        url: string | null;
+      }
+    | undefined;
+}
+
+function findLatestMergeApprovalForPr(
+  context: DbContext,
+  prId: string
+):
+  | {
+      pr_id: string;
+      status: string;
+      approval_pr_head_sha: string | null;
+      approval_pr_base_sha: string | null;
+      approval_validation_run_id: string | null;
+      approval_merge_strategy: string | null;
+      approval_valid: number;
+      approved_by: string | null;
+      approved_at: string | null;
+    }
+  | undefined {
+  return context.db
+    .prepare(
+      `SELECT pr_id, status, approval_pr_head_sha, approval_pr_base_sha,
+              approval_validation_run_id, approval_merge_strategy, approval_valid,
+              approved_by, approved_at
+       FROM human_requests
+       WHERE pr_id = ? AND kind = 'merge_approval' AND status IN ('pending', 'approved', 'rejected')
+       ORDER BY updated_at DESC, created_at DESC, id DESC
+       LIMIT 1`
+    )
+    .get(prId) as
+    | {
+        pr_id: string;
+        status: string;
+        approval_pr_head_sha: string | null;
+        approval_pr_base_sha: string | null;
+        approval_validation_run_id: string | null;
+        approval_merge_strategy: string | null;
+        approval_valid: number;
+        approved_by: string | null;
+        approved_at: string | null;
+      }
+    | undefined;
+}
+
+function isMergeApprovalSnapshotMatching(
+  pr:
+    | {
+        head_sha: string | null;
+        base_sha: string | null;
+        validation_run_id: string | null;
+      }
+    | undefined,
+  approval: {
+    approval_pr_head_sha: string | null;
+    approval_pr_base_sha: string | null;
+    approval_validation_run_id: string | null;
+  }
+): boolean {
+  if (!pr) return false;
+  return (
+    Boolean(approval.approval_pr_head_sha && pr.head_sha) &&
+    Boolean(approval.approval_pr_base_sha && pr.base_sha) &&
+    (!approval.approval_pr_head_sha || !pr.head_sha || approval.approval_pr_head_sha === pr.head_sha) &&
+    (!approval.approval_pr_base_sha || !pr.base_sha || approval.approval_pr_base_sha === pr.base_sha) &&
+    (!approval.approval_validation_run_id || !pr.validation_run_id || approval.approval_validation_run_id === pr.validation_run_id)
+  );
+}
+
 function resolveTaskLocalArtifactRoot(project: ProjectRecord, task: TaskRecord): string {
   // planning 阶段还没有 workspace，但 agent 仍需要可写 artifact root 来提交计划和问题。
   const root = project.workspaceRoot ?? join(homedir(), ".coordinator", "workspaces");
@@ -1065,6 +1267,9 @@ function toPullRequestJson(pr: PullRequestSnapshot): PullRequestSnapshotJson {
     base_branch: pr.baseBranch,
     head_sha: pr.headSha,
     base_sha: pr.baseSha,
+    review_status: pr.reviewStatus,
+    review_summary: pr.reviewSummary,
+    validation_run_id: pr.validationRunId,
     url: pr.url
   };
 }
