@@ -14,17 +14,19 @@ describe("runMigrations", () => {
 
     expect(first.applied).toEqual([
       { id: "0001_metadata.sql", applied: true },
-      { id: "0002_core_data_model.sql", applied: true }
+      { id: "0002_core_data_model.sql", applied: true },
+      { id: "0003_project_registry.sql", applied: true }
     ]);
     expect(second.applied).toEqual([
       { id: "0001_metadata.sql", applied: false },
-      { id: "0002_core_data_model.sql", applied: false }
+      { id: "0002_core_data_model.sql", applied: false },
+      { id: "0003_project_registry.sql", applied: false }
     ]);
 
     const db = new DatabaseSync(databasePath);
     try {
       const row = db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get() as { count: number };
-      expect(row.count).toBe(2);
+      expect(row.count).toBe(3);
     } finally {
       db.close();
     }

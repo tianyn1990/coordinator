@@ -25,12 +25,32 @@ export type CreateProjectInput = {
   repoPath?: string;
   repoUrl?: string;
   gitProviderKind?: string;
+  gitProviderHost?: string;
   defaultBranch?: string;
+  prProviderKind?: string;
+  workspaceRoot?: string;
+  workflowLauncher?: string;
+  outerAgentDefaultProvider?: string;
+  innerAgentDefaultProvider?: string;
+  registrationStatus?: string;
+  registryNotes?: unknown;
 };
 
 export type ProjectRecord = {
   id: string;
   name: string;
+  repoPath?: string;
+  repoUrl?: string;
+  gitProviderKind?: string;
+  gitProviderHost?: string;
+  defaultBranch?: string;
+  prProviderKind?: string;
+  workspaceRoot?: string;
+  workflowLauncher?: string;
+  outerAgentDefaultProvider?: string;
+  innerAgentDefaultProvider?: string;
+  registrationStatus?: string;
+  registryNotes?: unknown;
   stateVersion: number;
 };
 
@@ -213,6 +233,18 @@ export function createProject(context: DbContext, input: CreateProjectInput): Pr
   return withTransaction(context, () => insertProject(context, input));
 }
 
+export function getProject(context: DbContext, id: string): ProjectRecord | undefined {
+  const row = context.db.prepare("SELECT * FROM projects WHERE id = ?").get(id);
+  return row ? mapProjectRow(row) : undefined;
+}
+
+export function listProjects(context: DbContext): ProjectRecord[] {
+  return context.db
+    .prepare("SELECT * FROM projects ORDER BY created_at ASC, id ASC")
+    .all()
+    .map(mapProjectRow);
+}
+
 export function createTask(context: DbContext, input: CreateTaskInput): TaskRecord {
   return withTransaction(context, () => insertTask(context, input));
 }
@@ -380,8 +412,12 @@ function insertProject(context: DbContext, input: CreateProjectInput): ProjectRe
   const id = input.id ?? randomUUID();
   context.db
     .prepare(
-      `INSERT INTO projects (id, name, repo_path, repo_url, git_provider_kind, default_branch)
-       VALUES (?, ?, ?, ?, ?, ?)`
+      `INSERT INTO projects (
+         id, name, repo_path, repo_url, git_provider_kind, git_provider_host, default_branch,
+         pr_provider_kind, workspace_root, workflow_launcher, outer_agent_default_provider,
+         inner_agent_default_provider, registration_status, registry_notes_json
+       )
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       id,
@@ -389,7 +425,15 @@ function insertProject(context: DbContext, input: CreateProjectInput): ProjectRe
       input.repoPath ?? null,
       input.repoUrl ?? null,
       input.gitProviderKind ?? null,
-      input.defaultBranch ?? null
+      input.gitProviderHost ?? null,
+      input.defaultBranch ?? null,
+      input.prProviderKind ?? null,
+      input.workspaceRoot ?? null,
+      input.workflowLauncher ?? null,
+      input.outerAgentDefaultProvider ?? null,
+      input.innerAgentDefaultProvider ?? null,
+      input.registrationStatus ?? "registered",
+      input.registryNotes === undefined ? null : JSON.stringify(input.registryNotes)
     );
 
   appendEvent(context, {
@@ -428,7 +472,7 @@ function insertTask(context: DbContext, input: CreateTaskInput): TaskRecord {
 }
 
 function requireProject(context: DbContext, id: string): ProjectRecord {
-  const row = context.db.prepare("SELECT id, name, state_version FROM projects WHERE id = ?").get(id);
+  const row = context.db.prepare("SELECT * FROM projects WHERE id = ?").get(id);
   if (!row) {
     throw new Error(`project not found: ${id}`);
   }
@@ -496,8 +540,40 @@ function requireLock(context: DbContext, resourceKind: string, resourceId: strin
 }
 
 function mapProjectRow(row: unknown): ProjectRecord {
-  const value = row as { id: string; name: string; state_version: number };
-  return { id: value.id, name: value.name, stateVersion: value.state_version };
+  const value = row as {
+    id: string;
+    name: string;
+    repo_path: string | null;
+    repo_url: string | null;
+    git_provider_kind: string | null;
+    git_provider_host: string | null;
+    default_branch: string | null;
+    pr_provider_kind: string | null;
+    workspace_root: string | null;
+    workflow_launcher: string | null;
+    outer_agent_default_provider: string | null;
+    inner_agent_default_provider: string | null;
+    registration_status: string | null;
+    registry_notes_json: string | null;
+    state_version: number;
+  };
+  return {
+    id: value.id,
+    name: value.name,
+    repoPath: value.repo_path ?? undefined,
+    repoUrl: value.repo_url ?? undefined,
+    gitProviderKind: value.git_provider_kind ?? undefined,
+    gitProviderHost: value.git_provider_host ?? undefined,
+    defaultBranch: value.default_branch ?? undefined,
+    prProviderKind: value.pr_provider_kind ?? undefined,
+    workspaceRoot: value.workspace_root ?? undefined,
+    workflowLauncher: value.workflow_launcher ?? undefined,
+    outerAgentDefaultProvider: value.outer_agent_default_provider ?? undefined,
+    innerAgentDefaultProvider: value.inner_agent_default_provider ?? undefined,
+    registrationStatus: value.registration_status ?? undefined,
+    registryNotes: value.registry_notes_json ? JSON.parse(value.registry_notes_json) : undefined,
+    stateVersion: value.state_version
+  };
 }
 
 function mapTaskRow(row: unknown): TaskRecord {

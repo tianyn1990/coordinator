@@ -1,4 +1,5 @@
 import { listTaskEvents, runMigrations, withDatabase } from "@coordinator/db";
+import { ProjectRegistryInputError, registerProject, viewProjectRegistry } from "@coordinator/core";
 import { getHealthStatus } from "@coordinator/shared";
 
 export type CliResult = {
@@ -59,10 +60,79 @@ export function runCli(args: string[]): CliResult {
     };
   }
 
+  if (command === "register") {
+    const databasePathResult = readRequiredOption(rest, "--db");
+    const repoPathResult = readRequiredOption(rest, "--repo");
+    const confirmedDefaultBranchResult = readOption(rest, "--default-branch");
+    const providerOptionResult = readOption(rest, "--provider");
+    const error =
+      databasePathResult.error ?? repoPathResult.error ?? confirmedDefaultBranchResult.error ?? providerOptionResult.error;
+    if (error) {
+      return { exitCode: 1, stdout: "", stderr: `${error}\n` };
+    }
+
+    const databasePath = databasePathResult.value;
+    const repoPath = repoPathResult.value;
+    const confirmedDefaultBranch = confirmedDefaultBranchResult.value;
+    const providerResult = parseProvider(providerOptionResult.value ?? undefined);
+    if (!databasePath || !repoPath) {
+      return { exitCode: 1, stdout: "", stderr: "register 参数不完整\n" };
+    }
+    if (providerResult.error) {
+      return { exitCode: 1, stdout: "", stderr: `${providerResult.error}\n` };
+    }
+
+    try {
+      const result = withDatabase(databasePath, (context) =>
+        registerProject(context, {
+          repoPath,
+          name: readOption(rest, "--name").value ?? undefined,
+          providerOverride: providerResult.value,
+          confirmedDefaultBranch: confirmedDefaultBranch ?? undefined,
+          workflowLauncher: readOption(rest, "--workflow-launcher").value ?? undefined,
+          outerAgentDefaultProvider: readOption(rest, "--outer-agent-provider").value ?? undefined,
+          innerAgentDefaultProvider: readOption(rest, "--inner-agent-provider").value ?? undefined,
+          workspaceRoot: readOption(rest, "--workspace-root").value ?? undefined
+        })
+      );
+
+      return {
+        exitCode: 0,
+        stdout: `${JSON.stringify(result)}\n`,
+        stderr: ""
+      };
+    } catch (error) {
+      if (error instanceof ProjectRegistryInputError) {
+        return { exitCode: 1, stdout: "", stderr: `${error.message}\n` };
+      }
+      throw error;
+    }
+  }
+
+  if (command === "projects") {
+    const databasePathResult = readRequiredOption(rest, "--db");
+    if (databasePathResult.error) {
+      return { exitCode: 1, stdout: "", stderr: `${databasePathResult.error}\n` };
+    }
+    const databasePath = databasePathResult.value;
+    if (!databasePath) {
+      return { exitCode: 1, stdout: "", stderr: "projects 参数不完整\n" };
+    }
+    const projectId = readOption(rest, "--project").value ?? undefined;
+    const projects = withDatabase(databasePath, (context) =>
+      viewProjectRegistry(context, projectId)
+    );
+    return {
+      exitCode: 0,
+      stdout: `${JSON.stringify({ projects })}\n`,
+      stderr: ""
+    };
+  }
+
   return {
     exitCode: 1,
     stdout: "",
-    stderr: `未知命令：${command}\n可用命令：health, migrate --db <path>, timeline --db <path> --task <task-id>\n`
+    stderr: `未知命令：${command}\n可用命令：health, migrate --db <path>, timeline --db <path> --task <task-id>, register --db <path> --repo <path>, projects --db <path>\n`
   };
 }
 
@@ -87,4 +157,14 @@ function readRequiredOption(args: string[], name: string): { value: string; erro
     return { error: `缺少 ${name} 参数` };
   }
   return { value: result.value };
+}
+
+function parseProvider(value?: string): { value?: "github" | "gitlab"; error?: string } {
+  if (value === undefined) {
+    return {};
+  }
+  if (value === "github" || value === "gitlab") {
+    return { value };
+  }
+  return { error: `不支持的 provider：${value}` };
 }

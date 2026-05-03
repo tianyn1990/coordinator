@@ -44,4 +44,63 @@ describe("API health", () => {
       }
     }
   });
+
+  it("可以查看 project registry", async () => {
+    const databasePath = join(mkdtempSync(join(tmpdir(), "coordinator-api-projects-")), "api.sqlite");
+    runMigrations(databasePath);
+    withDatabase(databasePath, (context) => {
+      createProject(context, {
+        id: "project-api",
+        name: "coordinator",
+        defaultBranch: "main",
+        workflowLauncher: "workflow"
+      });
+    });
+
+    const previous = process.env.COORDINATOR_DB_PATH;
+    process.env.COORDINATOR_DB_PATH = databasePath;
+    try {
+      const server = buildServer();
+      const response = await server.inject({ method: "GET", url: "/projects" });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({
+        projects: [{ id: "project-api", defaultBranch: "main" }]
+      });
+    } finally {
+      if (previous === undefined) {
+        delete process.env.COORDINATOR_DB_PATH;
+      } else {
+        process.env.COORDINATOR_DB_PATH = previous;
+      }
+    }
+  });
+
+  it("注册 API 拒绝非法 providerOverride", async () => {
+    const databasePath = join(mkdtempSync(join(tmpdir(), "coordinator-api-register-")), "api.sqlite");
+    runMigrations(databasePath);
+
+    const previous = process.env.COORDINATOR_DB_PATH;
+    process.env.COORDINATOR_DB_PATH = databasePath;
+    try {
+      const server = buildServer();
+      const response = await server.inject({
+        method: "POST",
+        url: "/projects/register",
+        payload: {
+          repoPath: "/tmp/repo",
+          providerOverride: "bitbucket",
+          confirmedDefaultBranch: "main"
+        }
+      });
+
+      expect(response.statusCode).toBe(400);
+    } finally {
+      if (previous === undefined) {
+        delete process.env.COORDINATOR_DB_PATH;
+      } else {
+        process.env.COORDINATOR_DB_PATH = previous;
+      }
+    }
+  });
 });

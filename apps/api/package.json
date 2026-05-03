@@ -11,6 +11,7 @@
     "start": "node dist/index.js"
   },
   "dependencies": {
+    "@coordinator/core": "workspace:*",
     "@coordinator/db": "workspace:*",
     "@coordinator/shared": "workspace:*",
     "fastify": "^5.3.2"

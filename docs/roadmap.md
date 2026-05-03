@@ -156,21 +156,20 @@ P2 只预留接口和规划，不进入 V1 完成标准：
 
 ### 当前进度
 
-- 当前阶段：`Iteration 2: 数据模型与 Event Store` 已完成。
-- 当前 OpenSpec change：`add-core-data-model` 已归档为 `openspec/changes/archive/2026-05-03-add-core-data-model`。
-- 当前正式规格：`openspec/specs/core-data-model/spec.md`。
-- 下一阶段：`Iteration 3: Project Registry`。
-- 下一阶段重点：注册工程、检测 GitHub/GitLab、确认默认分支、建立 workflow launcher 配置，并把 Project Registry 作为工程级机器真相源。
+- 当前阶段：`Iteration 3: Project Registry` 已完成。
+- 当前 OpenSpec change：`add-project-registry` 已归档为 `openspec/changes/archive/2026-05-03-add-project-registry`。
+- 当前正式规格：`openspec/specs/project-registry/spec.md`。
+- 下一阶段：`Iteration 4: Coordinator Surface`。
+- 下一阶段重点：将数据库状态翻译成 agent-facing Markdown surface，建立 tool visibility、autonomy guidance、human waiting / review / merge waiting 等 surface fixture。
 
 ### 重点关注事项
 
-- 已建立 P0 核心表、append-only events、operation、locks、CAS 字段和最小 timeline 查询能力。
-- 已实现 `packages/db` 的 transaction wrapper、project/task repository、event repository、operation repository 和 lock repository。
-- 已实现 CLI `timeline` 和 API `GET /tasks/:taskId/timeline`，用于最小事件时间线查看。
-- `operations` 已绑定 `pr_id` 作为 merge 作用域，避免 active merge operation 被绕过。
-- `events` 已通过 trigger 保持 append-only；task 状态变化和 event append 同事务提交。
+- 已建立 project registry 核心服务，支持工程注册、GitHub/GitLab 识别、默认分支确认、workflow launcher 和默认 provider 配置。
+- 已为 `projects` 补充 registry 相关字段，并通过 `packages/core` 作为业务层统一承载注册逻辑；CLI/API 只调用 service，不直接拼接注册规则。
+- 已实现 CLI `register` / `projects` 和 API `/projects` / `/projects/:projectId` / `/projects/register` 的最小入口。
+- Project Registry 仍遵守默认分支显式确认原则；GitHub/GitLab 自动识别失败时可显式选择。
 - SQLite 当前使用 Node 内置 `node:sqlite`，并通过 `engines.node >=22.22.2` 明确运行时约束；测试仍会出现 Node 的 ExperimentalWarning。后续如部署环境或稳定性要求变化，应在独立 change 中评估替换 driver。
-- 本轮验证通过：`openspec validate add-core-data-model --strict`、`pnpm typecheck`、`pnpm test`、`pnpm build`。
+- 本轮验证通过：`openspec validate --all --strict`、`pnpm typecheck`、`pnpm test`、`pnpm build`。
 - 本轮已经过独立 `gpt-5.5 high` subagent review，两轮 review 后无必须修复问题；review 明确检查了是否符合 `docs/` 总体设计心智、是否过度设计、是否污染分层边界。
 
 ## 6. 实现顺序

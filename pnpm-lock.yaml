@@ -29,6 +29,9 @@ importers:
 
   apps/api:
     dependencies:
+      '@coordinator/core':
+        specifier: workspace:*
+        version: link:../../packages/core
       '@coordinator/db':
         specifier: workspace:*
         version: link:../../packages/db
@@ -69,12 +72,21 @@ importers:
 
   packages/cli:
     dependencies:
+      '@coordinator/core':
+        specifier: workspace:*
+        version: link:../core
       '@coordinator/db':
         specifier: workspace:*
         version: link:../db
       '@coordinator/shared':
         specifier: workspace:*
         version: link:../shared
+
+  packages/core:
+    dependencies:
+      '@coordinator/db':
+        specifier: workspace:*
+        version: link:../db
 
   packages/db: {}
 

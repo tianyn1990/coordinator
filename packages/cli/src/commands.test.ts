@@ -25,7 +25,8 @@ describe("runCli", () => {
       databasePath,
       applied: [
         { id: "0001_metadata.sql", applied: true },
-        { id: "0002_core_data_model.sql", applied: true }
+        { id: "0002_core_data_model.sql", applied: true },
+        { id: "0003_project_registry.sql", applied: true }
       ]
     });
   });
@@ -58,6 +59,48 @@ describe("runCli", () => {
     expect(JSON.parse(result.stdout)).toMatchObject({
       taskId: "task-timeline",
       events: [{ type: "task.created" }]
+    });
+  });
+
+  it("register 命令要求显式传入 db", () => {
+    const result = runCli(["register", "--repo", "/tmp/repo"]);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("缺少 --db 参数");
+  });
+
+  it("register 命令拒绝非法 provider", () => {
+    const databasePath = join(mkdtempSync(join(tmpdir(), "coordinator-cli-registry-")), "registry.sqlite");
+    runMigrations(databasePath);
+
+    const result = runCli(["register", "--db", databasePath, "--repo", "/tmp/repo", "--provider", "bitbucket"]);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("不支持的 provider");
+  });
+
+  it("register 命令拒绝缺少 provider 参数值", () => {
+    const databasePath = join(mkdtempSync(join(tmpdir(), "coordinator-cli-registry-")), "registry.sqlite");
+    runMigrations(databasePath);
+
+    const result = runCli(["register", "--db", databasePath, "--repo", "/tmp/repo", "--provider"]);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("缺少 --provider 参数值");
+  });
+
+  it("支持 projects 命令查看 registry", () => {
+    const databasePath = join(mkdtempSync(join(tmpdir(), "coordinator-cli-registry-")), "registry.sqlite");
+    runMigrations(databasePath);
+    withDatabase(databasePath, (context) => {
+      createProject(context, { id: "project-cli", name: "coordinator", defaultBranch: "main" });
+    });
+
+    const result = runCli(["projects", "--db", databasePath]);
+
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      projects: [{ id: "project-cli", defaultBranch: "main" }]
     });
   });
 });

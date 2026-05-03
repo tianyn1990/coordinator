@@ -13,6 +13,7 @@
     "start": "tsx src/index.ts"
   },
   "dependencies": {
+    "@coordinator/core": "workspace:*",
     "@coordinator/db": "workspace:*",
     "@coordinator/shared": "workspace:*"
   }
