@@ -275,4 +275,28 @@ describe("runCli", () => {
       status: "succeeded"
     });
   });
+
+  it("daemon tick 命令可执行一次最小调度，入口保持 operator-only", () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "coordinator-cli-daemon-workspaces-"));
+    const databasePath = join(mkdtempSync(join(tmpdir(), "coordinator-cli-daemon-")), "daemon.sqlite");
+    runMigrations(databasePath);
+    withDatabase(databasePath, (context) => {
+      const project = createProject(context, {
+        id: "project-cli-daemon",
+        name: "daemon",
+        workspaceRoot,
+        outerAgentDefaultProvider: "fake"
+      });
+      createTask(context, { id: "task-cli-daemon", projectId: project.id, title: "daemon" });
+    });
+    const result = runCli(["daemon", "tick", "--db", databasePath]);
+
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      status: "acted",
+      actions: expect.arrayContaining([
+        expect.objectContaining({ kind: "agent_tool_skipped", status: "skipped" })
+      ])
+    });
+  });
 });

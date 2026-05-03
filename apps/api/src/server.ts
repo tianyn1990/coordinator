@@ -3,6 +3,7 @@ import { ActiveResourceConflictError, listTaskEvents, withDatabase } from "@coor
 import {
   AgentProviderRuntimeError,
   CoordinatorAgentToolError,
+  DaemonRuntimeError,
   ProjectRegistryInputError,
   WorkspaceManagerError,
   WorkflowProtocolError,
@@ -17,6 +18,7 @@ import {
   listWorkflowEvents,
   registerProject,
   resumeWorkspacePreflight,
+  runDaemonTick,
   runCoordinatorAgentSession,
   startWorkflowRun,
   viewProjectRegistry,
@@ -423,6 +425,46 @@ export function buildServer(): FastifyInstance {
     }
   );
 
+  server.post<{
+    Body: DaemonTickBody;
+  }>(
+    "/daemon/tick",
+    {
+      schema: {
+        body: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            owner: { type: "string", minLength: 1 },
+            retryBudget: { type: "integer", minimum: 0 },
+            candidateLimit: { type: "integer", minimum: 1 }
+          }
+        }
+      }
+    },
+    async (request, reply) => {
+      const databasePath = process.env.COORDINATOR_DB_PATH;
+      if (!databasePath) {
+        return reply.code(503).send({ error: "COORDINATOR_DB_PATH 未配置" });
+      }
+
+      try {
+        return withDatabase(databasePath, (context) =>
+          runDaemonTick(context, {
+            owner: request.body.owner ?? "api",
+            retryBudget: request.body.retryBudget,
+            candidateLimit: request.body.candidateLimit
+          })
+        );
+      } catch (error) {
+        if (error instanceof DaemonRuntimeError || error instanceof ActiveResourceConflictError) {
+          return reply.code(400).send({ error: error.message });
+        }
+        throw error;
+      }
+    }
+  );
+
   return server;
 }
 
@@ -463,4 +505,10 @@ type ExecuteAgentToolBody = {
   actor?: string;
   agentSessionId?: string;
   args?: Record<string, string>;
+};
+
+type DaemonTickBody = {
+  owner?: string;
+  retryBudget?: number;
+  candidateLimit?: number;
 };

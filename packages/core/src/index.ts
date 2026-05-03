@@ -16,6 +16,7 @@ export {
   inspectAgentSession,
   runCoordinatorAgentSession
 } from "./agent-provider-runtime.js";
+export { DaemonRuntimeError, parseAgentToolRequest, runDaemonTick } from "./daemon-runtime.js";
 export { buildCoordinatorSurface, buildTaskSurfaceFromDb, renderSurfaceMarkdown } from "./surface.js";
 export {
   WorkspaceManagerError,
@@ -52,6 +53,7 @@ export type {
   InspectAgentSessionInput,
   RunCoordinatorAgentSessionInput
 } from "./agent-provider-runtime.js";
+export type { DaemonActionResult, DaemonRuntimeInput, DaemonTickResult, ParsedAgentToolRequest } from "./daemon-runtime.js";
 export type {
   CreateAttemptWorkspaceInput,
   PreflightStatus,

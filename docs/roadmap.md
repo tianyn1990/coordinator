@@ -156,11 +156,11 @@ P2 只预留接口和规划，不进入 V1 完成标准：
 
 ### 当前进度
 
-- 当前阶段：`Iteration 8: Coordinator Agent Tools` 已完成。
-- 当前 OpenSpec change：`add-coordinator-agent-tools` 已归档为 `openspec/changes/archive/2026-05-03-add-coordinator-agent-tools`。
-- 当前正式规格：`openspec/specs/coordinator-agent-tools/spec.md`。
-- 下一阶段：`Iteration 9: Daemon`。
-- 下一阶段重点：实现 P0 最小 daemon / scheduler / watchdog / reconciliation / retry / human request wake-up，使已落地的 surface、agent runtime、agent tools、workspace manager、workflow adapter 能被可靠串联；继续坚持 daemon 不是智能体，不做业务语义判断，不提前实现 PR/MR provider 或 merge。
+- 当前阶段：`Iteration 9: Daemon` 已完成。
+- 当前 OpenSpec change：`add-daemon-runtime` 已归档为 `openspec/changes/archive/2026-05-04-add-daemon-runtime`。
+- 当前正式规格：`openspec/specs/daemon-runtime/spec.md`。
+- 下一阶段：`Iteration 10: PR/MR Provider`。
+- 下一阶段重点：在不扩大 daemon 和 agent tools 边界的前提下，落地 P0 一个真实 PR/MR provider 路径，并为另一个 provider 保留 contract stub / fake adapter；继续保持 PR/MR 创建、review、merge approval 和 merge 边界清晰。
 
 ### 重点关注事项
 
@@ -204,6 +204,13 @@ P2 只预留接口和规划，不进入 V1 完成标准：
 - 已实现 CLI/API operator-only agent tool 调试入口：`agent-tool execute` 和 `POST /tasks/:taskId/agent-tools`；这些入口未进入 Coordinator Surface，不是 agent tools。
 - 已补充 Coordinator Agent Tools contract tests：surface visibility gate、artifact path 安全、execution plan 写入、human request 等待、sanitized workspace/workflow result、CLI/API operator 调试入口、未来未实现工具不提前暴露。
 - 第八轮经过多轮独立 `gpt-5.5 high` subagent review，所有必须修复项已处理并复验。修复点包括：raw result 泄漏、surface/executor tool 集不一致、task-local artifact root 契约、provider 参数契约、human waiting 工具可见性。
+- 已实现 P0 最小 Daemon Runtime：`runDaemonTick` 按单次 tick 执行 workflow reconciliation、human request wake-up、candidate task advance、outer agent session 启动、agent tool request 解析与执行、最小 stalled watcher 和 retry_due gate。
+- daemon 仍不是 agent：它不做需求理解、方案选择、review 判断、workflow profile 语义选择，不读写 `.workflow` private state，不提前实现 PR/MR provider 或 merge；它只复用现有 Coordinator Surface、Agent Provider Runtime、Coordinator Agent Tools executor、Workflow Protocol Adapter 和 DB repository。
+- 已补 outer agent 的受控 artifact bridge：agent 可在 final response 中输出 `coordinator-artifact` block，daemon 先由 Core 写入当前 surface `artifact_root`，再执行 `coordinator-tool` 请求；outer provider 仍在 sessionRoot/read-only 边界内运行，不直接写 repo/workspace。
+- daemon agent session idempotency 已收敛为 `daemon-<wakeReason>-v<task.stateVersion>`，同一 task stateVersion 已有 terminal operation 时跳过，避免无进展 tick 重复启动 provider。
+- 已实现 CLI/API operator-only daemon tick 调试入口：`daemon tick` 和 `POST /daemon/tick`；这些入口未进入 Coordinator Surface，也不是 agent tools。
+- 已补充 Daemon Runtime tests：artifact bridge、surface/tool gate 串联、无 tool 请求不猜测下一步、稳定 idempotency、workflow protocol reconciliation 不猜 completed、human answer wake-up、retry budget、CLI/API operator-only 入口。
+- 第九轮独立 `gpt-5.5 high` review 已完成，先后指出 artifact bridge、稳定 requestId、watchdog/retry_due、symlink containment 等问题，均已修复并复验；最终 review 已确认无必须修复项，可以归档。
 - 本轮验证通过：`openspec validate --all --strict`、`pnpm typecheck`、`pnpm test`、`pnpm build`。
 
 ## 6. 实现顺序

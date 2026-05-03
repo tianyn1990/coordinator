@@ -136,6 +136,13 @@ export type HumanRequestRecord = {
   stateVersion: number;
 };
 
+export type UpdateHumanRequestInput = {
+  humanRequestId: string;
+  expectedStateVersion: number;
+  status: string;
+  answerArtifactPath?: string;
+};
+
 export type CreateWorkspaceInput = {
   id?: string;
   projectId: string;
@@ -313,6 +320,11 @@ export type EventRecord = {
   createdAt: string;
 };
 
+export type ListTasksInput = {
+  statuses?: string[];
+  limit?: number;
+};
+
 export type CreateOperationInput = {
   id?: string;
   idempotencyKey: string;
@@ -481,6 +493,31 @@ export function getTask(context: DbContext, id: string): TaskRecord | undefined 
   return row ? mapTaskRow(row) : undefined;
 }
 
+export function listTasks(context: DbContext, input: ListTasksInput = {}): TaskRecord[] {
+  const limit = input.limit ?? 50;
+  if (input.statuses && input.statuses.length > 0) {
+    const placeholders = input.statuses.map(() => "?").join(", ");
+    return context.db
+      .prepare(
+        `SELECT * FROM tasks
+         WHERE status IN (${placeholders})
+         ORDER BY updated_at ASC, created_at ASC, id ASC
+         LIMIT ?`
+      )
+      .all(...input.statuses, limit)
+      .map(mapTaskRow);
+  }
+
+  return context.db
+    .prepare(
+      `SELECT * FROM tasks
+       ORDER BY updated_at ASC, created_at ASC, id ASC
+       LIMIT ?`
+    )
+    .all(limit)
+    .map(mapTaskRow);
+}
+
 export function createAttempt(context: DbContext, input: CreateAttemptInput): AttemptRecord {
   return withTransaction(context, () => insertAttempt(context, input));
 }
@@ -519,6 +556,27 @@ export function listHumanRequestsByTask(context: DbContext, taskId: string, limi
        LIMIT ?`
     )
     .all(taskId, limit)
+    .map(mapHumanRequestRow);
+}
+
+export function getHumanRequest(context: DbContext, id: string): HumanRequestRecord | undefined {
+  const row = context.db.prepare("SELECT * FROM human_requests WHERE id = ?").get(id);
+  return row ? mapHumanRequestRow(row) : undefined;
+}
+
+export function listHumanRequestsByStatus(context: DbContext, statuses: string[], limit = 50): HumanRequestRecord[] {
+  if (statuses.length === 0) {
+    return [];
+  }
+  const placeholders = statuses.map(() => "?").join(", ");
+  return context.db
+    .prepare(
+      `SELECT * FROM human_requests
+       WHERE status IN (${placeholders})
+       ORDER BY updated_at ASC, created_at ASC, id ASC
+       LIMIT ?`
+    )
+    .all(...statuses, limit)
     .map(mapHumanRequestRow);
 }
 
@@ -575,6 +633,22 @@ export function getActiveAgentSessionByTask(
 export function getWorkflowRun(context: DbContext, id: string): WorkflowRunRecord | undefined {
   const row = context.db.prepare("SELECT * FROM workflow_runs WHERE id = ?").get(id);
   return row ? mapWorkflowRunRow(row) : undefined;
+}
+
+export function listWorkflowRunsByStatus(context: DbContext, statuses: string[], limit = 50): WorkflowRunRecord[] {
+  if (statuses.length === 0) {
+    return [];
+  }
+  const placeholders = statuses.map(() => "?").join(", ");
+  return context.db
+    .prepare(
+      `SELECT * FROM workflow_runs
+       WHERE status IN (${placeholders})
+       ORDER BY updated_at ASC, created_at ASC, id ASC
+       LIMIT ?`
+    )
+    .all(...statuses, limit)
+    .map(mapWorkflowRunRow);
 }
 
 export function getActiveWorkflowRunByAttempt(context: DbContext, attemptId: string): WorkflowRunRecord | undefined {
@@ -687,6 +761,41 @@ export function updateWorkspace(context: DbContext, input: UpdateWorkspaceInput)
     }
 
     return requireWorkspace(context, input.workspaceId);
+  });
+}
+
+export function updateHumanRequest(context: DbContext, input: UpdateHumanRequestInput): HumanRequestRecord {
+  return withTransaction(context, () => {
+    const result = context.db
+      .prepare(
+        `UPDATE human_requests
+         SET status = ?,
+             answer_artifact_path = COALESCE(?, answer_artifact_path),
+             state_version = state_version + 1,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ? AND state_version = ?`
+      )
+      .run(input.status, input.answerArtifactPath ?? null, input.humanRequestId, input.expectedStateVersion);
+
+    if (result.changes === 0) {
+      throw new CasConflictError(`human request ${input.humanRequestId} state_version mismatch`);
+    }
+
+    const request = requireHumanRequest(context, input.humanRequestId);
+    appendEvent(context, {
+      type: "human.request_updated",
+      summary: `human request status updated to ${request.status}`,
+      projectId: request.projectId,
+      taskId: request.taskId,
+      attemptId: request.attemptId,
+      payload: {
+        humanRequestId: request.id,
+        status: request.status,
+        answerArtifactPath: request.answerArtifactPath
+      },
+      artifactRefs: request.answerArtifactPath ? [request.answerArtifactPath] : undefined
+    });
+    return request;
   });
 }
 

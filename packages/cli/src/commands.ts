@@ -2,6 +2,7 @@ import { ActiveResourceConflictError, listTaskEvents, runMigrations, withDatabas
 import {
   AgentProviderRuntimeError,
   CoordinatorAgentToolError,
+  DaemonRuntimeError,
   ProjectRegistryInputError,
   WorkspaceManagerError,
   WorkflowProtocolError,
@@ -16,6 +17,7 @@ import {
   listWorkflowEvents,
   registerProject,
   resumeWorkspacePreflight,
+  runDaemonTick,
   runCoordinatorAgentSession,
   startWorkflowRun,
   viewProjectRegistry
@@ -486,10 +488,52 @@ export function runCli(args: string[]): CliResult {
     };
   }
 
+  if (command === "daemon") {
+    const [subcommand, ...daemonArgs] = rest;
+    if (subcommand === "tick") {
+      const databasePathResult = readRequiredOption(daemonArgs, "--db");
+      const error = databasePathResult.error;
+      if (error) {
+        return { exitCode: 1, stdout: "", stderr: `${error}\n` };
+      }
+      const databasePath = databasePathResult.value;
+      if (!databasePath) {
+        return { exitCode: 1, stdout: "", stderr: "daemon tick 参数不完整\n" };
+      }
+      try {
+        const retryBudgetOption = readOption(daemonArgs, "--retry-budget").value;
+        if (retryBudgetOption !== undefined) {
+          const parsed = Number(retryBudgetOption);
+          if (!Number.isInteger(parsed) || parsed < 0) {
+            return { exitCode: 1, stdout: "", stderr: "daemon tick 参数不完整\n" };
+          }
+        }
+        const result = withDatabase(databasePath, (context) =>
+          runDaemonTick(context, {
+            owner: readOption(daemonArgs, "--owner").value ?? "cli",
+            retryBudget: retryBudgetOption === undefined ? undefined : Number(retryBudgetOption)
+          })
+        );
+        return { exitCode: 0, stdout: `${JSON.stringify(result)}\n`, stderr: "" };
+      } catch (error) {
+        if (error instanceof DaemonRuntimeError || error instanceof ActiveResourceConflictError) {
+          return { exitCode: 1, stdout: "", stderr: `${error.message}\n` };
+        }
+        throw error;
+      }
+    }
+
+    return {
+      exitCode: 1,
+      stdout: "",
+      stderr: "未知 daemon 子命令，可用：daemon tick\n"
+    };
+  }
+
   return {
     exitCode: 1,
-    stdout: "",
-    stderr: `未知命令：${command}\n可用命令：health, migrate --db <path>, timeline --db <path> --task <task-id>, surface --db <path> --task <task-id>, register --db <path> --repo <path>, projects --db <path>, workspace create, workspace preflight, workflow <subcommand>, agent <subcommand>, agent-tool <subcommand>\n`
+      stdout: "",
+      stderr: `未知命令：${command}\n可用命令：health, migrate --db <path>, timeline --db <path> --task <task-id>, surface --db <path> --task <task-id>, register --db <path> --repo <path>, projects --db <path>, workspace create, workspace preflight, workflow <subcommand>, agent <subcommand>, agent-tool <subcommand>, daemon <subcommand>\n`
   };
 }
 

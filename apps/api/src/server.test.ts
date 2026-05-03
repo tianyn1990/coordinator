@@ -285,4 +285,45 @@ describe("API health", () => {
       }
     }
   });
+
+  it("daemon tick API 是 operator 调试入口，不进入 Coordinator Surface", async () => {
+    const databasePath = join(mkdtempSync(join(tmpdir(), "coordinator-api-daemon-")), "daemon.sqlite");
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "coordinator-api-daemon-workspaces-"));
+    runMigrations(databasePath);
+    withDatabase(databasePath, (context) => {
+      const project = createProject(context, {
+        id: "project-api-daemon",
+        name: "daemon",
+        workspaceRoot,
+        outerAgentDefaultProvider: "fake"
+      });
+      createTask(context, { id: "task-api-daemon", projectId: project.id, title: "daemon api" });
+    });
+
+    const previous = process.env.COORDINATOR_DB_PATH;
+    process.env.COORDINATOR_DB_PATH = databasePath;
+    try {
+      const server = buildServer();
+      const response = await server.inject({
+        method: "POST",
+        url: "/daemon/tick",
+        payload: { owner: "api-test" }
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({
+        status: "acted",
+        actions: expect.arrayContaining([expect.objectContaining({ kind: "agent_tool_skipped" })])
+      });
+
+      const surface = await server.inject({ method: "GET", url: "/tasks/task-api-daemon/surface" });
+      expect(surface.json().json.available_tools.map((tool: { name: string }) => tool.name)).not.toContain("daemon tick");
+    } finally {
+      if (previous === undefined) {
+        delete process.env.COORDINATOR_DB_PATH;
+      } else {
+        process.env.COORDINATOR_DB_PATH = previous;
+      }
+    }
+  });
 });

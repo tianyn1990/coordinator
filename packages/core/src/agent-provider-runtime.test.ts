@@ -85,7 +85,7 @@ describe("agent provider runtime", () => {
     expect(existsSync(result.artifacts.transcriptPath)).toBe(true);
     expect(existsSync(result.artifacts.finalResponsePath)).toBe(true);
     expect(readFileSync(result.artifacts.promptPath, "utf8")).toContain("# Coordinator Surface");
-    expect(readFileSync(result.artifacts.promptPath, "utf8")).toContain("本轮 runtime 还没有开放真实 agent tools executor");
+    expect(readFileSync(result.artifacts.promptPath, "utf8")).toContain("coordinator-tool 代码块");
     expect(readFileSync(result.artifacts.promptPath, "utf8")).toContain("description: run outer coordinator agent");
     expect(readFileSync(result.artifacts.promptPath, "utf8")).toContain("workspace: 当前 surface 未发现 active workspace");
 
@@ -303,8 +303,14 @@ describe("agent provider runtime", () => {
 
   it("planning-only session 不要求 provider cwd 指向 repo", () => {
     const databasePath = createMigratedDatabase();
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "coordinator-agent-no-repo-workspaces-"));
     withDatabase(databasePath, (context) => {
-      const project = createProject(context, { id: "project-no-repo", name: "no repo", outerAgentDefaultProvider: "fake" });
+      const project = createProject(context, {
+        id: "project-no-repo",
+        name: "no repo",
+        outerAgentDefaultProvider: "fake",
+        workspaceRoot
+      });
       createTask(context, { id: "task-no-repo", projectId: project.id, title: "no repo" });
     });
 

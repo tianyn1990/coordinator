@@ -25,6 +25,22 @@ daemon 不是智能体，不负责业务语义判断。它是可靠运行时，�
 
 daemon 的所有关键动作必须满足 [operations.md](./operations.md) 与 [contracts.md](./contracts.md) 的事务、幂等、CAS、lock 和唯一性约束。
 
+### 1.1 当前已落地的 P0 子集
+
+Iteration 9 已落地最小 `runDaemonTick`：
+
+- 以 SQLite 为真相源执行单次 tick。
+- 扫描 active workflow run，并通过 workflow protocol `status` 做 reconciliation。
+- 扫描 answered human request，唤醒 task 并继续交给 Coordinator Agent。
+- 基于当前 Coordinator Surface 启动 outer Coordinator Agent session。
+- 从 agent final response 中解析最多一个窄格式 `coordinator-tool` 请求，并仍通过 agent tools executor 校验当前 surface 可见性。
+- 从 agent final response 中解析 `coordinator-artifact` block，由 Core 受控写入当前 surface `artifact_root`，解决 read-only outer provider 无法直接写 artifact 的问题。
+- 对 active outer agent session 做最小 stalled watcher，超时后记录 stalled event 并安排 retry。
+- 对 `resuming` task 使用 `daemon.retry_scheduled` 的 dueAt 做最小 retry_due gate。
+- 提供 CLI/API operator-only `daemon tick` 入口；这些入口不进入 Coordinator Surface。
+
+当前 P0 子集仍保持 daemon 不是 agent：daemon 不判断需求、方案、review 结论或 workflow profile 语义，只负责唤醒、reconcile、retry、事件记录和调用已存在 Core service。
+
 ## 2. Daemon 职责
 
 daemon 负责：
