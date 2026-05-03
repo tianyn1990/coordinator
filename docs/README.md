@@ -1,0 +1,210 @@
+# coordinator 设计文档索引
+
+> 状态：初始方案基线  
+> 目的：记录 `coordinator` 的长期设计、第一版范围、与 `workflow` 的协议边界，以及后续实现时必须遵守的工程约束。
+
+## 1. 项目定位
+
+`coordinator` 是外层智能协调系统。
+
+它负责：
+
+- 接收任务。
+- 注册和管理工程。
+- 创建隔离 workspace。
+- 启动外层 `Coordinator Agent`。
+- 调用 Codex / Claude Code 等 agent provider。
+- 串联一次或多次 `workflow` run。
+- 创建 PR / MR。
+- 等待 human review。
+- 根据 review 进入 rework。
+- 在显式人工审批后 merge。
+- 将任务收口为 done / handoff / canceled / failed。
+- 记录完整事件、产物、日志和决策依据。
+
+`workflow` 项目继续负责单个代码工作单元内部的阶段化执行协议，包括：
+
+- workflow profile。
+- requirements / implementation / review。
+- stage / substate / gate。
+- agent-facing surface。
+- OpenSpec 使用时机。
+- inner coding agent 的实现流程约束。
+
+一句话：
+
+```text
+coordinator 管任务如何被完成。
+workflow 管一次代码变更内部如何规范执行。
+```
+
+## 2. 设计来源
+
+本方案吸收并结合了以下来源：
+
+- 本项目多轮方案讨论中已确认的取舍。
+- `/Users/hetao/Documents/github/workflow` 的现有设计原则：
+  - runtime 单控制面。
+  - coding agent 可见性优先。
+  - 少量 workflow profile + 受控 graph。
+  - 避免复杂 JSON 作为 agent 主交互协议。
+  - 过程性复杂信息优先写入 artifact，而不是作为工具参数传递。
+- OpenAI Symphony：
+  - GitHub: https://github.com/openai/symphony
+  - Spec: https://github.com/openai/symphony/blob/main/SPEC.md
+  - Article: https://openai.com/index/open-source-codex-orchestration-symphony/
+
+Symphony 的核心经验会被吸收为：
+
+- 长运行 daemon。
+- 单一 authoritative orchestrator state。
+- tracker/source 与 runner 解耦。
+- per-issue / per-task workspace isolation。
+- bounded concurrency。
+- reconciliation。
+- retry / continuation。
+- structured observability。
+- repo-owned workflow contract。
+
+但 `coordinator` 不直接复刻 Symphony 的 Linear-first 形态，而是做成 task-source-agnostic、agent-provider-agnostic、workflow-runtime-aware 的外层协调系统。
+
+## 3. 文档结构
+
+- [architecture.md](./architecture.md)
+  - 总体架构、分层、长期边界、第一版范围。
+- [coordinator-surface.md](./coordinator-surface.md)
+  - 外层 `Coordinator Agent` 的可见面设计。
+- [agent-tools.md](./agent-tools.md)
+  - `Coordinator Agent` 可调用工具、参数风格、artifact 约定。
+- [contracts.md](./contracts.md)
+  - Surface、工具可见性、状态迁移、幂等、handoff、merge approval 等硬契约。
+- [operations.md](./operations.md)
+  - operation ledger、CAS、lock、reconciliation、retry、checkpoint 和恢复。
+- [daemon.md](./daemon.md)
+  - daemon、watchdog、reconciliation、retry、恢复机制。
+- [workflow-protocol.md](./workflow-protocol.md)
+  - `coordinator` 与 `workflow` 的正式协议边界。
+- [execution-workspace.md](./execution-workspace.md)
+  - workspace、git worktree、branch、worker runtime、agent provider。
+- [project-registry.md](./project-registry.md)
+  - 工程注册、GitHub/GitLab 检测、默认分支、provider 配置。
+- [observability.md](./observability.md)
+  - 事件、日志、artifact、UI 调试视图和审计。
+- [research.md](./research.md)
+  - 已调研社区方案与文章、可吸收点和拒绝吸收点。
+- [roadmap.md](./roadmap.md)
+  - 第一版实现顺序、完成标准和后续扩展。
+
+## 4. 第一版原则
+
+第一版不是一次性做完所有未来能力，但必须把长期扩展点留对。
+
+核心原则：
+
+```text
+接口先稳定，能力后填充。
+边界先隔离，实现先单体。
+agent 有智能，但只能通过受控 surface 和 tools 行动。
+复杂内容写 artifact，工具参数保持窄。
+```
+
+第一版可以是单进程、本机执行，但必须保留：
+
+- `TaskSource` 扩展点。
+- `AgentProvider` 扩展点。
+- `WorkflowRuntime` 扩展点。
+- `WorkspaceStrategy` 扩展点。
+- `WorkerRuntime` 扩展点。
+- `GitProvider` / `PullRequestProvider` 扩展点。
+- `HumanInteraction` 扩展点。
+- `EventSink` 扩展点。
+
+## 5. 第一版分层目标
+
+第一版需要区分三个层次，避免把长期平台能力全部压到第一条闭环里。
+
+### 5.1 P0 first E2E
+
+P0 目标是跑通一条真实闭环，同时把长期边界写进代码接口和测试。
+
+P0 必须真实完成：
+
+- Node.js + TypeScript。
+- Fastify API。
+- Vite + React Web UI。
+- SQLite 持久化。
+- Web / CLI 手动任务入口。
+- 工程注册。
+- 一个真实 PR/MR provider 路径，GitHub 或 GitLab 二选一。
+- 另一个 PR/MR provider 以 contract stub / fake adapter 形式存在，并有 contract tests。
+- 本地 git worktree workspace。
+- 一个真实 AgentProvider 路径，Codex 或 Claude Code 二选一。
+- 另一个 AgentProvider 以 contract stub / fake adapter 形式存在，并有 contract tests。
+- LocalWorker。
+- Coordinator Surface。
+- P0 最小 Coordinator Agent tools。
+- workflow protocol adapter。
+- 最小 daemon / watchdog / reconciliation / retry。
+- human request / approval。
+- merge 前重新验证。
+- 默认 squash merge。
+- merge 冲突进入 future `workflow conflict-resolution` 工作流。
+- P0 observability：event timeline、current blocker、surface snapshot、tool trace。
+- P0 可靠性底座：operation/idempotency、state_version/CAS、active uniqueness、必要 lock、inspect-before-create。
+- workflow handoff protocol。
+
+### 5.2 P1 V1 complete
+
+P1 在 P0 闭环基础上补齐第一版长期能力：
+
+- GitHub 和 GitLab PR/MR provider 都可用。
+- CodexProvider 和 ClaudeCodeProvider 都可用。
+- daemon/reconciliation/retry 覆盖主要恢复场景。
+- full observability 视图补齐。
+- lock / lease / fencing 覆盖多 worker 前的关键并发风险。
+- contract stub 被真实 adapter 或更完整 fake 覆盖。
+
+### 5.3 P2 planned
+
+P2 能力必须在文档和接口中留好位置，但不进入 P0 完成标准：
+
+- Meego adapter。
+- 远程 worker 完整实现。
+- 定时任务。
+- 多租户权限系统。
+- 复杂 DAG engine。
+- 完整 plugin marketplace。
+
+## 6. 第一版暂不包含
+
+P0 和 P1 都不应提前实现：
+
+- 通用 DAG engine。
+- persona role system。
+- hidden memory。
+- 高信任自动 merge。
+- 跨 project 默认共享记忆。
+- source-specific 状态机进入 core。
+
+这些能力要在第一版的接口、文档和数据模型中预留，但不提前实现复杂逻辑。
+
+## 7. 有意偏离 Symphony 的地方
+
+Symphony 的 spec 更偏 scheduler/runner/tracker reader。本项目有意增加：
+
+- Web / CLI operator surface。
+- SQLite 持久化。
+- Project Registry。
+- GitHub / GitLab PR/MR provider。
+- merge approval gate。
+- Coordinator Surface。
+- operation/idempotency ledger。
+
+这些是本项目的产品目标，不是要把 Symphony 扩成通用平台。实现时仍必须保持：
+
+- 单进程优先。
+- 有限有序 plan。
+- 不做通用 DAG。
+- 不做 persona role system。
+- 不做 hidden memory。
+- 不做高信任自动 merge。

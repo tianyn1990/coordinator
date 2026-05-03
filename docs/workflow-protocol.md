@@ -1,0 +1,443 @@
+# workflow protocol
+
+> 状态：初始方案基线  
+> 适用范围：`coordinator` 与 `/Users/hetao/Documents/github/workflow` 的稳定通信协议、边界和演进原则。
+
+## 1. 文档定位
+
+`coordinator` 和 `workflow` 是两个独立项目。
+
+`coordinator` 不应该猜测 `workflow` 的内部文件结构，也不应该直接读写 `.workflow` 内部状态。
+
+两者应通过稳定 protocol 通信。
+
+## 2. 核心边界
+
+`coordinator` 可以：
+
+- 启动 workflow run。
+- 查询 workflow run 状态。
+- 查询 workflow allowed / denied actions。
+- 查询 workflow artifact。
+- 查询 workflow event。
+- 根据 protocol 消费 workflow handoff。
+
+`coordinator` 不可以：
+
+- 直接修改 `.workflow/current-run.json`。
+- 直接修改 `.workflow/runs/<run-id>/state.json`。
+- 直接推断 workflow stage 是否完成。
+- 绕过 workflow action。
+- 根据文件存在与否猜测 current change。
+
+## 3. Protocol 设计原则
+
+### 3.1 JSON 输出
+
+protocol 命令必须输出稳定 JSON。
+
+### 3.2 命令少而高层
+
+不要让 coordinator 调大量低层命令。
+
+### 3.3 参数保持窄
+
+参数优先是：
+
+- profile id。
+- run id。
+- action id。
+- artifact path。
+
+### 3.4 workflow 保留内部控制面
+
+workflow 内部的 stage/gate/surface 仍由 workflow runtime 管。
+
+coordinator 只消费结果。
+
+## 4. 建议命令
+
+### 4.1 capabilities
+
+```bash
+workflow protocol capabilities
+```
+
+输出：
+
+```json
+{
+  "protocolVersion": "1",
+  "profiles": [
+    {
+      "id": "feature",
+      "purpose": "新增能力、结构调整或完整需求到 review 路线。",
+      "implemented": true
+    },
+    {
+      "id": "bugfix",
+      "purpose": "恢复既有预期行为的缺陷修复。",
+      "implemented": true
+    },
+    {
+      "id": "micro-change",
+      "purpose": "需求明确、影响局部、低风险的小型改动。",
+      "implemented": true
+    }
+  ],
+  "commands": ["start", "status", "action", "artifacts", "events"],
+  "handoffKinds": ["pr_ready", "human_review_required", "manual_handoff", "blocked", "completed_no_pr"]
+}
+```
+
+Coordinator 只能展示和选择 `implemented=true` 的 profile。profile 选择必须引用 workflow catalog/capabilities 中的说明，不能靠 Project Registry 默认或外层启发式静默选择。
+
+Agent provider 不属于 workflow capability 真源。provider 能力由 Project Registry / AgentProvider registry 暴露，workflow 只声明它支持哪些 profile 和 protocol 命令。
+
+### 4.2 start
+
+```bash
+workflow protocol start --workflow <profile>
+```
+
+输出：
+
+```json
+{
+  "runId": "run-...",
+  "profile": "feature",
+  "status": "running",
+  "stage": "requirements",
+  "substate": null,
+  "gate": {
+    "state": "open",
+    "reason": null
+  },
+  "artifactRoot": ".workflow/runs/run-.../artifacts",
+  "nextStep": {
+    "action": "inspect-surface",
+    "guidance": "..."
+  }
+}
+```
+
+### 4.3 status
+
+```bash
+workflow protocol status --run <run-id>
+```
+
+Coordinator 外层状态迁移只依赖：
+
+- `lifecycle`
+- `handoff`
+- `artifacts`
+- `recovery`
+- `summary`
+
+以下字段只能用于 debug/display：
+
+- `stage`
+- `substate`
+- `gate`
+- `allowedActions`
+- `deniedActions`
+- `currentChange`
+- `eventLog`
+
+这些字段不得驱动 Coordinator Agent tool visibility、PR readiness、done 判断或 merge 判断。
+
+输出：
+
+```json
+{
+  "runId": "run-...",
+  "profile": "feature",
+  "lifecycle": "active",
+  "stage": "implementation",
+  "substate": "test-align",
+  "gate": {
+    "state": "open",
+    "reason": null
+  },
+  "allowedActions": ["run-alignment-checks"],
+  "deniedActions": ["skip-runtime"],
+  "summary": "workflow run is active and has not produced a handoff",
+  "currentChange": {
+    "available": true,
+    "id": "add-feature-x"
+  },
+  "handoff": {
+    "available": false,
+    "kind": null,
+    "reason": null,
+    "artifacts": [],
+    "nextStep": {
+      "action": "continue-workflow",
+      "guidance": "workflow run has not produced a handoff yet"
+    },
+    "deniedActions": ["create-pr-from-coordinator"],
+    "recovery": {
+      "action": "inspect-or-resume-workflow",
+      "guidance": "inspect workflow status or resume the workflow run"
+    }
+  },
+  "artifactRoot": ".workflow/runs/run-.../artifacts",
+  "eventLog": ".workflow/runs/run-.../observability/events.jsonl"
+}
+```
+
+### 4.4 action
+
+```bash
+workflow protocol action --run <run-id> <action> [arg]
+```
+
+输出与 `status` 类似，反映 action 后状态。
+
+参数仍保持窄。
+
+如果 action 需要复杂上下文，应由 workflow surface 指导 inner agent 写 artifact，而不是让 coordinator 传复杂 JSON。
+
+### 4.5 artifacts
+
+```bash
+workflow protocol artifacts --run <run-id>
+```
+
+输出：
+
+```json
+{
+  "runId": "run-...",
+  "artifactRoot": ".workflow/runs/run-.../artifacts",
+  "artifacts": [
+    {
+      "kind": "summary",
+      "path": ".workflow/runs/run-.../artifacts/summary.md",
+      "requiredForHandoff": true
+    }
+  ]
+}
+```
+
+### 4.6 events
+
+```bash
+workflow protocol events --run <run-id>
+```
+
+输出：
+
+```json
+{
+  "runId": "run-...",
+  "eventsPath": ".workflow/runs/run-.../observability/events.jsonl",
+  "latest": [
+    {
+      "timestamp": "...",
+      "type": "workflow-action",
+      "summary": "..."
+    }
+  ]
+}
+```
+
+## 5. Workflow Handoff
+
+Workflow handoff 以 workflow protocol 为准。
+
+coordinator 不自己猜。
+
+`handoff` 是 workflow 对 coordinator 的边界结果，不是 workflow 内部 stage/substate 镜像。
+
+### 5.1 Handoff Kind
+
+第一版支持：
+
+```text
+pr_ready
+human_review_required
+manual_handoff
+blocked
+completed_no_pr
+```
+
+### 5.2 pr_ready
+
+示例：
+
+```json
+{
+  "available": true,
+  "kind": "pr_ready",
+  "reason": "workflow completed review/commit readiness",
+  "artifacts": [
+    {
+      "kind": "summary",
+      "path": ".workflow/runs/run-.../artifacts/summary.md"
+    },
+    {
+      "kind": "validation",
+      "path": ".workflow/runs/run-.../artifacts/validation-report.md"
+    }
+  ],
+  "nextStep": {
+    "action": "create-pr",
+    "guidance": "Coordinator may create a PR/MR from the current workspace branch."
+  },
+  "deniedActions": [],
+  "recovery": {
+    "action": "inspect-workflow",
+    "guidance": "If PR creation fails, inspect workflow status and artifacts again before retrying."
+  }
+}
+```
+
+### 5.3 blocked
+
+```json
+{
+  "available": true,
+  "kind": "blocked",
+  "reason": "human confirmation required",
+  "artifacts": [
+    {
+      "kind": "blocked-summary",
+      "path": ".workflow/runs/run-.../artifacts/blocked.md"
+    }
+  ],
+  "nextStep": {
+    "action": "ask-human-or-handoff",
+    "guidance": "Coordinator Agent should decide whether it can resolve this or must ask a human."
+  },
+  "deniedActions": ["create-pr", "merge"],
+  "recovery": {
+    "action": "ask-human",
+    "guidance": "Create a HumanRequest if the Coordinator Agent cannot safely resolve the blocker."
+  },
+  "humanRequestSuggestion": {
+    "kind": "technical-decision",
+    "summary": "..."
+  }
+}
+```
+
+## 6. Coordinator 如何使用 protocol
+
+### 6.1 启动
+
+Coordinator Agent 调用：
+
+```text
+start_workflow_run --profile feature
+```
+
+Execution Adapter 调：
+
+```bash
+workflow protocol start --workflow feature
+```
+
+### 6.2 监控
+
+daemon 定期调：
+
+```bash
+workflow protocol status --run <run-id>
+```
+
+### 6.3 判断 handoff
+
+只看 protocol handoff。
+
+如果 `handoff.kind = pr_ready`：
+
+- Coordinator Agent 生成 PR body。
+- coordinator 创建 PR/MR。
+
+如果 `handoff.kind = blocked` 或 `human_review_required`：
+
+- Coordinator Agent 判断是否可自行消化。
+- 不可消化则 ask_human。
+
+如果 `handoff.kind = manual_handoff`：
+
+- Coordinator Agent 生成 handoff artifact。
+- task 进入 handoff 或 waiting_human。
+
+如果 `handoff.kind = completed_no_pr`：
+
+- coordinator 只能按 no-code / no-PR policy 收口，不得自动假设普通代码任务完成。
+
+## 7. Artifact 边界
+
+coordinator 可读取 protocol 暴露的 artifact。
+
+但必须遵守：
+
+- 只读。
+- 不直接修改 workflow artifact。
+- 如果需要外层总结，写 coordinator 自己的 artifact。
+
+## 8. Event 边界
+
+workflow event 是 inner runtime 事件。
+
+coordinator 可以：
+
+- 摘要。
+- 关联到 outer event。
+- 展示在 UI。
+
+不应该：
+
+- 根据 event 私有字段推进状态。
+- 依赖未声明字段。
+
+## 9. 版本协商
+
+`capabilities` 必须返回 `protocolVersion`。
+
+coordinator 应校验兼容性。
+
+不兼容时：
+
+- 不启动 workflow run。
+- 生成 failure surface。
+- 提示升级 workflow。
+
+## 10. workflow 需要补充的能力
+
+为更好适配 coordinator，`workflow` 需要补：
+
+- protocol 命令。
+- stable handoff。
+- stable artifact listing。
+- stable event listing。
+- profile capabilities。
+- blocked reason。
+- human request suggestion。
+
+## 10.1 Compatibility Adapter 退出标准
+
+如果第一版必须用兼容适配器包装现有 CLI，适配器只能是临时层。
+
+退出标准：
+
+- `workflow protocol` 的 `capabilities/status/start/action/artifacts/events` 已稳定可用。
+- handoff / artifact / event 的 JSON schema 已稳定。
+- coordinator 不再依赖旧 CLI 私有输出格式。
+- 所有兼容分支都有 contract tests。
+
+如果以上任一条件不满足，compatibility adapter 只能保留为临时实现，不能成为隐式协议真源。
+
+## 11. 禁止事项
+
+- coordinator 不读写 `.workflow` 状态文件。
+- coordinator 不扫描 workflow artifact 来猜 completion。
+- coordinator 不把 workflow stage/substate 映射为 handoff。
+- coordinator 不把 workflow stage/substate/gate/allowedActions 当成外层状态迁移依据。
+- coordinator 不把 OpenSpec 状态当成 workflow 完成状态。
+- coordinator 不直接调用 OpenSpec 替 workflow 完成内部流程。
+- coordinator 不把 workflow private fixture 当成 protocol。
