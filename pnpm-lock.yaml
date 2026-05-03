@@ -29,6 +29,9 @@ importers:
 
   apps/api:
     dependencies:
+      '@coordinator/db':
+        specifier: workspace:*
+        version: link:../../packages/db
       '@coordinator/shared':
         specifier: workspace:*
         version: link:../../packages/shared

@@ -156,19 +156,21 @@ P2 只预留接口和规划，不进入 V1 完成标准：
 
 ### 当前进度
 
-- 当前阶段：`Iteration 1: 项目骨架` 已完成。
-- 当前 OpenSpec change：`add-project-skeleton` 已归档为 `openspec/changes/archive/2026-05-03-add-project-skeleton`。
-- 当前正式规格：`openspec/specs/project-skeleton/spec.md`。
-- 下一阶段：`Iteration 2: 数据模型与 Event Store`。
-- 下一阶段重点：在不破坏 `Coordinator Core` 状态所有权的前提下，建立 P0 必需核心表、append-only events、repository 基础、operation/idempotency、state_version/CAS、必要 lock 和 active 唯一性约束。
+- 当前阶段：`Iteration 2: 数据模型与 Event Store` 已完成。
+- 当前 OpenSpec change：`add-core-data-model` 已归档为 `openspec/changes/archive/2026-05-03-add-core-data-model`。
+- 当前正式规格：`openspec/specs/core-data-model/spec.md`。
+- 下一阶段：`Iteration 3: Project Registry`。
+- 下一阶段重点：注册工程、检测 GitHub/GitLab、确认默认分支、建立 workflow launcher 配置，并把 Project Registry 作为工程级机器真相源。
 
 ### 重点关注事项
 
-- 已建立 `apps/api`、`apps/web`、`packages/cli`、`packages/db`、`packages/shared` 的单仓分层骨架。
-- 已实现 Fastify `/health`、Vite + React 最小 Web 入口、CLI `health` / `migrate`、SQLite migration runner 和 `0001_metadata.sql`。
+- 已建立 P0 核心表、append-only events、operation、locks、CAS 字段和最小 timeline 查询能力。
+- 已实现 `packages/db` 的 transaction wrapper、project/task repository、event repository、operation repository 和 lock repository。
+- 已实现 CLI `timeline` 和 API `GET /tasks/:taskId/timeline`，用于最小事件时间线查看。
+- `operations` 已绑定 `pr_id` 作为 merge 作用域，避免 active merge operation 被绕过。
+- `events` 已通过 trigger 保持 append-only；task 状态变化和 event append 同事务提交。
 - SQLite 当前使用 Node 内置 `node:sqlite`，并通过 `engines.node >=22.22.2` 明确运行时约束；测试仍会出现 Node 的 ExperimentalWarning。后续如部署环境或稳定性要求变化，应在独立 change 中评估替换 driver。
-- Iteration 1 未实现完整数据模型、Event Store、operation ledger、daemon、provider、workflow adapter、Coordinator Agent tools 或 agent surface，后续不得把这些能力视为已存在。
-- 本轮验证通过：`openspec validate add-project-skeleton --strict`、`pnpm typecheck`、`pnpm test`、`pnpm build`。
+- 本轮验证通过：`openspec validate add-core-data-model --strict`、`pnpm typecheck`、`pnpm test`、`pnpm build`。
 - 本轮已经过独立 `gpt-5.5 high` subagent review，两轮 review 后无必须修复问题；review 明确检查了是否符合 `docs/` 总体设计心智、是否过度设计、是否污染分层边界。
 
 ## 6. 实现顺序

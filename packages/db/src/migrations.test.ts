@@ -12,13 +12,19 @@ describe("runMigrations", () => {
     const first = runMigrations(databasePath);
     const second = runMigrations(databasePath);
 
-    expect(first.applied).toEqual([{ id: "0001_metadata.sql", applied: true }]);
-    expect(second.applied).toEqual([{ id: "0001_metadata.sql", applied: false }]);
+    expect(first.applied).toEqual([
+      { id: "0001_metadata.sql", applied: true },
+      { id: "0002_core_data_model.sql", applied: true }
+    ]);
+    expect(second.applied).toEqual([
+      { id: "0001_metadata.sql", applied: false },
+      { id: "0002_core_data_model.sql", applied: false }
+    ]);
 
     const db = new DatabaseSync(databasePath);
     try {
       const row = db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get() as { count: number };
-      expect(row.count).toBe(1);
+      expect(row.count).toBe(2);
     } finally {
       db.close();
     }

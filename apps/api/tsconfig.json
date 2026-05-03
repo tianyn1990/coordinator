@@ -5,6 +5,9 @@
     "rootDir": "src",
     "outDir": "dist"
   },
-  "references": [{ "path": "../../packages/shared" }],
+  "references": [
+    { "path": "../../packages/db" },
+    { "path": "../../packages/shared" }
+  ],
   "include": ["src/**/*.ts"]
 }
