@@ -381,16 +381,52 @@ export function buildTaskSurfaceFromDb(context: DbContext, taskId: string): Surf
   if (!project) {
     throw new Error(`project not found: ${task.projectId}`);
   }
+  const latestAttempt = findLatestAttemptForTask(context, task.id);
+  const activeWorkspace = latestAttempt ? findActiveWorkspaceForAttempt(context, latestAttempt.id) : undefined;
+  const activeWorkflowRun = latestAttempt ? findActiveWorkflowRunForAttempt(context, latestAttempt.id) : undefined;
+  const recentAgentSessions = findRecentAgentSessionsForTask(context, task.id);
 
   return buildCoordinatorSurface({
     surfaceKind: deriveSurfaceKind(task),
     task: toTaskSnapshot(task),
     project: toProjectSnapshot(project),
+    attempt: latestAttempt
+      ? {
+          id: latestAttempt.id,
+          status: latestAttempt.status,
+          summary: latestAttempt.reason
+        }
+      : undefined,
     currentState: {
-      taskStatus: task.status
+      taskStatus: task.status,
+      attemptStatus: latestAttempt?.status,
+      workflowRunStatus: activeWorkflowRun?.status
     },
-    workflowRuns: [],
-    agentSessions: [],
+    workspace: activeWorkspace
+      ? {
+          id: activeWorkspace.id,
+          status: activeWorkspace.status,
+          path: activeWorkspace.workspace_path ?? undefined,
+          branch: activeWorkspace.branch ?? undefined,
+          baseBranch: activeWorkspace.base_branch ?? undefined
+        }
+      : undefined,
+    workflowRuns: activeWorkflowRun
+      ? [
+          {
+            id: activeWorkflowRun.id,
+            profileId: activeWorkflowRun.profile_id,
+            status: activeWorkflowRun.status,
+            handoffKind: activeWorkflowRun.handoff_kind ?? undefined
+          }
+        ]
+      : [],
+    agentSessions: recentAgentSessions.map((session) => ({
+      id: session.id,
+      providerKind: session.provider_kind,
+      role: session.role,
+      status: session.status
+    })),
     humanRequests: [],
     autonomyGuidance: {
       level: normalizeAutonomy(task.autonomy)
@@ -404,7 +440,9 @@ export function buildTaskSurfaceFromDb(context: DbContext, taskId: string): Surf
       status: "not_ready",
       latestValidation: "当前没有可用验证契约；进入 review/merge 前必须显式生成。"
     },
-    artifactRoot: "coordinator/artifacts/",
+    artifactRoot: activeWorkspace?.workspace_path
+      ? `${activeWorkspace.workspace_path}/coordinator/artifacts/`
+      : "coordinator/artifacts/",
     createdAt: new Date().toISOString()
   });
 }
@@ -427,6 +465,9 @@ export function renderSurfaceMarkdown(
   lines.push(``);
   lines.push(`## Task`);
   lines.push(`- title: ${json.task.title}`);
+  if (json.task.description) {
+    lines.push(`- description: ${json.task.description}`);
+  }
   lines.push(`- status: ${json.task.status}`);
   lines.push(`- autonomy: ${json.task.autonomy}`);
   lines.push(`- source_kind: ${json.task.source_kind}`);
@@ -437,6 +478,35 @@ export function renderSurfaceMarkdown(
   if (json.project.workflow_launcher) lines.push(`- workflow_launcher: ${json.project.workflow_launcher}`);
   if (json.project.outer_agent_default_provider) lines.push(`- outer_agent_default_provider: ${json.project.outer_agent_default_provider}`);
   if (json.project.inner_agent_default_provider) lines.push(`- inner_agent_default_provider: ${json.project.inner_agent_default_provider}`);
+  lines.push(``);
+  lines.push(`## Current State`);
+  lines.push(`- task_status: ${json.current_state.task_status}`);
+  if (json.attempt) {
+    lines.push(`- attempt: ${json.attempt.id} (${json.attempt.status})`);
+  } else {
+    lines.push(`- attempt: 当前尚未创建 attempt。`);
+  }
+  if (json.workspace) {
+    lines.push(`- workspace: ${json.workspace.id ?? "unknown"} (${json.workspace.status ?? "unknown"})`);
+    if (json.workspace.path) lines.push(`- workspace_path: ${json.workspace.path}`);
+    if (json.workspace.branch) lines.push(`- workspace_branch: ${json.workspace.branch}`);
+  } else {
+    lines.push(`- workspace: 当前 surface 未发现 active workspace；如需执行代码工作，应先通过受控工具创建 workspace。`);
+  }
+  if (json.workflow_runs.length > 0) {
+    for (const run of json.workflow_runs) {
+      lines.push(`- workflow_run: ${run.id ?? "unknown"} profile=${run.profile_id ?? "unknown"} status=${run.status ?? "unknown"} handoff=${run.handoff_kind ?? "none"}`);
+    }
+  } else {
+    lines.push(`- workflow_run: 当前 surface 未发现 active workflow run。`);
+  }
+  if (json.agent_sessions.length > 0) {
+    for (const session of json.agent_sessions) {
+      lines.push(`- agent_session: ${session.id ?? "unknown"} provider=${session.provider_kind ?? "unknown"} role=${session.role ?? "unknown"} status=${session.status ?? "unknown"}`);
+    }
+  } else {
+    lines.push(`- agent_session: 当前没有 recent agent session。`);
+  }
   lines.push(``);
   if (json.merge_approval) {
     lines.push(`## Merge Approval`);
@@ -808,6 +878,85 @@ function toTaskSnapshot(task: TaskRecord): TaskSnapshot {
     status: task.status,
     stateVersion: task.stateVersion
   };
+}
+
+function findLatestAttemptForTask(
+  context: DbContext,
+  taskId: string
+): { id: string; status: string; reason: string } | undefined {
+  return context.db
+    .prepare(
+      `SELECT id, status, reason FROM attempts
+       WHERE task_id = ?
+       ORDER BY created_at DESC, id DESC
+       LIMIT 1`
+    )
+    .get(taskId) as { id: string; status: string; reason: string } | undefined;
+}
+
+function findActiveWorkspaceForAttempt(
+  context: DbContext,
+  attemptId: string
+):
+  | {
+      id: string;
+      status: string;
+      workspace_path: string | null;
+      branch: string | null;
+      base_branch: string | null;
+    }
+  | undefined {
+  return context.db
+    .prepare(
+      `SELECT id, status, workspace_path, branch, base_branch FROM workspaces
+       WHERE attempt_id = ? AND status IN ('planned', 'creating', 'ready', 'dirty')
+       ORDER BY created_at ASC, id ASC
+       LIMIT 1`
+    )
+    .get(attemptId) as
+    | {
+        id: string;
+        status: string;
+        workspace_path: string | null;
+        branch: string | null;
+        base_branch: string | null;
+      }
+    | undefined;
+}
+
+function findActiveWorkflowRunForAttempt(
+  context: DbContext,
+  attemptId: string
+):
+  | {
+      id: string;
+      profile_id: string;
+      status: string;
+      handoff_kind: string | null;
+    }
+  | undefined {
+  return context.db
+    .prepare(
+      `SELECT id, profile_id, status, handoff_kind FROM workflow_runs
+       WHERE attempt_id = ? AND status IN ('planned', 'starting', 'running', 'blocked', 'handoff', 'unknown')
+       ORDER BY created_at ASC, id ASC
+       LIMIT 1`
+    )
+    .get(attemptId) as { id: string; profile_id: string; status: string; handoff_kind: string | null } | undefined;
+}
+
+function findRecentAgentSessionsForTask(
+  context: DbContext,
+  taskId: string
+): Array<{ id: string; provider_kind: string; role: string; status: string }> {
+  return context.db
+    .prepare(
+      `SELECT id, provider_kind, role, status FROM agent_sessions
+       WHERE task_id = ?
+       ORDER BY created_at DESC, id DESC
+       LIMIT 3`
+    )
+    .all(taskId) as Array<{ id: string; provider_kind: string; role: string; status: string }>;
 }
 
 function toProjectSnapshot(project: ProjectRecord): ProjectSnapshot {

@@ -14,7 +14,7 @@
 workspace 需要满足：
 
 - 每个 attempt 隔离。
-- agent 命令只在 workspace 内执行。
+- inner 或会修改 repo 的 agent 命令只在 workspace repo 内执行；outer decision-only provider 在受控 sessionRoot 内执行。
 - retry / continuation 可复用 workspace。
 - rework 可选择复用或新建 workspace。
 - PR/MR branch 可追踪。
@@ -188,18 +188,27 @@ streamEvents
 
 但第一版实现可根据 provider 能力逐步补齐。
 
+当前已落地的 outer Coordinator Agent runtime 是 decision-only：
+
+- provider cwd 固定为 sessionRoot，不指向 project repo 或 workspace repo。
+- prompt、surface JSON、surface Markdown、transcript 和 final response 都保存在 `coordinator/sessions/<session-id>/`。
+- CodexProvider 使用 read-only sandbox；ClaudeCodeProvider 使用 bare / dontAsk / 空 tools。
+- 外层 agent 本轮不能直接执行 repo 写入、不能绕过 Coordinator Surface，也不能替代后续 agent tools executor。
+
 ## 10. Outer 和 Inner Agent
 
 外层：
 
 - Coordinator Agent。
 - 基于 Coordinator Surface 和 tools 决策。
+- decision-only session 在 sessionRoot 内运行，复杂上下文通过 prompt/surface artifact 输入。
 
 内层：
 
 - coding agent。
 - 在 repo workspace 中使用 `workflow`。
 - 处理具体代码工作。
+- 会修改 repo 的 inner agent 命令 cwd 必须位于 workspace repo 内。
 
 两层可以使用不同 provider：
 
@@ -322,7 +331,8 @@ cleanup 不应默认立即删除。
 
 ## 17. 安全边界
 
-- agent 命令 cwd 必须在 workspace repo 内。
+- inner coding agent 或任何会修改 workspace/repo 的 agent 命令 cwd 必须在 workspace repo 内。
+- outer Coordinator Agent 的 decision-only provider cwd 必须在 `coordinator/sessions/<session-id>/` 这类 sessionRoot 内，不能获得 repo 写权限；它只能通过 prompt/surface artifact 读取当前可见事实。
 - artifact path 必须在 coordinator artifact root 内。
 - workspace path 必须在 workspace root 内。
 - 不允许通过 `../` 逃逸。

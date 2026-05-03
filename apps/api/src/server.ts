@@ -1,11 +1,13 @@
 import Fastify, { type FastifyInstance } from "fastify";
 import { ActiveResourceConflictError, listTaskEvents, withDatabase } from "@coordinator/db";
 import {
+  AgentProviderRuntimeError,
   ProjectRegistryInputError,
   WorkspaceManagerError,
   WorkflowProtocolError,
   buildTaskSurfaceFromDb,
   createAttemptWorkspace,
+  inspectAgentSession,
   inspectWorkflowCapabilities,
   inspectWorkflowRun,
   invokeWorkflowAction,
@@ -13,6 +15,7 @@ import {
   listWorkflowEvents,
   registerProject,
   resumeWorkspacePreflight,
+  runCoordinatorAgentSession,
   startWorkflowRun,
   viewProjectRegistry,
   type GitProviderKind
@@ -305,6 +308,66 @@ export function buildServer(): FastifyInstance {
     }
   });
 
+  server.post<{
+    Params: { taskId: string };
+    Body: RunAgentSessionBody;
+  }>(
+    "/tasks/:taskId/agent-sessions",
+    {
+      schema: {
+        body: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            providerId: { type: "string", minLength: 1 },
+            requestId: { type: "string", minLength: 1 },
+            timeoutMs: { type: "integer", minimum: 1 }
+          }
+        }
+      }
+    },
+    async (request, reply) => {
+      const databasePath = process.env.COORDINATOR_DB_PATH;
+      if (!databasePath) {
+        return reply.code(503).send({ error: "COORDINATOR_DB_PATH 未配置" });
+      }
+
+      try {
+        return withDatabase(databasePath, (context) =>
+          runCoordinatorAgentSession(context, {
+            taskId: request.params.taskId,
+            providerId: request.body.providerId,
+            requestId: request.body.requestId,
+            timeoutMs: request.body.timeoutMs
+          })
+        );
+      } catch (error) {
+        if (error instanceof AgentProviderRuntimeError || error instanceof ActiveResourceConflictError) {
+          return reply.code(400).send({ error: error.message });
+        }
+        throw error;
+      }
+    }
+  );
+
+  server.get<{ Params: { agentSessionId: string } }>("/agent-sessions/:agentSessionId", async (request, reply) => {
+    const databasePath = process.env.COORDINATOR_DB_PATH;
+    if (!databasePath) {
+      return reply.code(503).send({ error: "COORDINATOR_DB_PATH 未配置" });
+    }
+
+    try {
+      return withDatabase(databasePath, (context) =>
+        inspectAgentSession(context, { agentSessionId: request.params.agentSessionId })
+      );
+    } catch (error) {
+      if (error instanceof AgentProviderRuntimeError) {
+        return reply.code(400).send({ error: error.message });
+      }
+      throw error;
+    }
+  });
+
   return server;
 }
 
@@ -332,4 +395,10 @@ type WorkflowActionBody = {
   action: string;
   expectedStateVersion: number;
   arg?: string;
+};
+
+type RunAgentSessionBody = {
+  providerId?: string;
+  requestId?: string;
+  timeoutMs?: number;
 };

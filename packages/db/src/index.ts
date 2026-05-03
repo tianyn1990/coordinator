@@ -142,6 +142,54 @@ export type CreateWorkflowRunInput = {
   handoffKind?: string;
 };
 
+export type CreateAgentSessionInput = {
+  id?: string;
+  projectId: string;
+  taskId?: string;
+  attemptId?: string;
+  providerKind: string;
+  role: string;
+  status?: string;
+  transcriptPath?: string;
+  promptPath?: string;
+  surfaceJsonPath?: string;
+  surfaceMarkdownPath?: string;
+  finalResponsePath?: string;
+};
+
+export type AgentSessionRecord = {
+  id: string;
+  projectId: string;
+  taskId?: string;
+  attemptId?: string;
+  providerKind: string;
+  role: string;
+  status: string;
+  transcriptPath?: string;
+  promptPath?: string;
+  surfaceJsonPath?: string;
+  surfaceMarkdownPath?: string;
+  finalResponsePath?: string;
+  stateVersion: number;
+};
+
+export type UpdateAgentSessionInput = {
+  agentSessionId: string;
+  expectedStateVersion: number;
+  status: string;
+  transcriptPath?: string;
+  promptPath?: string;
+  surfaceJsonPath?: string;
+  surfaceMarkdownPath?: string;
+  finalResponsePath?: string;
+  lock?: {
+    resourceKind: string;
+    resourceId: string;
+    lockToken: string;
+    now?: Date;
+  };
+};
+
 export type WorkflowRunRecord = {
   id: string;
   projectId: string;
@@ -196,6 +244,7 @@ export type AppendEventInput = {
   taskId?: string;
   attemptId?: string;
   workspaceId?: string;
+  agentSessionId?: string;
   workflowRunId?: string;
   operationId?: string;
   transitionId?: string;
@@ -211,6 +260,7 @@ export type EventRecord = {
   summary: string;
   projectId?: string;
   taskId?: string;
+  agentSessionId?: string;
   severity: string;
   payload?: unknown;
   artifactRefs: string[];
@@ -419,6 +469,31 @@ export function createWorkflowRun(context: DbContext, input: CreateWorkflowRunIn
   return withTransaction(context, () => insertWorkflowRun(context, input));
 }
 
+export function createAgentSession(context: DbContext, input: CreateAgentSessionInput): AgentSessionRecord {
+  return withTransaction(context, () => insertAgentSession(context, input));
+}
+
+export function getAgentSession(context: DbContext, id: string): AgentSessionRecord | undefined {
+  const row = context.db.prepare("SELECT * FROM agent_sessions WHERE id = ?").get(id);
+  return row ? mapAgentSessionRow(row) : undefined;
+}
+
+export function getActiveAgentSessionByTask(
+  context: DbContext,
+  taskId: string,
+  role = "outer"
+): AgentSessionRecord | undefined {
+  const row = context.db
+    .prepare(
+      `SELECT * FROM agent_sessions
+       WHERE task_id = ? AND role = ? AND status IN ('planned', 'starting', 'running', 'stalled', 'unknown')
+       ORDER BY created_at ASC, id ASC
+       LIMIT 1`
+    )
+    .get(taskId, role);
+  return row ? mapAgentSessionRow(row) : undefined;
+}
+
 export function getWorkflowRun(context: DbContext, id: string): WorkflowRunRecord | undefined {
   const row = context.db.prepare("SELECT * FROM workflow_runs WHERE id = ?").get(id);
   return row ? mapWorkflowRunRow(row) : undefined;
@@ -465,6 +540,44 @@ export function updateWorkflowRun(context: DbContext, input: UpdateWorkflowRunIn
     }
 
     return requireWorkflowRun(context, input.workflowRunId);
+  });
+}
+
+export function updateAgentSession(context: DbContext, input: UpdateAgentSessionInput): AgentSessionRecord {
+  return withTransaction(context, () => {
+    if (input.lock) {
+      assertLockHeld(context, input.lock.resourceKind, input.lock.resourceId, input.lock.lockToken, input.lock.now);
+    }
+
+    const result = context.db
+      .prepare(
+        `UPDATE agent_sessions
+         SET status = ?,
+             transcript_path = COALESCE(?, transcript_path),
+             prompt_path = COALESCE(?, prompt_path),
+             surface_json_path = COALESCE(?, surface_json_path),
+             surface_markdown_path = COALESCE(?, surface_markdown_path),
+             final_response_path = COALESCE(?, final_response_path),
+             state_version = state_version + 1,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ? AND state_version = ?`
+      )
+      .run(
+        input.status,
+        input.transcriptPath ?? null,
+        input.promptPath ?? null,
+        input.surfaceJsonPath ?? null,
+        input.surfaceMarkdownPath ?? null,
+        input.finalResponsePath ?? null,
+        input.agentSessionId,
+        input.expectedStateVersion
+      );
+
+    if (result.changes === 0) {
+      throw new CasConflictError(`agent session ${input.agentSessionId} state_version mismatch`);
+    }
+
+    return requireAgentSession(context, input.agentSessionId);
   });
 }
 
@@ -556,9 +669,10 @@ export function appendEvent(context: DbContext, input: AppendEventInput): EventR
   const result = context.db
     .prepare(
       `INSERT INTO events (
-        operation_id, transition_id, lock_token, project_id, task_id, attempt_id, workspace_id, workflow_run_id, type, summary,
+        operation_id, transition_id, lock_token, project_id, task_id, attempt_id, workspace_id, agent_session_id,
+        workflow_run_id, type, summary,
         payload_json, artifact_refs_json, severity
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       input.operationId ?? null,
@@ -568,6 +682,7 @@ export function appendEvent(context: DbContext, input: AppendEventInput): EventR
       input.taskId ?? null,
       input.attemptId ?? null,
       input.workspaceId ?? null,
+      input.agentSessionId ?? null,
       input.workflowRunId ?? null,
       input.type,
       input.summary,
@@ -856,6 +971,44 @@ function insertWorkspace(context: DbContext, input: CreateWorkspaceInput): Works
   return requireWorkspace(context, id);
 }
 
+function insertAgentSession(context: DbContext, input: CreateAgentSessionInput): AgentSessionRecord {
+  const id = input.id ?? randomUUID();
+  context.db
+    .prepare(
+      `INSERT INTO agent_sessions (
+         id, project_id, task_id, attempt_id, provider_kind, role, status,
+         transcript_path, prompt_path, surface_json_path, surface_markdown_path, final_response_path
+       )
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      id,
+      input.projectId,
+      input.taskId ?? null,
+      input.attemptId ?? null,
+      input.providerKind,
+      input.role,
+      input.status ?? "planned",
+      input.transcriptPath ?? null,
+      input.promptPath ?? null,
+      input.surfaceJsonPath ?? null,
+      input.surfaceMarkdownPath ?? null,
+      input.finalResponsePath ?? null
+    );
+
+  appendEvent(context, {
+    type: "agent.session_created",
+    summary: `agent session record created: ${id}`,
+    projectId: input.projectId,
+    taskId: input.taskId,
+    attemptId: input.attemptId,
+    agentSessionId: id,
+    payload: { status: input.status ?? "planned", providerKind: input.providerKind, role: input.role }
+  });
+
+  return requireAgentSession(context, id);
+}
+
 function insertWorkflowRun(context: DbContext, input: CreateWorkflowRunInput): WorkflowRunRecord {
   const id = input.id ?? randomUUID();
   context.db
@@ -919,6 +1072,14 @@ function requireWorkspace(context: DbContext, id: string): WorkspaceRecord {
     throw new Error(`workspace not found: ${id}`);
   }
   return mapWorkspaceRow(row);
+}
+
+function requireAgentSession(context: DbContext, id: string): AgentSessionRecord {
+  const row = context.db.prepare("SELECT * FROM agent_sessions WHERE id = ?").get(id);
+  if (!row) {
+    throw new Error(`agent session not found: ${id}`);
+  }
+  return mapAgentSessionRow(row);
 }
 
 function requireWorkflowRun(context: DbContext, id: string): WorkflowRunRecord {
@@ -1093,6 +1254,39 @@ function mapWorkspaceRow(row: unknown): WorkspaceRecord {
   };
 }
 
+function mapAgentSessionRow(row: unknown): AgentSessionRecord {
+  const value = row as {
+    id: string;
+    project_id: string;
+    task_id: string | null;
+    attempt_id: string | null;
+    provider_kind: string;
+    role: string;
+    status: string;
+    transcript_path: string | null;
+    prompt_path: string | null;
+    surface_json_path: string | null;
+    surface_markdown_path: string | null;
+    final_response_path: string | null;
+    state_version: number;
+  };
+  return {
+    id: value.id,
+    projectId: value.project_id,
+    taskId: value.task_id ?? undefined,
+    attemptId: value.attempt_id ?? undefined,
+    providerKind: value.provider_kind,
+    role: value.role,
+    status: value.status,
+    transcriptPath: value.transcript_path ?? undefined,
+    promptPath: value.prompt_path ?? undefined,
+    surfaceJsonPath: value.surface_json_path ?? undefined,
+    surfaceMarkdownPath: value.surface_markdown_path ?? undefined,
+    finalResponsePath: value.final_response_path ?? undefined,
+    stateVersion: value.state_version
+  };
+}
+
 function mapWorkflowRunRow(row: unknown): WorkflowRunRecord {
   const value = row as {
     id: string;
@@ -1146,6 +1340,7 @@ function mapEventRow(row: unknown): EventRecord {
     summary: string;
     project_id: string | null;
     task_id: string | null;
+    agent_session_id: string | null;
     severity: string;
     payload_json: string | null;
     artifact_refs_json: string | null;
@@ -1157,6 +1352,7 @@ function mapEventRow(row: unknown): EventRecord {
     summary: value.summary,
     projectId: value.project_id ?? undefined,
     taskId: value.task_id ?? undefined,
+    agentSessionId: value.agent_session_id ?? undefined,
     severity: value.severity,
     payload: value.payload_json ? JSON.parse(value.payload_json) : undefined,
     artifactRefs: value.artifact_refs_json ? (JSON.parse(value.artifact_refs_json) as string[]) : [],

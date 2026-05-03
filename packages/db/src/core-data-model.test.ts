@@ -9,15 +9,19 @@ import {
   acquireLock,
   assertLockHeld,
   createOperation,
+  createAgentSession,
   createArtifact,
   createAttempt,
   createProject,
   createTask,
   createWorkspace,
+  getActiveAgentSessionByTask,
   getActiveWorkspaceByAttempt,
+  getAgentSession,
   listTaskEvents,
   releaseLock,
   runMigrations,
+  updateAgentSession,
   updateOperation,
   updateWorkspace,
   updateTaskStatus,
@@ -279,6 +283,66 @@ describe("core data model", () => {
             "INSERT INTO workflow_runs (id, project_id, task_id, attempt_id, profile_id, status) VALUES (?, ?, ?, ?, ?, ?)"
           )
           .run("workflow-2", project.id, task.id, attemptId, "feature", "planned");
+      })
+    ).toThrow(/constraint/);
+  });
+
+  it("agent session repository 可创建、更新和查询 active outer session", () => {
+    const databasePath = createMigratedDatabase();
+
+    const result = withDatabase(databasePath, (context) => {
+      const { project, task } = createAttemptFixture(context, "agent-session");
+      const session = createAgentSession(context, {
+        id: "agent-session-1",
+        projectId: project.id,
+        taskId: task.id,
+        providerKind: "fake",
+        role: "outer",
+        status: "starting",
+        promptPath: "/tmp/session/prompt.md",
+        surfaceJsonPath: "/tmp/session/surface.json",
+        surfaceMarkdownPath: "/tmp/session/surface.md",
+        transcriptPath: "/tmp/session/transcript.jsonl"
+      });
+      const running = updateAgentSession(context, {
+        agentSessionId: session.id,
+        expectedStateVersion: session.stateVersion,
+        status: "running"
+      });
+      return {
+        running,
+        active: getActiveAgentSessionByTask(context, task.id),
+        loaded: getAgentSession(context, session.id),
+        events: listTaskEvents(context, task.id)
+      };
+    });
+
+    expect(result.running).toMatchObject({
+      id: "agent-session-1",
+      status: "running",
+      promptPath: "/tmp/session/prompt.md"
+    });
+    expect(result.active?.id).toBe("agent-session-1");
+    expect(result.loaded?.transcriptPath).toBe("/tmp/session/transcript.jsonl");
+    expect(result.events.map((event) => event.type)).toContain("agent.session_created");
+  });
+
+  it("同一 task 只能有一个 active outer agent session", () => {
+    const databasePath = createMigratedDatabase();
+
+    expect(() =>
+      withDatabase(databasePath, (context) => {
+        const { project, task } = createAttemptFixture(context, "agent-active");
+        for (const id of ["agent-active-1", "agent-active-2"]) {
+          createAgentSession(context, {
+            id,
+            projectId: project.id,
+            taskId: task.id,
+            providerKind: "fake",
+            role: "outer",
+            status: "running"
+          });
+        }
       })
     ).toThrow(/constraint/);
   });

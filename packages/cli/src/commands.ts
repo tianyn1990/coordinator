@@ -1,10 +1,12 @@
 import { ActiveResourceConflictError, listTaskEvents, runMigrations, withDatabase } from "@coordinator/db";
 import {
+  AgentProviderRuntimeError,
   ProjectRegistryInputError,
   WorkspaceManagerError,
   WorkflowProtocolError,
   buildTaskSurfaceFromDb,
   createAttemptWorkspace,
+  inspectAgentSession,
   inspectWorkflowCapabilities,
   inspectWorkflowRun,
   invokeWorkflowAction,
@@ -12,6 +14,7 @@ import {
   listWorkflowEvents,
   registerProject,
   resumeWorkspacePreflight,
+  runCoordinatorAgentSession,
   startWorkflowRun,
   viewProjectRegistry
 } from "@coordinator/core";
@@ -365,10 +368,76 @@ export function runCli(args: string[]): CliResult {
     };
   }
 
+  if (command === "agent") {
+    const [subcommand, ...agentArgs] = rest;
+    try {
+      if (subcommand === "run") {
+        const databasePathResult = readRequiredOption(agentArgs, "--db");
+        const taskIdResult = readRequiredOption(agentArgs, "--task");
+        const providerResult = readOption(agentArgs, "--provider");
+        const requestIdResult = readOption(agentArgs, "--request-id");
+        const timeoutResult = readOption(agentArgs, "--timeout-ms");
+        const error = databasePathResult.error ?? taskIdResult.error ?? providerResult.error ?? requestIdResult.error ?? timeoutResult.error;
+        if (error) {
+          return { exitCode: 1, stdout: "", stderr: `${error}\n` };
+        }
+        const databasePath = databasePathResult.value;
+        const taskId = taskIdResult.value;
+        let timeoutMs: number | undefined;
+        if (timeoutResult.value !== undefined) {
+          const parsedTimeoutMs = Number(timeoutResult.value);
+          if (!Number.isInteger(parsedTimeoutMs) || parsedTimeoutMs <= 0) {
+            return { exitCode: 1, stdout: "", stderr: "agent run 参数不完整\n" };
+          }
+          timeoutMs = parsedTimeoutMs;
+        }
+        if (!databasePath || !taskId) {
+          return { exitCode: 1, stdout: "", stderr: "agent run 参数不完整\n" };
+        }
+        const result = withDatabase(databasePath, (context) =>
+          runCoordinatorAgentSession(context, {
+            taskId,
+            providerId: providerResult.value ?? undefined,
+            requestId: requestIdResult.value ?? undefined,
+            timeoutMs
+          })
+        );
+        return { exitCode: 0, stdout: `${JSON.stringify(result)}\n`, stderr: "" };
+      }
+
+      if (subcommand === "inspect") {
+        const databasePathResult = readRequiredOption(agentArgs, "--db");
+        const sessionIdResult = readRequiredOption(agentArgs, "--session");
+        const error = databasePathResult.error ?? sessionIdResult.error;
+        if (error) {
+          return { exitCode: 1, stdout: "", stderr: `${error}\n` };
+        }
+        const databasePath = databasePathResult.value;
+        const agentSessionId = sessionIdResult.value;
+        if (!databasePath || !agentSessionId) {
+          return { exitCode: 1, stdout: "", stderr: "agent inspect 参数不完整\n" };
+        }
+        const result = withDatabase(databasePath, (context) => inspectAgentSession(context, { agentSessionId }));
+        return { exitCode: 0, stdout: `${JSON.stringify(result)}\n`, stderr: "" };
+      }
+    } catch (error) {
+      if (error instanceof AgentProviderRuntimeError || error instanceof ActiveResourceConflictError) {
+        return { exitCode: 1, stdout: "", stderr: `${error.message}\n` };
+      }
+      throw error;
+    }
+
+    return {
+      exitCode: 1,
+      stdout: "",
+      stderr: "未知 agent 子命令，可用：agent run, agent inspect\n"
+    };
+  }
+
   return {
     exitCode: 1,
     stdout: "",
-    stderr: `未知命令：${command}\n可用命令：health, migrate --db <path>, timeline --db <path> --task <task-id>, surface --db <path> --task <task-id>, register --db <path> --repo <path>, projects --db <path>, workspace create, workspace preflight, workflow <subcommand>\n`
+    stderr: `未知命令：${command}\n可用命令：health, migrate --db <path>, timeline --db <path> --task <task-id>, surface --db <path> --task <task-id>, register --db <path> --repo <path>, projects --db <path>, workspace create, workspace preflight, workflow <subcommand>, agent <subcommand>\n`
   };
 }
 

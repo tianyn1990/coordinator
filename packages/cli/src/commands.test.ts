@@ -27,7 +27,8 @@ describe("runCli", () => {
         { id: "0001_metadata.sql", applied: true },
         { id: "0002_core_data_model.sql", applied: true },
         { id: "0003_project_registry.sql", applied: true },
-        { id: "0004_workflow_protocol_adapter.sql", applied: true }
+        { id: "0004_workflow_protocol_adapter.sql", applied: true },
+        { id: "0005_agent_provider_runtime.sql", applied: true }
       ]
     });
   });
@@ -199,5 +200,43 @@ describe("runCli", () => {
 
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain("缺少 --expected-version 参数");
+  });
+
+  it("agent run 可通过 fake provider 启动一次 outer session", () => {
+    const databasePath = join(mkdtempSync(join(tmpdir(), "coordinator-cli-agent-")), "agent.sqlite");
+    const repoPath = mkdtempSync(join(tmpdir(), "coordinator-cli-agent-repo-"));
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "coordinator-cli-agent-workspaces-"));
+    runMigrations(databasePath);
+    withDatabase(databasePath, (context) => {
+      const project = createProject(context, {
+        id: "project-cli-agent",
+        name: "agent",
+        repoPath,
+        workspaceRoot,
+        outerAgentDefaultProvider: "fake"
+      });
+      createTask(context, { id: "task-cli-agent", projectId: project.id, title: "agent" });
+    });
+
+    const result = runCli(["agent", "run", "--db", databasePath, "--task", "task-cli-agent", "--provider", "fake"]);
+
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      session: {
+        taskId: "task-cli-agent",
+        providerKind: "fake",
+        status: "completed"
+      }
+    });
+  });
+
+  it("agent inspect 要求 session 参数", () => {
+    const databasePath = join(mkdtempSync(join(tmpdir(), "coordinator-cli-agent-")), "agent.sqlite");
+    runMigrations(databasePath);
+
+    const result = runCli(["agent", "inspect", "--db", databasePath]);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("缺少 --session 参数");
   });
 });

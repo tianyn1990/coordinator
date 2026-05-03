@@ -2,6 +2,16 @@ import { existsSync, statSync } from "node:fs";
 import { basename, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { createProject, getProject, listProjects, type DbContext, type ProjectRecord } from "@coordinator/db";
+export {
+  AgentProviderRuntimeError,
+  ClaudeCodeProvider,
+  CodexProvider,
+  FakeAgentProvider,
+  ProviderUnavailableError,
+  createAgentProvider,
+  inspectAgentSession,
+  runCoordinatorAgentSession
+} from "./agent-provider-runtime.js";
 export { buildCoordinatorSurface, buildTaskSurfaceFromDb, renderSurfaceMarkdown } from "./surface.js";
 export {
   WorkspaceManagerError,
@@ -21,6 +31,16 @@ export {
   listWorkflowEvents,
   startWorkflowRun
 } from "./workflow-protocol-adapter.js";
+export type {
+  AgentProvider,
+  AgentProviderRunInput,
+  AgentProviderRunResult,
+  AgentProviderRunner,
+  AgentSessionInspection,
+  AgentSessionRuntimeResult,
+  InspectAgentSessionInput,
+  RunCoordinatorAgentSessionInput
+} from "./agent-provider-runtime.js";
 export type {
   CreateAttemptWorkspaceInput,
   PreflightStatus,

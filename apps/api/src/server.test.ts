@@ -194,4 +194,49 @@ describe("API health", () => {
       }
     }
   });
+
+  it("agent session API 可通过 fake provider 启动并查询", async () => {
+    const databasePath = join(mkdtempSync(join(tmpdir(), "coordinator-api-agent-")), "api.sqlite");
+    const repoPath = mkdtempSync(join(tmpdir(), "coordinator-api-agent-repo-"));
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "coordinator-api-agent-workspaces-"));
+    runMigrations(databasePath);
+    withDatabase(databasePath, (context) => {
+      const project = createProject(context, {
+        id: "project-api-agent",
+        name: "agent",
+        repoPath,
+        workspaceRoot,
+        outerAgentDefaultProvider: "fake"
+      });
+      createTask(context, { id: "task-api-agent", projectId: project.id, title: "agent api" });
+    });
+
+    const previous = process.env.COORDINATOR_DB_PATH;
+    process.env.COORDINATOR_DB_PATH = databasePath;
+    try {
+      const server = buildServer();
+      const created = await server.inject({
+        method: "POST",
+        url: "/tasks/task-api-agent/agent-sessions",
+        payload: { providerId: "fake" }
+      });
+
+      expect(created.statusCode).toBe(200);
+      const body = created.json();
+      expect(body.session).toMatchObject({ taskId: "task-api-agent", providerKind: "fake", status: "completed" });
+
+      const inspected = await server.inject({ method: "GET", url: `/agent-sessions/${body.session.id}` });
+      expect(inspected.statusCode).toBe(200);
+      expect(inspected.json()).toMatchObject({
+        session: { id: body.session.id },
+        artifacts: { finalResponsePath: body.artifacts.finalResponsePath }
+      });
+    } finally {
+      if (previous === undefined) {
+        delete process.env.COORDINATOR_DB_PATH;
+      } else {
+        process.env.COORDINATOR_DB_PATH = previous;
+      }
+    }
+  });
 });

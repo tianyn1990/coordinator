@@ -186,6 +186,18 @@ coordinator/sessions/<session-id>/surface.md
 - JSON machine snapshot。
 - Markdown agent-facing surface。
 
+当前 Agent Provider Runtime 已落地以下 session artifact：
+
+```text
+coordinator/sessions/<session-id>/prompt.md
+coordinator/sessions/<session-id>/surface.json
+coordinator/sessions/<session-id>/surface.md
+coordinator/sessions/<session-id>/transcript.jsonl
+coordinator/sessions/<session-id>/final-response.md
+```
+
+这些 artifact 是可观测性证据，不是 hidden memory。后续是否进入 agent 可见世界，仍必须由 Coordinator Surface 显式暴露。
+
 ## 7. Tool Trace
 
 每个 tool call 记录：

@@ -156,11 +156,11 @@ P2 只预留接口和规划，不进入 V1 完成标准：
 
 ### 当前进度
 
-- 当前阶段：`Iteration 6: Workflow Protocol Adapter` 已完成。
-- 当前 OpenSpec change：`add-workflow-protocol-adapter` 已归档为 `openspec/changes/archive/2026-05-03-add-workflow-protocol-adapter`。
-- 当前正式规格：`openspec/specs/workflow-protocol-adapter/spec.md`。
-- 下一阶段：`Iteration 7: Agent Provider Adapter / Coordinator Agent Runtime`。
-- 下一阶段重点：实现外层 Coordinator Agent provider/runtime 的最小执行底座，使 agent 能基于 Coordinator Surface 和受控 tools 进行一次决策；继续保持 provider 与 workflow adapter 解耦，不提前实现 daemon 或 PR/MR provider。
+- 当前阶段：`Iteration 7: Agent Provider Adapter / Coordinator Agent Runtime` 已完成。
+- 当前 OpenSpec change：`add-agent-provider-runtime` 已归档为 `openspec/changes/archive/2026-05-03-add-agent-provider-runtime`。
+- 当前正式规格：`openspec/specs/agent-provider-runtime/spec.md`。
+- 下一阶段：`Iteration 8: Coordinator Agent Tools`。
+- 下一阶段重点：实现 P0 最小 agent tools executor，使 Coordinator Agent 能通过当前 surface 暴露的受控工具推进计划、attempt/workspace、workflow run 和 human request；继续保持工具参数窄、复杂信息 artifact-first，并避免提前实现 daemon 或 PR/MR provider。
 
 ### 重点关注事项
 
@@ -169,7 +169,7 @@ P2 只预留接口和规划，不进入 V1 完成标准：
 - 已实现 CLI `register` / `projects` 和 API `/projects` / `/projects/:projectId` / `/projects/register` 的最小入口。
 - Project Registry 仍遵守默认分支显式确认原则；GitHub/GitLab 自动识别失败时可显式选择。
 - 已建立 `Coordinator Surface` builder，支持 machine JSON 与 agent-facing Markdown 同源生成，并覆盖 bootstrap / planning / execution / human_waiting / human_answered / review / merge_waiting / completed / failure / resume fixture。
-- 已实现最小 DB task surface 入口：`buildTaskSurfaceFromDb` 只读取当前已有 task/project 机器事实，不提前把 human request、workflow run、PR/MR 等未来 repository 逻辑塞入 DB loader。
+- 已实现 DB task surface 入口：`buildTaskSurfaceFromDb` 读取 task/project、latest attempt、active workspace、active workflow run、recent agent session 等当前已有机器事实，并翻译为 agent-facing Markdown；仍不把 PR/MR provider、human request 完整生命周期或未来 daemon 逻辑塞入 DB loader。
 - 已实现 CLI `surface --db <path> --task <task-id> [--format json|markdown]` 和 API `GET /tasks/:taskId/surface`，二者都是 operator 调试入口，不是 agent tool。
 - Tool visibility 已按 `contracts.md` 收窄，显式排除 operator-only tools；普通 PR/MR open、merge_waiting、human_waiting、completed/failure 等关键窗口已由 fixture tests 覆盖。
 - Merge approval 可见性已改为显式 `mergeApproval` snapshot 校验，只有匹配当前 PR/MR 且 head/base/validation/merge strategy 有效时才暴露 `merge_after_approval`。
@@ -189,8 +189,14 @@ P2 只预留接口和规划，不进入 V1 完成标准：
 - 已实现 CLI/API operator-only workflow 调试入口：capabilities/start/status/action/artifacts/events；这些入口未进入 Coordinator Surface，也不是 agent tools。`workflow action` CLI/API 需要显式 expected state version，避免响应丢失后的重复副作用。
 - 已补充 Workflow Protocol Adapter contract tests：capabilities cwd、profile implemented gate、operation-first start、start side effect 后 unknown、stage/substate 不驱动 handoff、action operation/idempotency/replay、arg 规范化、artifact/event 只读引用、`.workflow` private state 不读写、active run 复用与 profile conflict。
 - 第六轮经过多轮独立 `gpt-5.5 high` subagent review，所有必须修复项已处理并复验。后续可加强但不阻塞本轮：status/action/artifacts/events 校验返回 runId 与当前 externalId 一致；API 对 CAS/lock conflict 返回更细的 409 与 machine-readable code；capabilities.commands 按命令做 gate；daemon/reconciliation 迭代补齐 `unknown` operation 的 inspect/reconcile 矩阵。
+- 已实现 Agent Provider Runtime：提供 `AgentProvider` interface、`CodexProvider`、`ClaudeCodeProvider`、`FakeAgentProvider`，以及 `runCoordinatorAgentSession` / `inspectAgentSession`。
+- Outer Coordinator Agent 本轮是 decision-only runtime：provider cwd 固定为 sessionRoot，不指向 project repo 或 workspace repo；Codex 使用 read-only sandbox，Claude Code 使用 bare / dontAsk / 空 tools，避免绕过 Coordinator Surface 和 agent tools executor。
+- Agent session 启动已按 operation-first 与 fencing 收敛：创建 `agent:session:<task-id>:outer:<provider-id>:<request-id>` operation，获取 `task-agent` lock，写 `starting/running/completed` session 状态，保存 prompt/surface/transcript/final-response artifact；默认 request id 为 `task-v<task.stateVersion>`，CLI/API 可显式传入。
+- Agent session 可靠性约束已覆盖：active outer session 唯一性、provider 参数窄化、复杂上下文通过 prompt/surface artifact、failure 后 operation/session 受控进入 failed/unknown 并登记可观测 artifact；lock TTL 至少覆盖 `timeoutMs + 60_000`，completion/failure 使用 fresh timestamp 做 fencing。
+- 已实现 CLI/API operator-only agent 调试入口：`agent run/inspect` 和 `POST /tasks/:taskId/agent-sessions`、`GET /agent-sessions/:agentSessionId`；这些入口未进入 Coordinator Surface，也不是 agent tools。
+- 已补充 Agent Provider Runtime contract tests：fake provider、Codex/Claude command shape、operation idempotency requestId、active session uniqueness、surface prompt 主输入、active workspace 下 provider cwd 仍为 sessionRoot、CLI/API operator-only 入口。
+- 第七轮经过多轮独立 `gpt-5.5 high` subagent review，所有必须修复项已处理并复验。修复点包括：outer provider 权限边界、provider cwd/sessionRoot、lock TTL/fresh timestamp fencing、DB surface 投影补齐、稳定 requestId idempotency key、OpenSpec 与 docs 对齐。
 - 本轮验证通过：`openspec validate --all --strict`、`pnpm typecheck`、`pnpm test`、`pnpm build`。
-- 本轮已经过独立 `gpt-5.5 high` subagent review；review 明确检查了是否符合 `docs/` 总体设计心智、是否持续对齐必要设计文档、是否过度设计、是否污染分层边界、是否存在协议漂移和过度暴露复杂 JSON。多轮 review 提出的 workflow start/action 幂等、operation replay、lock/fencing、expected state version、action key 碰撞、arg 规范化、side effect 后 unknown 等问题均已修复并复验。
 
 ## 6. 实现顺序
 
