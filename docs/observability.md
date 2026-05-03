@@ -309,6 +309,21 @@ P0 只要保证以下视图可用：
 
 其他视图可以在 P1 逐步补齐，但不能阻塞第一条闭环。
 
+当前已落地的 Web operator console 覆盖：
+
+- task list 和 manual task 创建。
+- task detail current blocker。
+- Coordinator Surface snapshot 的 JSON/Markdown 摘要。
+- available tools 和 denied actions 展示。
+- execution plan、workspace、workflow run、agent session、PR/MR、human request 摘要。
+- append-only event timeline。
+- `agent_tool_call` tool trace，包括 tool name、status、failure code 和 result summary。
+- human request answer 表单，回答由 Core 写入 artifact 并记录 `human.answer_received` event。
+- merge approval / reject / merge 操作入口，approval snapshot 和 merge 结果仍以 Core/PR Provider Runtime 为准。
+- daemon tick 调试按钮，用于本地没有长运行 daemon 时推进单次 tick。
+
+这些视图是 operator 可观测面，不是 Coordinator Agent 的 hidden memory。是否让 agent 看到某个事实，仍必须通过 Coordinator Surface 显式暴露。
+
 ## 10. Reconciliation 可观测性
 
 每次 reconciliation 应记录：

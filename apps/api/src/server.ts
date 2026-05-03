@@ -1,26 +1,31 @@
 import Fastify, { type FastifyInstance } from "fastify";
-import { ActiveResourceConflictError, listTaskEvents, withDatabase } from "@coordinator/db";
+import { ActiveResourceConflictError, CasConflictError, listTaskEvents, withDatabase } from "@coordinator/db";
 import {
   AgentProviderRuntimeError,
   CoordinatorAgentToolError,
   DaemonRuntimeError,
+  OperatorSurfaceError,
   ProjectRegistryInputError,
   PullRequestProviderError,
   WorkspaceManagerError,
   WorkflowProtocolError,
   approveMergeRuntime,
   buildTaskSurfaceFromDb,
+  createManualTask,
   createAttemptWorkspace,
   createPullRequestRuntime,
   executeCoordinatorAgentTool,
+  getOperatorTaskDetail,
   inspectAgentSession,
   inspectPullRequestReviewRuntime,
   inspectWorkflowCapabilities,
   inspectWorkflowRun,
+  listOperatorTasks,
   invokeWorkflowAction,
   listWorkflowArtifacts,
   listWorkflowEvents,
   mergeAfterApprovalRuntime,
+  recordHumanAnswerRuntime,
   registerProject,
   rejectMergeRuntime,
   requestMergeApprovalRuntime,
@@ -37,7 +42,83 @@ import { getHealthStatus } from "@coordinator/shared";
 export function buildServer(): FastifyInstance {
   const server = Fastify({ logger: true });
 
+  server.addHook("onRequest", (request, reply, done) => {
+    const origin = request.headers.origin;
+    const allowedOrigins = resolveAllowedOrigins();
+    if (origin && allowedOrigins.has(origin)) {
+      reply.header("Access-Control-Allow-Origin", origin);
+      reply.header("Vary", "Origin");
+    }
+    reply.header("Access-Control-Allow-Methods", "GET,POST,PATCH,OPTIONS");
+    reply.header("Access-Control-Allow-Headers", "Content-Type");
+    // Web 是 operator surface，开发期会跨端口访问 API；preflight 在 API 边界直接收口。
+    if (request.method === "OPTIONS") {
+      void reply.code(204).send();
+      return;
+    }
+    done();
+  });
+
   server.get("/health", async () => getHealthStatus());
+  server.get<{ Querystring: { limit?: string } }>("/tasks", async (request, reply) => {
+    const databasePath = process.env.COORDINATOR_DB_PATH;
+    if (!databasePath) {
+      return reply.code(503).send({ error: "COORDINATOR_DB_PATH 未配置" });
+    }
+
+    const limit = parsePositiveInt(request.query.limit, 50);
+    const tasks = withDatabase(databasePath, (context) => listOperatorTasks(context, limit));
+    return { tasks };
+  });
+  server.post<{ Body: CreateTaskBody }>(
+    "/tasks",
+    {
+      schema: {
+        body: {
+          type: "object",
+          required: ["projectId", "title"],
+          additionalProperties: false,
+          properties: {
+            projectId: { type: "string", minLength: 1 },
+            title: { type: "string", minLength: 1 },
+            description: { type: "string" },
+            autonomy: { type: "string", enum: ["conservative", "balanced", "aggressive"] }
+          }
+        }
+      }
+    },
+    async (request, reply) => {
+      const databasePath = process.env.COORDINATOR_DB_PATH;
+      if (!databasePath) {
+        return reply.code(503).send({ error: "COORDINATOR_DB_PATH 未配置" });
+      }
+
+      try {
+        const task = withDatabase(databasePath, (context) => createManualTask(context, request.body));
+        return { task };
+      } catch (error) {
+        if (error instanceof OperatorSurfaceError) {
+          return reply.code(400).send({ error: error.message });
+        }
+        throw error;
+      }
+    }
+  );
+  server.get<{ Params: { taskId: string } }>("/tasks/:taskId", async (request, reply) => {
+    const databasePath = process.env.COORDINATOR_DB_PATH;
+    if (!databasePath) {
+      return reply.code(503).send({ error: "COORDINATOR_DB_PATH 未配置" });
+    }
+
+    try {
+      return withDatabase(databasePath, (context) => getOperatorTaskDetail(context, request.params.taskId));
+    } catch (error) {
+      if (error instanceof OperatorSurfaceError) {
+        return reply.code(404).send({ error: error.message });
+      }
+      throw error;
+    }
+  });
   server.get<{ Params: { taskId: string } }>("/tasks/:taskId/timeline", async (request, reply) => {
     const databasePath = process.env.COORDINATOR_DB_PATH;
     if (!databasePath) {
@@ -108,6 +189,53 @@ export function buildServer(): FastifyInstance {
         return result;
       } catch (error) {
         if (error instanceof ProjectRegistryInputError) {
+          return reply.code(400).send({ error: error.message });
+        }
+        throw error;
+      }
+    }
+  );
+
+  server.post<{
+    Params: { humanRequestId: string };
+    Body: HumanAnswerBody;
+  }>(
+    "/human-requests/:humanRequestId/answer",
+    {
+      schema: {
+        body: {
+          type: "object",
+          required: ["expectedStateVersion", "answer"],
+          additionalProperties: false,
+          properties: {
+            expectedStateVersion: { type: "integer", minimum: 0 },
+            answer: { type: "string", minLength: 1 },
+            answeredBy: { type: "string", minLength: 1 }
+          }
+        }
+      }
+    },
+    async (request, reply) => {
+      const databasePath = process.env.COORDINATOR_DB_PATH;
+      if (!databasePath) {
+        return reply.code(503).send({ error: "COORDINATOR_DB_PATH 未配置" });
+      }
+
+      try {
+        return withDatabase(databasePath, (context) =>
+          recordHumanAnswerRuntime(context, {
+            humanRequestId: request.params.humanRequestId,
+            expectedStateVersion: request.body.expectedStateVersion,
+            answer: request.body.answer,
+            answeredBy: request.body.answeredBy ?? "web-operator"
+          })
+        );
+      } catch (error) {
+        if (
+          error instanceof OperatorSurfaceError ||
+          error instanceof ActiveResourceConflictError ||
+          error instanceof CasConflictError
+        ) {
           return reply.code(400).send({ error: error.message });
         }
         throw error;
@@ -680,6 +808,13 @@ type RegisterProjectBody = {
   workspaceRoot?: string;
 };
 
+type CreateTaskBody = {
+  projectId: string;
+  title: string;
+  description?: string;
+  autonomy?: "conservative" | "balanced" | "aggressive";
+};
+
 type CreateWorkspaceBody = {
   owner?: string;
 };
@@ -736,3 +871,29 @@ type MergeApprovalBody = {
   decision: "approve" | "reject";
   actor?: string;
 };
+
+type HumanAnswerBody = {
+  expectedStateVersion: number;
+  answer: string;
+  answeredBy?: string;
+};
+
+function parsePositiveInt(value: string | undefined, fallback: number): number {
+  if (value === undefined) {
+    return fallback;
+  }
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function resolveAllowedOrigins(): Set<string> {
+  const configured = process.env.COORDINATOR_WEB_ORIGINS
+    ?.split(",")
+    .map((origin) => origin.trim())
+    .filter((origin) => origin.length > 0);
+  return new Set(
+    configured && configured.length > 0
+      ? configured
+      : ["http://127.0.0.1:5173", "http://localhost:5173", "http://127.0.0.1:4173", "http://localhost:4173"]
+  );
+}

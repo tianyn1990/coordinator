@@ -17,6 +17,13 @@ export {
   runCoordinatorAgentSession
 } from "./agent-provider-runtime.js";
 export { DaemonRuntimeError, parseAgentToolRequest, runDaemonTick } from "./daemon-runtime.js";
+export {
+  OperatorSurfaceError,
+  createManualTask,
+  getOperatorTaskDetail,
+  listOperatorTasks,
+  recordHumanAnswerRuntime
+} from "./operator-surface.js";
 export { buildCoordinatorSurface, buildTaskSurfaceFromDb, renderSurfaceMarkdown } from "./surface.js";
 export {
   WorkspaceManagerError,
@@ -67,6 +74,13 @@ export type {
   RunCoordinatorAgentSessionInput
 } from "./agent-provider-runtime.js";
 export type { DaemonActionResult, DaemonRuntimeInput, DaemonTickResult, ParsedAgentToolRequest } from "./daemon-runtime.js";
+export type {
+  CreateManualTaskInput,
+  OperatorTaskDetail,
+  OperatorTaskListItem,
+  RecordHumanAnswerInput,
+  RecordHumanAnswerResult
+} from "./operator-surface.js";
 export type {
   CreateAttemptWorkspaceInput,
   PreflightStatus,

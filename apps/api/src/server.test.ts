@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createProject, createTask, runMigrations, withDatabase } from "@coordinator/db";
+import { createHumanRequest, createProject, createTask, runMigrations, withDatabase } from "@coordinator/db";
 import { buildServer } from "./server.js";
 
 describe("API health", () => {
@@ -15,6 +15,18 @@ describe("API health", () => {
       ok: true,
       service: "coordinator"
     });
+  });
+
+  it("支持 Web operator surface 的 CORS preflight", async () => {
+    const server = buildServer();
+    const response = await server.inject({
+      method: "OPTIONS",
+      url: "/tasks",
+      headers: { origin: "http://127.0.0.1:5173" }
+    });
+
+    expect(response.statusCode).toBe(204);
+    expect(response.headers["access-control-allow-origin"]).toBe("http://127.0.0.1:5173");
   });
 
   it("按 task id 返回 event timeline", async () => {
@@ -67,6 +79,125 @@ describe("API health", () => {
       expect(response.json()).toMatchObject({
         projects: [{ id: "project-api", defaultBranch: "main" }]
       });
+    } finally {
+      if (previous === undefined) {
+        delete process.env.COORDINATOR_DB_PATH;
+      } else {
+        process.env.COORDINATOR_DB_PATH = previous;
+      }
+    }
+  });
+
+  it("Web API 可创建 manual task 并查看 task list/detail", async () => {
+    const databasePath = join(mkdtempSync(join(tmpdir(), "coordinator-api-web-task-")), "api.sqlite");
+    runMigrations(databasePath);
+    withDatabase(databasePath, (context) => {
+      createProject(context, {
+        id: "project-api-web",
+        name: "web",
+        workspaceRoot: mkdtempSync(join(tmpdir(), "coordinator-api-web-workspaces-"))
+      });
+    });
+
+    const previous = process.env.COORDINATOR_DB_PATH;
+    process.env.COORDINATOR_DB_PATH = databasePath;
+    try {
+      const server = buildServer();
+      const created = await server.inject({
+        method: "POST",
+        url: "/tasks",
+        payload: {
+          projectId: "project-api-web",
+          title: "Web manual task",
+          description: "from UI",
+          autonomy: "balanced"
+        }
+      });
+      expect(created.statusCode).toBe(200);
+      expect(created.json()).toMatchObject({
+        task: { sourceKind: "manual", title: "Web manual task" }
+      });
+
+      const listed = await server.inject({ method: "GET", url: "/tasks" });
+      expect(listed.statusCode).toBe(200);
+      expect(listed.json()).toMatchObject({
+        tasks: [{ title: "Web manual task", projectName: "web" }]
+      });
+
+      const detail = await server.inject({ method: "GET", url: `/tasks/${created.json().task.id}` });
+      expect(detail.statusCode).toBe(200);
+      expect(detail.json()).toMatchObject({
+        task: { title: "Web manual task" },
+        surface: {
+          json: {
+            available_tools: [{ name: "write_execution_plan" }, { name: "ask_human" }]
+          }
+        }
+      });
+    } finally {
+      if (previous === undefined) {
+        delete process.env.COORDINATOR_DB_PATH;
+      } else {
+        process.env.COORDINATOR_DB_PATH = previous;
+      }
+    }
+  });
+
+  it("Web API 可回答 human request，并把正文写入 artifact", async () => {
+    const databasePath = join(mkdtempSync(join(tmpdir(), "coordinator-api-human-answer-")), "api.sqlite");
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "coordinator-api-human-workspaces-"));
+    runMigrations(databasePath);
+    withDatabase(databasePath, (context) => {
+      const project = createProject(context, {
+        id: "project-api-human",
+        name: "human",
+        workspaceRoot
+      });
+      const task = createTask(context, { id: "task-api-human", projectId: project.id, title: "human" });
+      createHumanRequest(context, {
+        id: "human-api-answer",
+        projectId: project.id,
+        taskId: task.id,
+        blockedKey: "agent:requirements",
+        kind: "requirements-clarification",
+        status: "pending"
+      });
+      context.db
+        .prepare("UPDATE tasks SET status = ?, state_version = state_version + 1 WHERE id = ?")
+        .run("waiting_human", task.id);
+    });
+
+    const previous = process.env.COORDINATOR_DB_PATH;
+    process.env.COORDINATOR_DB_PATH = databasePath;
+    try {
+      const server = buildServer();
+      const response = await server.inject({
+        method: "POST",
+        url: "/human-requests/human-api-answer/answer",
+        payload: {
+          expectedStateVersion: 0,
+          answer: "继续执行。",
+          answeredBy: "api-test"
+        }
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = response.json() as { humanRequest: { status: string }; artifactPath: string };
+      expect(body.humanRequest).toMatchObject({ status: "answered" });
+      expect(body.artifactPath).toMatch(/^human-answers\/human-api-answer-v0-.+\.md$/);
+      expect(
+        existsSync(
+          join(
+            workspaceRoot,
+            "project-api-human",
+            "task-api-human",
+            "_task",
+            "coordinator",
+            "artifacts",
+            body.artifactPath
+          )
+        )
+      ).toBe(true);
     } finally {
       if (previous === undefined) {
         delete process.env.COORDINATOR_DB_PATH;

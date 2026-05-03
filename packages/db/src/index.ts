@@ -74,6 +74,11 @@ export type TaskRecord = {
   stateVersion: number;
 };
 
+export type TaskListRecord = TaskRecord & {
+  projectName: string;
+  updatedAt: string;
+};
+
 export type CreateAttemptInput = {
   id?: string;
   projectId: string;
@@ -398,9 +403,13 @@ export type EventRecord = {
   summary: string;
   projectId?: string;
   taskId?: string;
+  attemptId?: string;
+  workspaceId?: string;
   agentSessionId?: string;
+  workflowRunId?: string;
   prId?: string;
   humanRequestId?: string;
+  operationId?: string;
   severity: string;
   payload?: unknown;
   artifactRefs: string[];
@@ -605,12 +614,53 @@ export function listTasks(context: DbContext, input: ListTasksInput = {}): TaskR
     .map(mapTaskRow);
 }
 
+export function listTasksForOperator(context: DbContext, input: ListTasksInput = {}): TaskListRecord[] {
+  const limit = input.limit ?? 50;
+  if (input.statuses && input.statuses.length > 0) {
+    const placeholders = input.statuses.map(() => "?").join(", ");
+    return context.db
+      .prepare(
+        `SELECT tasks.*, projects.name AS project_name, tasks.updated_at AS task_updated_at
+         FROM tasks
+         JOIN projects ON projects.id = tasks.project_id
+         WHERE tasks.status IN (${placeholders})
+         ORDER BY tasks.updated_at DESC, tasks.created_at DESC, tasks.id ASC
+         LIMIT ?`
+      )
+      .all(...input.statuses, limit)
+      .map(mapTaskListRow);
+  }
+
+  return context.db
+    .prepare(
+      `SELECT tasks.*, projects.name AS project_name, tasks.updated_at AS task_updated_at
+       FROM tasks
+       JOIN projects ON projects.id = tasks.project_id
+       ORDER BY tasks.updated_at DESC, tasks.created_at DESC, tasks.id ASC
+       LIMIT ?`
+    )
+    .all(limit)
+    .map(mapTaskListRow);
+}
+
 export function createAttempt(context: DbContext, input: CreateAttemptInput): AttemptRecord {
   return withTransaction(context, () => insertAttempt(context, input));
 }
 
 export function getAttempt(context: DbContext, id: string): AttemptRecord | undefined {
   const row = context.db.prepare("SELECT * FROM attempts WHERE id = ?").get(id);
+  return row ? mapAttemptRow(row) : undefined;
+}
+
+export function getLatestAttemptByTask(context: DbContext, taskId: string): AttemptRecord | undefined {
+  const row = context.db
+    .prepare(
+      `SELECT * FROM attempts
+       WHERE task_id = ?
+       ORDER BY created_at DESC, id DESC
+       LIMIT 1`
+    )
+    .get(taskId);
   return row ? mapAttemptRow(row) : undefined;
 }
 
@@ -717,9 +767,33 @@ export function getActiveAgentSessionByTask(
   return row ? mapAgentSessionRow(row) : undefined;
 }
 
+export function listAgentSessionsByTask(context: DbContext, taskId: string, limit = 5): AgentSessionRecord[] {
+  return context.db
+    .prepare(
+      `SELECT * FROM agent_sessions
+       WHERE task_id = ?
+       ORDER BY created_at DESC, id DESC
+       LIMIT ?`
+    )
+    .all(taskId, limit)
+    .map(mapAgentSessionRow);
+}
+
 export function getWorkflowRun(context: DbContext, id: string): WorkflowRunRecord | undefined {
   const row = context.db.prepare("SELECT * FROM workflow_runs WHERE id = ?").get(id);
   return row ? mapWorkflowRunRow(row) : undefined;
+}
+
+export function listWorkflowRunsByTask(context: DbContext, taskId: string, limit = 5): WorkflowRunRecord[] {
+  return context.db
+    .prepare(
+      `SELECT * FROM workflow_runs
+       WHERE task_id = ?
+       ORDER BY created_at DESC, id DESC
+       LIMIT ?`
+    )
+    .all(taskId, limit)
+    .map(mapWorkflowRunRow);
 }
 
 export function createPullRequest(context: DbContext, input: CreatePullRequestInput): PullRequestRecord {
@@ -753,6 +827,18 @@ export function getLatestPullRequestByTask(context: DbContext, taskId: string): 
     )
     .get(taskId);
   return row ? mapPullRequestRow(row) : undefined;
+}
+
+export function listPullRequestsByTask(context: DbContext, taskId: string, limit = 5): PullRequestRecord[] {
+  return context.db
+    .prepare(
+      `SELECT * FROM pull_requests
+       WHERE task_id = ?
+       ORDER BY created_at DESC, id DESC
+       LIMIT ?`
+    )
+    .all(taskId, limit)
+    .map(mapPullRequestRow);
 }
 
 export function updatePullRequest(context: DbContext, input: UpdatePullRequestInput): PullRequestRecord {
@@ -1742,6 +1828,19 @@ function mapTaskRow(row: unknown): TaskRecord {
   };
 }
 
+function mapTaskListRow(row: unknown): TaskListRecord {
+  const task = mapTaskRow(row);
+  const value = row as {
+    project_name: string;
+    task_updated_at: string;
+  };
+  return {
+    ...task,
+    projectName: value.project_name,
+    updatedAt: value.task_updated_at
+  };
+}
+
 function mapAttemptRow(row: unknown): AttemptRecord {
   const value = row as {
     id: string;
@@ -1985,9 +2084,13 @@ function mapEventRow(row: unknown): EventRecord {
     summary: string;
     project_id: string | null;
     task_id: string | null;
+    attempt_id: string | null;
+    workspace_id: string | null;
     agent_session_id: string | null;
+    workflow_run_id: string | null;
     pr_id: string | null;
     human_request_id: string | null;
+    operation_id: string | null;
     severity: string;
     payload_json: string | null;
     artifact_refs_json: string | null;
@@ -1999,9 +2102,13 @@ function mapEventRow(row: unknown): EventRecord {
     summary: value.summary,
     projectId: value.project_id ?? undefined,
     taskId: value.task_id ?? undefined,
+    attemptId: value.attempt_id ?? undefined,
+    workspaceId: value.workspace_id ?? undefined,
     agentSessionId: value.agent_session_id ?? undefined,
+    workflowRunId: value.workflow_run_id ?? undefined,
     prId: value.pr_id ?? undefined,
     humanRequestId: value.human_request_id ?? undefined,
+    operationId: value.operation_id ?? undefined,
     severity: value.severity,
     payload: value.payload_json ? JSON.parse(value.payload_json) : undefined,
     artifactRefs: value.artifact_refs_json ? (JSON.parse(value.artifact_refs_json) as string[]) : [],

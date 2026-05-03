@@ -156,11 +156,11 @@ P2 只预留接口和规划，不进入 V1 完成标准：
 
 ### 当前进度
 
-- 当前阶段：`Iteration 10: PR/MR Provider` 已完成。
-- 当前 OpenSpec change：`add-pr-mr-provider` 已归档为 `openspec/changes/archive/2026-05-04-add-pr-mr-provider`。
-- 当前正式规格：归档后同步到 `openspec/specs/pr-mr-provider/spec.md`、`openspec/specs/coordinator-agent-tools/spec.md`、`openspec/specs/coordinator-surface/spec.md`、`openspec/specs/core-data-model/spec.md`。
-- 下一阶段：`Iteration 11: Web UI / Human Review 操作面`。
-- 下一阶段重点：在不扩大 Core/agent 边界的前提下，让 Web UI 能查看 PR/MR、review、merge approval snapshot、human request 和关键 operation/event，支持 operator 显式 answer/approve/reject/merge 调试闭环。
+- 当前阶段：`Iteration 11: Web UI / Human Review 操作面` 已完成。
+- 当前 OpenSpec change：`add-web-human-review-surface` 已完成实现、验证和独立 review；归档后位置为 `openspec/changes/archive/2026-05-04-add-web-human-review-surface`。
+- 当前正式规格：归档前已同步到 `openspec/specs/web-human-review-surface/spec.md`、`openspec/specs/core-data-model/spec.md`、`openspec/specs/project-skeleton/spec.md`、`openspec/specs/pr-mr-provider/spec.md`。
+- 下一阶段：`Iteration 12: P1 / P2 Hardening`。
+- 下一阶段重点：在 P0 Web/operator 闭环基础上做 hardening，优先检查 P1/P2 边界、第二套 provider/platform 补齐策略、daemon/reconciliation 恢复矩阵、UI/observability 缺口和长期接口污染风险。
 
 ### 重点关注事项
 
@@ -223,6 +223,17 @@ P2 只预留接口和规划，不进入 V1 完成标准：
 - CLI/API 已新增 operator-only PR/MR 调试入口，覆盖 create/update/inspect-review/request-approval/approve/reject/merge；这些入口只调用 Core policy gate，不是 agent tools。
 - 第十轮经过多轮独立 `gpt-5.5 high` subagent review，所有必须修复项已处理并复验。关键修复包括：`pr_ready` Core gate、inspect-before-create、running operation replay reconcile、merge 前重新 inspect、完整 approval snapshot、旧 pending/approved approval 失效、surface 与 Core merge readiness 对齐、provider failure operation/lock 收口。
 - 本轮验证通过：`openspec validate --all --strict`、`pnpm typecheck`、`pnpm test`（148 passed）、`pnpm build`。
+- 已实现 Web Operator Surface：Vite + React 页面从占位升级为可连接 API 的 operator console，支持 project/task 加载、manual task 创建、task list、task detail、current blocker、surface snapshot、available tools、denied actions、execution plan、workspace/workflow/agent/PR/human 摘要。
+- Web/API 本轮仍保持 operator surface 边界：Web 不直接修改 SQLite，不在前端重建状态机；所有副作用都经 API 调用 Core runtime，operator-only action 未进入 Coordinator Surface `available_tools`。
+- 已实现 Web human request answer：operator 提交正文后由 Core 写入唯一 human answer artifact，并用 HumanRequest `state_version` 做 CAS；如果 DB transaction 失败，会清理本次已写 artifact，避免 stale artifact 污染。
+- human answer 的语义仍是唤醒而不是消化：Core 只把 HumanRequest 更新为 `answered`，必要时把 task 从 `waiting_human` 唤醒到 `human_answered`；后续如何理解回答仍交给 daemon/Coordinator Agent。
+- 已实现 Web PR/MR approval/reject/merge 操作入口：UI 展示 approval snapshot 字段，approve/reject/merge 复用既有 PR/MR Provider Runtime；merge 前仍由 Core 重新 inspect 并校验 snapshot。
+- 已实现 Web event timeline 和 tool trace：timeline 展示 type/summary/severity/operation/artifact refs；`agent_tool_call` 事件额外展示 tool name、status、failure code 和 result summary，便于排查 agent tool 行为。
+- API 已补充 Web 所需 operator 查询和动作入口：`GET /tasks`、`POST /tasks`、`GET /tasks/:taskId`、`POST /human-requests/:humanRequestId/answer`，并复用 daemon tick、PR/MR approval/reject/merge 等已有 operator-only 入口。
+- API CORS 默认只允许本地 Vite dev/preview origin：`http://127.0.0.1:5173`、`http://localhost:5173`、`http://127.0.0.1:4173`、`http://localhost:4173`，可通过 `COORDINATOR_WEB_ORIGINS` 配置；没有使用通配 `*`。
+- Web 默认 API base 为 `VITE_COORDINATOR_API_BASE ?? "http://127.0.0.1:4310"`，保持本机开发优先，同时为后续部署配置留出口。
+- 第十一轮独立 `gpt-5.5 high` subagent review 已完成。首次 review 指出 tool trace 展示不足、human answer artifact 先写文件后事务失败可能留下 stale artifact；两项均已修复并复验，最终 review 确认无必须修复项。
+- 本轮验证通过：`openspec validate --all --strict`、`pnpm typecheck`、`pnpm test`、`pnpm build`；review 修复后也通过 targeted tests、typecheck、build 和 OpenSpec strict validation。
 
 ## 6. 实现顺序
 
@@ -524,6 +535,15 @@ P2 只预留接口和规划，不进入 V1 完成标准：
 - 能显式批准 merge。
 - approval snapshot 在 UI 可见。
 - HumanRequest 生命周期可追踪。
+
+已落地事实：
+
+- Web 已支持 manual task 创建、task list 和 task detail。
+- task detail 已展示 current blocker、surface snapshot、available tools、denied actions、execution plan、workspace/workflow/agent/PR/human 摘要。
+- timeline 已展示关键 event，且对 `agent_tool_call` 提供 tool trace。
+- human request answer 通过 operator-only API 记录到 artifact，并用 CAS 防止过期回答覆盖。
+- merge approval/reject/merge 通过 Web 调用 Core PR/MR Provider Runtime，仍由 Core 校验 snapshot 和 merge policy。
+- pause/resume/cancel/retry 尚未在 Web 中完成完整按钮闭环；进入 Iteration 12 hardening 时继续按 operator-only/Core gate 原则补齐或明确推迟。
 
 ### Iteration 12: P1 / P2 Hardening
 
