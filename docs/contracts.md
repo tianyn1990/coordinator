@@ -103,7 +103,7 @@ resume
 - `denied_actions` 必须包含当前高风险禁止事项。
 - `recommended_next_step` 必须唯一。
 - `recovery` 必须说明失败后恢复方式。
-- `artifact_root` 必须指向当前 attempt 的 coordinator artifact root。
+- `artifact_root` 必须指向当前 surface 可用的 coordinator artifact root；pre-workspace 阶段指向 task-local root，workspace ready 后指向当前 attempt 的 workspace coordinator artifact root。
 - 任何进入 agent 世界的 event/log/artifact 必须经 surface 摘要或显式引用。
 
 ### 3.5 Completed Surface
@@ -448,11 +448,19 @@ merge 前必须：
 
 canonical artifact root：
 
+pre-workspace：
+
+```text
+<workspace-root>/<project-id>/<task-id>/_task/coordinator/artifacts/
+```
+
+workspace ready 后：
+
 ```text
 <workspace>/coordinator/artifacts/
 ```
 
-agent tool 只接收相对该 root 的路径。
+agent tool 只接收相对当前 surface `artifact_root` 的路径。
 
 禁止：
 

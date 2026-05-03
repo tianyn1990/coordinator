@@ -28,13 +28,21 @@ Coordinator Agent 需要智能，但不能无限自由。
 
 如果信息复杂，应写 artifact，然后工具接收 artifact path。
 
-canonical artifact root 固定为：
+canonical artifact root 由当前 Coordinator Surface 明确给出。
+
+planning 阶段还没有 attempt workspace 时，使用 task-local artifact root：
+
+```text
+<workspace-root>/<project-id>/<task-id>/_task/coordinator/artifacts/
+```
+
+workspace 创建成功后，切换为 attempt workspace artifact root：
 
 ```text
 <workspace>/coordinator/artifacts/
 ```
 
-工具参数只接受相对此 root 的相对路径。
+工具参数只接受相对当前 surface `artifact_root` 的相对路径。pre-workspace artifact 不会被自动迁移到 attempt workspace；后续 surface 只能通过 DB artifact record 或明确引用继续看到这些产物。
 
 ### 2.2 工具参数必须窄
 
@@ -189,14 +197,12 @@ operator tools 只能由 Web/CLI/operator 调用，不得进入 Coordinator Agen
 
 ```text
 --profile <profile-id>
---provider <agent-provider-id>
 ```
 
 说明：
 
 - `profile-id` 来自 current surface 暴露的可用 profile，且必须来自 `workflow protocol capabilities` 声明的 implemented profiles。
-- `provider` 可省略，由 project/task 默认值决定。
-- provider 选择应基于 capability/tag，而不是品牌业务语义。
+- Iteration 8 暂不接受 `provider` 参数；inner provider 由 project/workflow 配置决定。后续如需要 agent 基于 capability 选择 provider，应通过独立 change 明确契约后再开放。
 
 #### resume_workflow_run
 
@@ -464,7 +470,7 @@ validation-report.md
 
 工具实现必须检查：
 
-- path 是相对当前 workspace coordinator artifact root 的路径。
+- path 是相对当前 surface `artifact_root` 的路径；pre-workspace 阶段是 task-local root，workspace ready 后是 workspace coordinator artifact root。
 - 文件存在。
 - 文件大小在合理范围内。
 - 不允许引用源码目录或 workflow artifact 里的任意文件作为工具 payload。

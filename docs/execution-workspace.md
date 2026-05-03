@@ -334,6 +334,7 @@ cleanup 不应默认立即删除。
 - inner coding agent 或任何会修改 workspace/repo 的 agent 命令 cwd 必须在 workspace repo 内。
 - outer Coordinator Agent 的 decision-only provider cwd 必须在 `coordinator/sessions/<session-id>/` 这类 sessionRoot 内，不能获得 repo 写权限；它只能通过 prompt/surface artifact 读取当前可见事实。
 - artifact path 必须在 coordinator artifact root 内。
+- planning 阶段没有 workspace 时，agent tool 使用 task-local artifact root；workspace ready 后，surface 切换到 attempt workspace artifact root。
 - workspace path 必须在 workspace root 内。
 - 不允许通过 `../` 逃逸。
 - 所有 path 必须做 canonical realpath containment check。

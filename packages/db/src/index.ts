@@ -90,6 +90,52 @@ export type AttemptRecord = {
   stateVersion: number;
 };
 
+export type CreateExecutionPlanInput = {
+  id?: string;
+  projectId: string;
+  taskId: string;
+  attemptId?: string;
+  status?: string;
+  artifactPath?: string;
+};
+
+export type ExecutionPlanRecord = {
+  id: string;
+  projectId: string;
+  taskId: string;
+  attemptId?: string;
+  status: string;
+  artifactPath?: string;
+  stateVersion: number;
+};
+
+export type CreateHumanRequestInput = {
+  id?: string;
+  projectId: string;
+  taskId: string;
+  attemptId?: string;
+  prId?: string;
+  blockedKey: string;
+  kind: string;
+  status?: string;
+  questionArtifactPath?: string;
+  answerArtifactPath?: string;
+};
+
+export type HumanRequestRecord = {
+  id: string;
+  projectId: string;
+  taskId: string;
+  attemptId?: string;
+  prId?: string;
+  blockedKey: string;
+  kind: string;
+  status: string;
+  questionArtifactPath?: string;
+  answerArtifactPath?: string;
+  stateVersion: number;
+};
+
 export type CreateWorkspaceInput = {
   id?: string;
   projectId: string;
@@ -442,6 +488,38 @@ export function createAttempt(context: DbContext, input: CreateAttemptInput): At
 export function getAttempt(context: DbContext, id: string): AttemptRecord | undefined {
   const row = context.db.prepare("SELECT * FROM attempts WHERE id = ?").get(id);
   return row ? mapAttemptRow(row) : undefined;
+}
+
+export function createExecutionPlan(context: DbContext, input: CreateExecutionPlanInput): ExecutionPlanRecord {
+  return withTransaction(context, () => insertExecutionPlan(context, input));
+}
+
+export function getLatestExecutionPlanByTask(context: DbContext, taskId: string): ExecutionPlanRecord | undefined {
+  const row = context.db
+    .prepare(
+      `SELECT * FROM execution_plans
+       WHERE task_id = ? AND status IN ('draft', 'active', 'revised')
+       ORDER BY created_at DESC, id DESC
+       LIMIT 1`
+    )
+    .get(taskId);
+  return row ? mapExecutionPlanRow(row) : undefined;
+}
+
+export function createHumanRequest(context: DbContext, input: CreateHumanRequestInput): HumanRequestRecord {
+  return withTransaction(context, () => insertHumanRequest(context, input));
+}
+
+export function listHumanRequestsByTask(context: DbContext, taskId: string, limit = 5): HumanRequestRecord[] {
+  return context.db
+    .prepare(
+      `SELECT * FROM human_requests
+       WHERE task_id = ?
+       ORDER BY created_at DESC, id DESC
+       LIMIT ?`
+    )
+    .all(taskId, limit)
+    .map(mapHumanRequestRow);
 }
 
 export function createWorkspace(context: DbContext, input: CreateWorkspaceInput): WorkspaceRecord {
@@ -937,6 +1015,76 @@ function insertAttempt(context: DbContext, input: CreateAttemptInput): AttemptRe
   return requireAttempt(context, id);
 }
 
+function insertExecutionPlan(context: DbContext, input: CreateExecutionPlanInput): ExecutionPlanRecord {
+  const id = input.id ?? randomUUID();
+  context.db
+    .prepare(
+      `INSERT INTO execution_plans (id, project_id, task_id, attempt_id, status, artifact_path)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      id,
+      input.projectId,
+      input.taskId,
+      input.attemptId ?? null,
+      input.status ?? "active",
+      input.artifactPath ?? null
+    );
+
+  appendEvent(context, {
+    type: "execution_plan.created",
+    summary: `execution plan created: ${id}`,
+    projectId: input.projectId,
+    taskId: input.taskId,
+    attemptId: input.attemptId,
+    payload: { status: input.status ?? "active", artifactPath: input.artifactPath },
+    artifactRefs: input.artifactPath ? [input.artifactPath] : undefined
+  });
+
+  return requireExecutionPlan(context, id);
+}
+
+function insertHumanRequest(context: DbContext, input: CreateHumanRequestInput): HumanRequestRecord {
+  const id = input.id ?? randomUUID();
+  context.db
+    .prepare(
+      `INSERT INTO human_requests (
+         id, project_id, task_id, attempt_id, pr_id, blocked_key, kind, status,
+         question_artifact_path, answer_artifact_path
+       )
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      id,
+      input.projectId,
+      input.taskId,
+      input.attemptId ?? null,
+      input.prId ?? null,
+      input.blockedKey,
+      input.kind,
+      input.status ?? "pending",
+      input.questionArtifactPath ?? null,
+      input.answerArtifactPath ?? null
+    );
+
+  appendEvent(context, {
+    type: "human.request_created",
+    summary: `human request created: ${id}`,
+    projectId: input.projectId,
+    taskId: input.taskId,
+    attemptId: input.attemptId,
+    payload: {
+      kind: input.kind,
+      status: input.status ?? "pending",
+      blockedKey: input.blockedKey,
+      questionArtifactPath: input.questionArtifactPath
+    },
+    artifactRefs: input.questionArtifactPath ? [input.questionArtifactPath] : undefined
+  });
+
+  return requireHumanRequest(context, id);
+}
+
 function insertWorkspace(context: DbContext, input: CreateWorkspaceInput): WorkspaceRecord {
   const id = input.id ?? randomUUID();
   context.db
@@ -1064,6 +1212,22 @@ function requireAttempt(context: DbContext, id: string): AttemptRecord {
     throw new Error(`attempt not found: ${id}`);
   }
   return mapAttemptRow(row);
+}
+
+function requireExecutionPlan(context: DbContext, id: string): ExecutionPlanRecord {
+  const row = context.db.prepare("SELECT * FROM execution_plans WHERE id = ?").get(id);
+  if (!row) {
+    throw new Error(`execution plan not found: ${id}`);
+  }
+  return mapExecutionPlanRow(row);
+}
+
+function requireHumanRequest(context: DbContext, id: string): HumanRequestRecord {
+  const row = context.db.prepare("SELECT * FROM human_requests WHERE id = ?").get(id);
+  if (!row) {
+    throw new Error(`human request not found: ${id}`);
+  }
+  return mapHumanRequestRow(row);
 }
 
 function requireWorkspace(context: DbContext, id: string): WorkspaceRecord {
@@ -1223,6 +1387,56 @@ function mapAttemptRow(row: unknown): AttemptRecord {
     taskId: value.task_id,
     status: value.status,
     reason: value.reason,
+    stateVersion: value.state_version
+  };
+}
+
+function mapExecutionPlanRow(row: unknown): ExecutionPlanRecord {
+  const value = row as {
+    id: string;
+    project_id: string;
+    task_id: string;
+    attempt_id: string | null;
+    status: string;
+    artifact_path: string | null;
+    state_version: number;
+  };
+  return {
+    id: value.id,
+    projectId: value.project_id,
+    taskId: value.task_id,
+    attemptId: value.attempt_id ?? undefined,
+    status: value.status,
+    artifactPath: value.artifact_path ?? undefined,
+    stateVersion: value.state_version
+  };
+}
+
+function mapHumanRequestRow(row: unknown): HumanRequestRecord {
+  const value = row as {
+    id: string;
+    project_id: string;
+    task_id: string;
+    attempt_id: string | null;
+    pr_id: string | null;
+    blocked_key: string;
+    kind: string;
+    status: string;
+    question_artifact_path: string | null;
+    answer_artifact_path: string | null;
+    state_version: number;
+  };
+  return {
+    id: value.id,
+    projectId: value.project_id,
+    taskId: value.task_id,
+    attemptId: value.attempt_id ?? undefined,
+    prId: value.pr_id ?? undefined,
+    blockedKey: value.blocked_key,
+    kind: value.kind,
+    status: value.status,
+    questionArtifactPath: value.question_artifact_path ?? undefined,
+    answerArtifactPath: value.answer_artifact_path ?? undefined,
     stateVersion: value.state_version
   };
 }

@@ -73,7 +73,7 @@ describe("Coordinator Surface", () => {
     expect(surface.markdown).toContain("artifact_root");
   });
 
-  it("human_waiting surface 只暴露 inspect 类工具", () => {
+  it("human_waiting surface 没有 workflow run 时不暴露工具", () => {
     const surface = buildCoordinatorSurface(
       baseSnapshot({
         surfaceKind: "human_waiting",
@@ -89,8 +89,28 @@ describe("Coordinator Surface", () => {
       })
     );
 
-    expect(surface.json.available_tools.map((tool) => tool.name)).toEqual(["inspect_workflow_run"]);
+    expect(surface.json.available_tools.map((tool) => tool.name)).toEqual([]);
     expect(surface.json.denied_actions).toContain("不要在 human request 等待中继续执行副作用操作。");
+  });
+
+  it("human_waiting surface 有 workflow run 时只暴露 inspect 类工具", () => {
+    const surface = buildCoordinatorSurface(
+      baseSnapshot({
+        surfaceKind: "human_waiting",
+        currentState: { taskStatus: "waiting_human", humanRequestStatus: "pending" },
+        workflowRuns: [{ id: "run-1", status: "running", profileId: "feature" }],
+        humanRequests: [
+          {
+            id: "human-1",
+            kind: "requirements-clarification",
+            status: "pending",
+            blockedKey: "gate:clarify"
+          }
+        ]
+      })
+    );
+
+    expect(surface.json.available_tools.map((tool) => tool.name)).toEqual(["inspect_workflow_run"]);
   });
 
   it("surface 不暴露 operator-only 工具", () => {
@@ -99,7 +119,7 @@ describe("Coordinator Surface", () => {
     expect(surface.json.available_tools.map((tool) => tool.name)).not.toContain("record_human_answer");
   });
 
-  it("PR/MR open surface 暴露 review/update 工具，不直接请求 merge approval", () => {
+  it("PR/MR open surface 在当前 executor 阶段只暴露 ask_human", () => {
     const surface = buildCoordinatorSurface(
       baseSnapshot({
         surfaceKind: "review",
@@ -113,10 +133,10 @@ describe("Coordinator Surface", () => {
       })
     );
 
-    expect(surface.json.available_tools.map((tool) => tool.name)).toEqual(["inspect_review", "update_pr", "ask_human"]);
+    expect(surface.json.available_tools.map((tool) => tool.name)).toEqual(["ask_human"]);
   });
 
-  it("merge_waiting surface 在 approval 缺失时不暴露 merge", () => {
+  it("merge_waiting surface 在当前 executor 阶段不暴露 merge 工具", () => {
     const surface = buildCoordinatorSurface(
       baseSnapshot({
         surfaceKind: "merge_waiting",
@@ -132,13 +152,10 @@ describe("Coordinator Surface", () => {
       })
     );
 
-    expect(surface.json.available_tools.map((tool) => tool.name)).toEqual([
-      "request_merge_approval",
-      "inspect_review"
-    ]);
+    expect(surface.json.available_tools.map((tool) => tool.name)).toEqual(["ask_human"]);
   });
 
-  it("merge_waiting surface 在 approval snapshot 有效时暴露 merge", () => {
+  it("merge_waiting surface 即使 approval snapshot 有效也不提前暴露 merge", () => {
     const surface = buildCoordinatorSurface(
       baseSnapshot({
         surfaceKind: "merge_waiting",
@@ -171,7 +188,7 @@ describe("Coordinator Surface", () => {
       })
     );
 
-    expect(surface.json.available_tools.map((tool) => tool.name)).toContain("merge_after_approval");
+    expect(surface.json.available_tools.map((tool) => tool.name)).toEqual(["ask_human"]);
   });
 
   it("merge_waiting surface 在 approval snapshot 不匹配时不暴露 merge", () => {
@@ -200,7 +217,7 @@ describe("Coordinator Surface", () => {
     expect(surface.json.available_tools.map((tool) => tool.name)).not.toContain("merge_after_approval");
   });
 
-  it("completed_no_pr surface 只有在 no-PR policy 和 evidence 有效时才暴露 mark_done", () => {
+  it("completed_no_pr surface 缺少当前 executor 能力时只暴露 ask_human", () => {
     const surface = buildCoordinatorSurface(
       baseSnapshot({
         surfaceKind: "execution",
@@ -221,7 +238,7 @@ describe("Coordinator Surface", () => {
     expect(surface.json.available_tools.map((tool) => tool.name)).toEqual(["ask_human"]);
   });
 
-  it("completed_no_pr surface 在 no-PR policy 有效时可暴露 mark_done", () => {
+  it("completed_no_pr surface 即使 no-PR policy 有效也不提前暴露 mark_done", () => {
     const surface = buildCoordinatorSurface(
       baseSnapshot({
         surfaceKind: "execution",
@@ -243,7 +260,7 @@ describe("Coordinator Surface", () => {
       })
     );
 
-    expect(surface.json.available_tools.map((tool) => tool.name)).toEqual(["mark_done"]);
+    expect(surface.json.available_tools.map((tool) => tool.name)).toEqual(["ask_human"]);
   });
 
   it("只有 summary state 显示 PR open 时不暴露 PR 工具", () => {
@@ -261,5 +278,19 @@ describe("Coordinator Surface", () => {
     );
 
     expect(surface.json.available_tools.map((tool) => tool.name)).not.toContain("update_pr");
+  });
+
+  it("workflow running surface 不暴露尚未实现的 resume_workflow_run", () => {
+    const surface = buildCoordinatorSurface(
+      baseSnapshot({
+        surfaceKind: "execution",
+        executionPlan: { id: "plan-1", status: "active", artifactPath: "execution-plan.md" },
+        attempt: { id: "attempt-1", status: "running" },
+        workspace: { id: "workspace-1", status: "ready" },
+        workflowRuns: [{ id: "run-1", status: "running", profileId: "feature" }]
+      })
+    );
+
+    expect(surface.json.available_tools.map((tool) => tool.name)).toEqual(["inspect_workflow_run", "ask_human"]);
   });
 });

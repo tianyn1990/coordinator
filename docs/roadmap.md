@@ -156,18 +156,17 @@ P2 只预留接口和规划，不进入 V1 完成标准：
 
 ### 当前进度
 
-- 当前阶段：`Iteration 7: Agent Provider Adapter / Coordinator Agent Runtime` 已完成。
-- 当前 OpenSpec change：`add-agent-provider-runtime` 已归档为 `openspec/changes/archive/2026-05-03-add-agent-provider-runtime`。
-- 当前正式规格：`openspec/specs/agent-provider-runtime/spec.md`。
-- 下一阶段：`Iteration 8: Coordinator Agent Tools`。
-- 下一阶段重点：实现 P0 最小 agent tools executor，使 Coordinator Agent 能通过当前 surface 暴露的受控工具推进计划、attempt/workspace、workflow run 和 human request；继续保持工具参数窄、复杂信息 artifact-first，并避免提前实现 daemon 或 PR/MR provider。
+- 当前阶段：`Iteration 8: Coordinator Agent Tools` 已完成。
+- 当前 OpenSpec change：`add-coordinator-agent-tools` 已归档为 `openspec/changes/archive/2026-05-03-add-coordinator-agent-tools`。
+- 当前正式规格：`openspec/specs/coordinator-agent-tools/spec.md`。
+- 下一阶段：`Iteration 9: Daemon`。
+- 下一阶段重点：实现 P0 最小 daemon / scheduler / watchdog / reconciliation / retry / human request wake-up，使已落地的 surface、agent runtime、agent tools、workspace manager、workflow adapter 能被可靠串联；继续坚持 daemon 不是智能体，不做业务语义判断，不提前实现 PR/MR provider 或 merge。
 
 ### 重点关注事项
 
 - 已建立 project registry 核心服务，支持工程注册、GitHub/GitLab 识别、默认分支确认、workflow launcher 和默认 provider 配置。
 - 已为 `projects` 补充 registry 相关字段，并通过 `packages/core` 作为业务层统一承载注册逻辑；CLI/API 只调用 service，不直接拼接注册规则。
 - 已实现 CLI `register` / `projects` 和 API `/projects` / `/projects/:projectId` / `/projects/register` 的最小入口。
-- Project Registry 仍遵守默认分支显式确认原则；GitHub/GitLab 自动识别失败时可显式选择。
 - 已建立 `Coordinator Surface` builder，支持 machine JSON 与 agent-facing Markdown 同源生成，并覆盖 bootstrap / planning / execution / human_waiting / human_answered / review / merge_waiting / completed / failure / resume fixture。
 - 已实现 DB task surface 入口：`buildTaskSurfaceFromDb` 读取 task/project、latest attempt、active workspace、active workflow run、recent agent session 等当前已有机器事实，并翻译为 agent-facing Markdown；仍不把 PR/MR provider、human request 完整生命周期或未来 daemon 逻辑塞入 DB loader。
 - 已实现 CLI `surface --db <path> --task <task-id> [--format json|markdown]` 和 API `GET /tasks/:taskId/surface`，二者都是 operator 调试入口，不是 agent tool。
@@ -196,6 +195,15 @@ P2 只预留接口和规划，不进入 V1 完成标准：
 - 已实现 CLI/API operator-only agent 调试入口：`agent run/inspect` 和 `POST /tasks/:taskId/agent-sessions`、`GET /agent-sessions/:agentSessionId`；这些入口未进入 Coordinator Surface，也不是 agent tools。
 - 已补充 Agent Provider Runtime contract tests：fake provider、Codex/Claude command shape、operation idempotency requestId、active session uniqueness、surface prompt 主输入、active workspace 下 provider cwd 仍为 sessionRoot、CLI/API operator-only 入口。
 - 第七轮经过多轮独立 `gpt-5.5 high` subagent review，所有必须修复项已处理并复验。修复点包括：outer provider 权限边界、provider cwd/sessionRoot、lock TTL/fresh timestamp fencing、DB surface 投影补齐、稳定 requestId idempotency key、OpenSpec 与 docs 对齐。
+- 已实现 Coordinator Agent Tools executor：Core 入口 `executeCoordinatorAgentTool` 只允许调用当前 surface 暴露的 P0 工具，覆盖 `write_execution_plan`、`revise_execution_plan`、`create_attempt`、`create_workspace`、`start_workflow_run`、`inspect_workflow_run`、`ask_human`。
+- Agent tool result 已收窄为 sanitized output，只返回 `kind/id/status/artifactPath/reused/handoffKind/nextStep` 等 agent 需要的信息；workspace lock token、manifest path、workflow debug、operation internals 等内部细节不进入 agent-facing tool result。
+- Agent tool artifact 采用 artifact-first：工具只接受相对当前 surface `artifact_root` 的路径；pre-workspace planning 阶段使用 task-local root，workspace ready 后使用 attempt workspace root；路径校验覆盖绝对路径、`..` segment、realpath containment、文件存在和大小限制。
+- Surface 当前只暴露 Iteration 8 executor 已实现的工具。PR/MR、merge、mark_done、handoff_to_human、resume_workflow_run 等未来工具继续保留在设计规划中，但在对应 executor 未落地前不作为当前 `available_tools` 暴露。
+- `start_workflow_run` 当前只接受 `profile`，不接受 `provider` 参数；inner provider 选择仍由 project/workflow 配置决定，后续如需让 agent 基于 capability 选择 provider，需要单独 change 明确契约。
+- 已补 DB repository 中 execution plan 与 human request 的最小方法，并让 DB surface 投影 execution plan 与 recent human requests；human waiting 无 workflow run 时不暴露可调用工具，有 workflow run 时仅允许 inspect。
+- 已实现 CLI/API operator-only agent tool 调试入口：`agent-tool execute` 和 `POST /tasks/:taskId/agent-tools`；这些入口未进入 Coordinator Surface，不是 agent tools。
+- 已补充 Coordinator Agent Tools contract tests：surface visibility gate、artifact path 安全、execution plan 写入、human request 等待、sanitized workspace/workflow result、CLI/API operator 调试入口、未来未实现工具不提前暴露。
+- 第八轮经过多轮独立 `gpt-5.5 high` subagent review，所有必须修复项已处理并复验。修复点包括：raw result 泄漏、surface/executor tool 集不一致、task-local artifact root 契约、provider 参数契约、human waiting 工具可见性。
 - 本轮验证通过：`openspec validate --all --strict`、`pnpm typecheck`、`pnpm test`、`pnpm build`。
 
 ## 6. 实现顺序
@@ -412,24 +420,29 @@ P2 只预留接口和规划，不进入 V1 完成标准：
 优先工具：
 
 - `write_execution_plan`
+- `revise_execution_plan`
 - `create_attempt`
 - `create_workspace`
 - `start_workflow_run`
 - `inspect_workflow_run`
 - `ask_human`
+
+后续工具：
+
 - `create_pr`
 - `request_merge_approval`
 - `merge_after_approval`
 - `mark_done`
 - `handoff_to_human`
+- `resume_workflow_run`
 
 完成标准：
 
 - agent 只能调用当前 surface 暴露工具。
 - 不允许复杂 JSON 主交互。
-- 工具失败有 recovery surface。
-- inspect-before-create 覆盖 workspace/workflow/pr/merge。
-- P0 最小工具闭环先可跑通，非闭环工具可留到 P1。
+- 工具失败有可恢复错误和 tool trace。
+- inspect-before-create 覆盖 workspace/workflow；PR/MR/merge 相关 inspect-before-create 留到对应 provider 迭代。
+- P0 最小工具闭环先可跑通，非闭环工具可留到 P1 或对应后续迭代。
 
 ### Iteration 9: Daemon
 

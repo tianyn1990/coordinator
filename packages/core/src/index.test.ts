@@ -167,10 +167,10 @@ describe("project registry", () => {
     expect(surface.markdown).toContain("# Coordinator Surface");
     expect(surface.json.available_tools.map((tool) => tool.name)).toEqual(["write_execution_plan", "ask_human"]);
     expect(surface.json.denied_actions).toContain("不要绕过 workflow protocol。");
-    expect(surface.json.artifact_root).toBe("coordinator/artifacts/");
+    expect(surface.json.artifact_root).toContain("/project-surface/task-surface/_task/coordinator/artifacts/");
   });
 
-  it("task status 为 waiting_human 时 surface 会收窄为 inspect-only", () => {
+  it("task status 为 waiting_human 且无 workflow run 时 surface 不暴露工具", () => {
     const databasePath = join(mkdtempSync(join(tmpdir(), "coordinator-surface-db-")), "surface.sqlite");
     runMigrations(databasePath);
 
@@ -199,6 +199,6 @@ describe("project registry", () => {
       return buildTaskSurfaceFromDb(context, task.id);
     });
 
-    expect(surface.json.available_tools.map((tool) => tool.name)).toEqual(["inspect_workflow_run"]);
+    expect(surface.json.available_tools.map((tool) => tool.name)).toEqual([]);
   });
 });

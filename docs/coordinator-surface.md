@@ -99,13 +99,21 @@ agent 不能看到全量工具列表后自由发挥。
 
 避免让 agent 手写复杂嵌套 JSON。
 
-复杂内容应写入 artifact。canonical artifact root 固定为：
+复杂内容应写入 artifact。canonical artifact root 由当前 surface 的 `artifact_root` 给出。
+
+planning 阶段还没有 workspace 时使用 task-local root：
+
+```text
+<workspace-root>/<project-id>/<task-id>/_task/coordinator/artifacts/
+```
+
+workspace ready 后使用 attempt workspace root：
 
 ```text
 <workspace>/coordinator/artifacts/
 ```
 
-agent tool 只接收相对此 root 的路径。示例：
+agent tool 只接收相对当前 surface `artifact_root` 的路径。示例：
 
 - `execution-plan.md`
 - `pr-body.md`

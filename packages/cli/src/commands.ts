@@ -1,11 +1,13 @@
 import { ActiveResourceConflictError, listTaskEvents, runMigrations, withDatabase } from "@coordinator/db";
 import {
   AgentProviderRuntimeError,
+  CoordinatorAgentToolError,
   ProjectRegistryInputError,
   WorkspaceManagerError,
   WorkflowProtocolError,
   buildTaskSurfaceFromDb,
   createAttemptWorkspace,
+  executeCoordinatorAgentTool,
   inspectAgentSession,
   inspectWorkflowCapabilities,
   inspectWorkflowRun,
@@ -434,10 +436,60 @@ export function runCli(args: string[]): CliResult {
     };
   }
 
+  if (command === "agent-tool") {
+    const [subcommand, ...toolArgs] = rest;
+    if (subcommand === "execute") {
+      const databasePathResult = readRequiredOption(toolArgs, "--db");
+      const taskIdResult = readRequiredOption(toolArgs, "--task");
+      const toolNameResult = readRequiredOption(toolArgs, "--tool");
+      const actorResult = readOption(toolArgs, "--actor");
+      const agentSessionResult = readOption(toolArgs, "--agent-session");
+      const error =
+        databasePathResult.error ?? taskIdResult.error ?? toolNameResult.error ?? actorResult.error ?? agentSessionResult.error;
+      if (error) {
+        return { exitCode: 1, stdout: "", stderr: `${error}\n` };
+      }
+      const databasePath = databasePathResult.value;
+      const taskId = taskIdResult.value;
+      const toolName = toolNameResult.value;
+      if (!databasePath || !taskId || !toolName) {
+        return { exitCode: 1, stdout: "", stderr: "agent-tool execute 参数不完整\n" };
+      }
+      try {
+        const result = withDatabase(databasePath, (context) =>
+          executeCoordinatorAgentTool(context, {
+            taskId,
+            toolName,
+            actor: actorResult.value ?? "cli",
+            agentSessionId: agentSessionResult.value ?? undefined,
+            args: parseToolArgs(toolArgs)
+          })
+        );
+        return { exitCode: 0, stdout: `${JSON.stringify(result)}\n`, stderr: "" };
+      } catch (error) {
+        if (
+          error instanceof CoordinatorAgentToolError ||
+          error instanceof WorkspaceManagerError ||
+          error instanceof WorkflowProtocolError ||
+          error instanceof ActiveResourceConflictError
+        ) {
+          return { exitCode: 1, stdout: "", stderr: `${error.message}\n` };
+        }
+        throw error;
+      }
+    }
+
+    return {
+      exitCode: 1,
+      stdout: "",
+      stderr: "未知 agent-tool 子命令，可用：agent-tool execute\n"
+    };
+  }
+
   return {
     exitCode: 1,
     stdout: "",
-    stderr: `未知命令：${command}\n可用命令：health, migrate --db <path>, timeline --db <path> --task <task-id>, surface --db <path> --task <task-id>, register --db <path> --repo <path>, projects --db <path>, workspace create, workspace preflight, workflow <subcommand>, agent <subcommand>\n`
+    stderr: `未知命令：${command}\n可用命令：health, migrate --db <path>, timeline --db <path> --task <task-id>, surface --db <path> --task <task-id>, register --db <path> --repo <path>, projects --db <path>, workspace create, workspace preflight, workflow <subcommand>, agent <subcommand>, agent-tool <subcommand>\n`
   };
 }
 
@@ -472,4 +524,22 @@ function parseProvider(value?: string): { value?: "github" | "gitlab"; error?: s
     return { value };
   }
   return { error: `不支持的 provider：${value}` };
+}
+
+function parseToolArgs(args: string[]): Record<string, string> {
+  const values: Record<string, string> = {};
+  for (let index = 0; index < args.length; index += 1) {
+    const token = args[index];
+    if (!token.startsWith("--arg-")) {
+      continue;
+    }
+    const key = token.slice("--arg-".length);
+    const value = args[index + 1];
+    if (!key || !value || value.startsWith("--")) {
+      continue;
+    }
+    values[key] = value;
+    index += 1;
+  }
+  return values;
 }

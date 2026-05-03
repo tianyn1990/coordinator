@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createProject, createTask, runMigrations, withDatabase } from "@coordinator/db";
@@ -231,6 +231,52 @@ describe("API health", () => {
         session: { id: body.session.id },
         artifacts: { finalResponsePath: body.artifacts.finalResponsePath }
       });
+    } finally {
+      if (previous === undefined) {
+        delete process.env.COORDINATOR_DB_PATH;
+      } else {
+        process.env.COORDINATOR_DB_PATH = previous;
+      }
+    }
+  });
+
+  it("agent tools API 是 operator 调试入口，可执行 write_execution_plan", async () => {
+    const databasePath = join(mkdtempSync(join(tmpdir(), "coordinator-api-tools-")), "tools.sqlite");
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "coordinator-api-tools-workspaces-"));
+    runMigrations(databasePath);
+    withDatabase(databasePath, (context) => {
+      const project = createProject(context, {
+        id: "project-api-tools",
+        name: "tools",
+        workspaceRoot
+      });
+      createTask(context, { id: "task-api-tools", projectId: project.id, title: "tools api" });
+    });
+    const artifactRoot = join(workspaceRoot, "project-api-tools", "task-api-tools", "_task", "coordinator", "artifacts");
+    mkdirSync(artifactRoot, { recursive: true });
+    writeFileSync(join(artifactRoot, "execution-plan.md"), "# Plan\n");
+
+    const previous = process.env.COORDINATOR_DB_PATH;
+    process.env.COORDINATOR_DB_PATH = databasePath;
+    try {
+      const server = buildServer();
+      const response = await server.inject({
+        method: "POST",
+        url: "/tasks/task-api-tools/agent-tools",
+        payload: {
+          toolName: "write_execution_plan",
+          args: { artifact: "execution-plan.md" }
+        }
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({
+        toolName: "write_execution_plan",
+        status: "succeeded"
+      });
+
+      const surface = await server.inject({ method: "GET", url: "/tasks/task-api-tools/surface" });
+      expect(surface.json().json.available_tools.map((tool: { name: string }) => tool.name)).not.toContain("agent-tool execute");
     } finally {
       if (previous === undefined) {
         delete process.env.COORDINATOR_DB_PATH;

@@ -1,4 +1,4 @@
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -238,5 +238,41 @@ describe("runCli", () => {
 
     expect(result.exitCode).toBe(1);
     expect(result.stderr).toContain("缺少 --session 参数");
+  });
+
+  it("agent-tool execute 可通过窄参数调用 write_execution_plan", () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "coordinator-cli-tools-workspaces-"));
+    const databasePath = join(mkdtempSync(join(tmpdir(), "coordinator-cli-tools-")), "tools.sqlite");
+    runMigrations(databasePath);
+    withDatabase(databasePath, (context) => {
+      const project = createProject(context, {
+        id: "project-cli-tools",
+        name: "tools",
+        workspaceRoot
+      });
+      createTask(context, { id: "task-cli-tools", projectId: project.id, title: "tools" });
+    });
+    const artifactRoot = join(workspaceRoot, "project-cli-tools", "task-cli-tools", "_task", "coordinator", "artifacts");
+    mkdirSync(artifactRoot, { recursive: true });
+    writeFileSync(join(artifactRoot, "execution-plan.md"), "# Plan\n");
+
+    const result = runCli([
+      "agent-tool",
+      "execute",
+      "--db",
+      databasePath,
+      "--task",
+      "task-cli-tools",
+      "--tool",
+      "write_execution_plan",
+      "--arg-artifact",
+      "execution-plan.md"
+    ]);
+
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      toolName: "write_execution_plan",
+      status: "succeeded"
+    });
   });
 });

@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { getProject, getTask, type DbContext, type ProjectRecord, type TaskRecord } from "@coordinator/db";
 
 export type SurfaceKind =
@@ -385,6 +387,8 @@ export function buildTaskSurfaceFromDb(context: DbContext, taskId: string): Surf
   const activeWorkspace = latestAttempt ? findActiveWorkspaceForAttempt(context, latestAttempt.id) : undefined;
   const activeWorkflowRun = latestAttempt ? findActiveWorkflowRunForAttempt(context, latestAttempt.id) : undefined;
   const recentAgentSessions = findRecentAgentSessionsForTask(context, task.id);
+  const executionPlan = findLatestExecutionPlanForTask(context, task.id);
+  const humanRequests = findHumanRequestsForTask(context, task.id);
 
   return buildCoordinatorSurface({
     surfaceKind: deriveSurfaceKind(task),
@@ -400,8 +404,16 @@ export function buildTaskSurfaceFromDb(context: DbContext, taskId: string): Surf
     currentState: {
       taskStatus: task.status,
       attemptStatus: latestAttempt?.status,
-      workflowRunStatus: activeWorkflowRun?.status
+      workflowRunStatus: activeWorkflowRun?.status,
+      humanRequestStatus: humanRequests.find((request) => request.status === "pending")?.status
     },
+    executionPlan: executionPlan
+      ? {
+          id: executionPlan.id,
+          status: executionPlan.status,
+          artifactPath: executionPlan.artifact_path ?? undefined
+        }
+      : undefined,
     workspace: activeWorkspace
       ? {
           id: activeWorkspace.id,
@@ -427,7 +439,14 @@ export function buildTaskSurfaceFromDb(context: DbContext, taskId: string): Surf
       role: session.role,
       status: session.status
     })),
-    humanRequests: [],
+    humanRequests: humanRequests.map((request) => ({
+      id: request.id,
+      kind: request.kind,
+      status: request.status,
+      blockedKey: request.blocked_key,
+      questionArtifactPath: request.question_artifact_path ?? undefined,
+      answerArtifactPath: request.answer_artifact_path ?? undefined
+    })),
     autonomyGuidance: {
       level: normalizeAutonomy(task.autonomy)
     },
@@ -442,7 +461,7 @@ export function buildTaskSurfaceFromDb(context: DbContext, taskId: string): Surf
     },
     artifactRoot: activeWorkspace?.workspace_path
       ? `${activeWorkspace.workspace_path}/coordinator/artifacts/`
-      : "coordinator/artifacts/",
+      : `${resolveTaskLocalArtifactRoot(project, task)}/`,
     createdAt: new Date().toISOString()
   });
 }
@@ -554,41 +573,28 @@ export function renderSurfaceMarkdown(
 function deriveVisibleTools(snapshot: SurfaceSnapshot): SurfaceToolJson[] {
   const humanPending = snapshot.surfaceKind === "human_waiting" || snapshot.humanRequests.some((request) => request.status === "pending");
   if (humanPending) {
-    return [
-      inspectTool("inspect_workflow_run", "查看 workflow run 状态，判断等待原因。")
-    ];
+    return snapshot.workflowRuns.length > 0
+      ? [inspectTool("inspect_workflow_run", "查看 workflow run 状态，判断等待原因。")]
+      : [];
   }
 
   if (snapshot.surfaceKind === "completed" || snapshot.surfaceKind === "failure") {
-    return [inspectTool("inspect_workflow_run", "查看历史 workflow 结果。")];
+    return snapshot.workflowRuns.length > 0 ? [inspectTool("inspect_workflow_run", "查看历史 workflow 结果。")] : [];
   }
 
   if (snapshot.surfaceKind === "merge_waiting") {
-    return hasValidMergeApproval(snapshot)
-      ? [
-          tool("inspect_review", "查看 review 结果和验证信息。"),
-          tool("merge_after_approval", "在 approval snapshot 有效时执行 merge。")
-        ]
-      : [
-          tool("request_merge_approval", "生成 merge approval 请求。"),
-          tool("inspect_review", "查看 review 结果和验证信息。")
-        ];
+    return [tool("ask_human", "PR/MR 与 merge tools 尚未在当前 executor 落地；需要人类处理 merge 等待。")];
   }
 
   if (snapshot.surfaceKind === "review" && isReviewFeedback(snapshot)) {
     return [
-      tool("start_rework", "根据 review feedback 进入 rework。"),
       tool("revise_execution_plan", "在计划需要调整时更新 execution plan。"),
       tool("ask_human", "在信息不足时向人类提问。")
     ];
   }
 
   if (hasOpenPullRequest(snapshot)) {
-    return [
-      tool("inspect_review", "查看 review 结果和验证信息。"),
-      tool("update_pr", "更新 PR/MR body 或 metadata。"),
-      tool("ask_human", "在信息不足时向人类提问。")
-    ];
+    return [tool("ask_human", "PR/MR tools 尚未在当前 executor 落地；需要人类处理 review 或 PR 更新。")];
   }
 
   if (!snapshot.executionPlan) {
@@ -617,7 +623,6 @@ function deriveVisibleTools(snapshot: SurfaceSnapshot): SurfaceToolJson[] {
   if (snapshot.workflowRuns.some((run) => run.status === "running" || run.status === "blocked" || run.status === "planned")) {
     return [
       tool("inspect_workflow_run", "查看 workflow run 状态。"),
-      tool("resume_workflow_run", "在 workflow 可恢复时继续已有 run。"),
       tool("ask_human", "在信息不足时向人类提问。")
     ];
   }
@@ -625,14 +630,12 @@ function deriveVisibleTools(snapshot: SurfaceSnapshot): SurfaceToolJson[] {
   const handoffRun = snapshot.workflowRuns.find((run) => run.handoffKind);
   if (handoffRun?.handoffKind === "pr_ready") {
     return [
-      tool("create_pr", "基于 workflow handoff artifact 创建 PR/MR。"),
       tool("revise_execution_plan", "在计划需要调整时更新 execution plan。"),
-      tool("ask_human", "在信息不足时向人类提问。")
+      tool("ask_human", "PR/MR provider 尚未在当前 executor 落地；需要人类确认后续处理。")
     ];
   }
   if (handoffRun?.handoffKind === "manual_handoff" || handoffRun?.handoffKind === "blocked") {
     return [
-      tool("handoff_to_human", "将当前任务交给人类接手。"),
       tool("ask_human", "在信息不足时向人类提问。"),
       tool("revise_execution_plan", "在计划需要调整时更新 execution plan。")
     ];
@@ -644,9 +647,7 @@ function deriveVisibleTools(snapshot: SurfaceSnapshot): SurfaceToolJson[] {
     ];
   }
   if (handoffRun?.handoffKind === "completed_no_pr") {
-    return hasValidNoPrCompletion(snapshot)
-      ? [tool("mark_done", "在 no-PR policy 和 evidence artifact 有效时标记完成。")]
-      : [tool("ask_human", "no-PR completion 缺少有效 policy 或 evidence artifact，需要人类确认。")];
+    return [tool("ask_human", "当前 executor 尚未实现 mark_done；需要人类确认 no-PR completion 后续处理。")];
   }
 
   if (snapshot.workspace.status === "ready" || snapshot.workspace.status === "dirty") {
@@ -783,7 +784,7 @@ function toolArgs(name: string): string[] {
     revise_execution_plan: ["--artifact <path>", "--reason <short-reason>"],
     create_attempt: ["--reason <reason>"],
     create_workspace: ["--attempt <attempt-id>"],
-    start_workflow_run: ["--profile <profile-id>", "--provider <agent-provider-id>"],
+    start_workflow_run: ["--profile <profile-id>"],
     resume_workflow_run: ["--run <workflow-run-id>"],
     inspect_workflow_run: ["--run <workflow-run-id>"],
     ask_human: ["--kind <kind>", "--artifact <path>"],
@@ -809,31 +810,6 @@ function hasOpenPullRequest(snapshot: SurfaceSnapshot): boolean {
 
 function isReviewFeedback(snapshot: SurfaceSnapshot): boolean {
   return snapshot.currentState.blocker === "review_feedback";
-}
-
-function hasValidMergeApproval(snapshot: SurfaceSnapshot): boolean {
-  const approval = snapshot.mergeApproval;
-  const pullRequest = snapshot.pullRequest;
-  if (!approval || !pullRequest || pullRequest.status !== "open") {
-    return false;
-  }
-  if (approval.status !== "approved" || !approval.valid || approval.prId !== pullRequest.id) {
-    return false;
-  }
-  if (!approval.headSha || !approval.baseSha || !approval.validationRunId || !approval.mergeStrategy) {
-    return false;
-  }
-  if (!pullRequest.headSha || pullRequest.headSha !== approval.headSha) {
-    return false;
-  }
-  if (!pullRequest.baseSha || pullRequest.baseSha !== approval.baseSha) {
-    return false;
-  }
-  return true;
-}
-
-function hasValidNoPrCompletion(snapshot: SurfaceSnapshot): boolean {
-  return Boolean(snapshot.noPrCompletion?.policyValid && snapshot.noPrCompletion.evidenceArtifactPath);
 }
 
 function toMergeApprovalJson(approval: MergeApprovalSnapshot): MergeApprovalSnapshotJson {
@@ -957,6 +933,55 @@ function findRecentAgentSessionsForTask(
        LIMIT 3`
     )
     .all(taskId) as Array<{ id: string; provider_kind: string; role: string; status: string }>;
+}
+
+function findLatestExecutionPlanForTask(
+  context: DbContext,
+  taskId: string
+): { id: string; status: string; artifact_path: string | null } | undefined {
+  return context.db
+    .prepare(
+      `SELECT id, status, artifact_path FROM execution_plans
+       WHERE task_id = ? AND status IN ('draft', 'active', 'revised')
+       ORDER BY created_at DESC, id DESC
+       LIMIT 1`
+    )
+    .get(taskId) as { id: string; status: string; artifact_path: string | null } | undefined;
+}
+
+function findHumanRequestsForTask(
+  context: DbContext,
+  taskId: string
+): Array<{
+  id: string;
+  blocked_key: string;
+  kind: string;
+  status: string;
+  question_artifact_path: string | null;
+  answer_artifact_path: string | null;
+}> {
+  return context.db
+    .prepare(
+      `SELECT id, blocked_key, kind, status, question_artifact_path, answer_artifact_path
+       FROM human_requests
+       WHERE task_id = ?
+       ORDER BY created_at DESC, id DESC
+       LIMIT 5`
+    )
+    .all(taskId) as Array<{
+      id: string;
+      blocked_key: string;
+      kind: string;
+      status: string;
+      question_artifact_path: string | null;
+      answer_artifact_path: string | null;
+    }>;
+}
+
+function resolveTaskLocalArtifactRoot(project: ProjectRecord, task: TaskRecord): string {
+  // planning 阶段还没有 workspace，但 agent 仍需要可写 artifact root 来提交计划和问题。
+  const root = project.workspaceRoot ?? join(homedir(), ".coordinator", "workspaces");
+  return join(root, project.id, task.id, "_task", "coordinator", "artifacts");
 }
 
 function toProjectSnapshot(project: ProjectRecord): ProjectSnapshot {

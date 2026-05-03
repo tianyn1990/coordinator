@@ -2,11 +2,13 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { ActiveResourceConflictError, listTaskEvents, withDatabase } from "@coordinator/db";
 import {
   AgentProviderRuntimeError,
+  CoordinatorAgentToolError,
   ProjectRegistryInputError,
   WorkspaceManagerError,
   WorkflowProtocolError,
   buildTaskSurfaceFromDb,
   createAttemptWorkspace,
+  executeCoordinatorAgentTool,
   inspectAgentSession,
   inspectWorkflowCapabilities,
   inspectWorkflowRun,
@@ -368,6 +370,59 @@ export function buildServer(): FastifyInstance {
     }
   });
 
+  server.post<{
+    Params: { taskId: string };
+    Body: ExecuteAgentToolBody;
+  }>(
+    "/tasks/:taskId/agent-tools",
+    {
+      schema: {
+        body: {
+          type: "object",
+          required: ["toolName"],
+          additionalProperties: false,
+          properties: {
+            toolName: { type: "string", minLength: 1 },
+            actor: { type: "string", minLength: 1 },
+            agentSessionId: { type: "string", minLength: 1 },
+            args: {
+              type: "object",
+              additionalProperties: { type: "string" }
+            }
+          }
+        }
+      }
+    },
+    async (request, reply) => {
+      const databasePath = process.env.COORDINATOR_DB_PATH;
+      if (!databasePath) {
+        return reply.code(503).send({ error: "COORDINATOR_DB_PATH 未配置" });
+      }
+
+      try {
+        return withDatabase(databasePath, (context) =>
+          executeCoordinatorAgentTool(context, {
+            taskId: request.params.taskId,
+            toolName: request.body.toolName,
+            actor: request.body.actor ?? "api",
+            agentSessionId: request.body.agentSessionId,
+            args: request.body.args
+          })
+        );
+      } catch (error) {
+        if (
+          error instanceof CoordinatorAgentToolError ||
+          error instanceof WorkspaceManagerError ||
+          error instanceof WorkflowProtocolError ||
+          error instanceof ActiveResourceConflictError
+        ) {
+          return reply.code(400).send({ error: error.message });
+        }
+        throw error;
+      }
+    }
+  );
+
   return server;
 }
 
@@ -401,4 +456,11 @@ type RunAgentSessionBody = {
   providerId?: string;
   requestId?: string;
   timeoutMs?: number;
+};
+
+type ExecuteAgentToolBody = {
+  toolName: string;
+  actor?: string;
+  agentSessionId?: string;
+  args?: Record<string, string>;
 };

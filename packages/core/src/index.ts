@@ -3,6 +3,10 @@ import { basename, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { createProject, getProject, listProjects, type DbContext, type ProjectRecord } from "@coordinator/db";
 export {
+  CoordinatorAgentToolError,
+  executeCoordinatorAgentTool
+} from "./coordinator-agent-tools.js";
+export {
   AgentProviderRuntimeError,
   ClaudeCodeProvider,
   CodexProvider,
@@ -31,6 +35,13 @@ export {
   listWorkflowEvents,
   startWorkflowRun
 } from "./workflow-protocol-adapter.js";
+export type {
+  CoordinatorAgentToolArgs,
+  CoordinatorAgentToolFailureCode,
+  CoordinatorAgentToolName,
+  CoordinatorAgentToolResult,
+  ExecuteCoordinatorAgentToolInput
+} from "./coordinator-agent-tools.js";
 export type {
   AgentProvider,
   AgentProviderRunInput,
