@@ -12,6 +12,15 @@ export {
   removeWorkspaceForTest,
   resumeWorkspacePreflight
 } from "./workspace-manager.js";
+export {
+  WorkflowProtocolError,
+  inspectWorkflowCapabilities,
+  inspectWorkflowRun,
+  invokeWorkflowAction,
+  listWorkflowArtifacts,
+  listWorkflowEvents,
+  startWorkflowRun
+} from "./workflow-protocol-adapter.js";
 export type {
   CreateAttemptWorkspaceInput,
   PreflightStatus,
@@ -20,6 +29,24 @@ export type {
   WorkspaceGitRunner,
   WorkspaceManagerResult
 } from "./workspace-manager.js";
+export type {
+  InspectWorkflowCapabilitiesInput,
+  InspectWorkflowRunInput,
+  InvokeWorkflowActionInput,
+  ListWorkflowArtifactsInput,
+  ListWorkflowEventsInput,
+  StartWorkflowRunInput,
+  WorkflowArtifacts,
+  WorkflowCapabilities,
+  WorkflowEvents,
+  WorkflowHandoff,
+  WorkflowHandoffKind,
+  WorkflowLifecycle,
+  WorkflowProfileCapability,
+  WorkflowProtocolRunner,
+  WorkflowRunResult,
+  WorkflowStatus
+} from "./workflow-protocol-adapter.js";
 export type {
   AgentSessionSnapshot,
   AutonomyGuidanceSnapshot,

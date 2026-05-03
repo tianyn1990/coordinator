@@ -432,6 +432,25 @@ coordinator 应校验兼容性。
 
 如果以上任一条件不满足，compatibility adapter 只能保留为临时实现，不能成为隐式协议真源。
 
+## 10.2 coordinator 已落地 adapter 事实
+
+截至 `Iteration 6: Workflow Protocol Adapter`，`coordinator` 已落地外层 adapter：
+
+- 支持 capabilities/start/status/action/artifacts/events。
+- capabilities 在 project repo 中执行，用于获得 protocol version、implemented profiles、commands 和 handoff kinds。
+- start/status/action/artifacts/events 在 ready workspace repo 中执行。
+- start/action 是副作用，必须走 operation、lock、fencing 和 idempotency。
+- action 必须携带 expected workflow run state version，避免响应丢失后基于最新状态重复执行同一副作用。
+- action idempotency key 使用 canonical JSON hash，不直接拼接 action/arg。
+- stage/substate/gate/allowedActions/deniedActions 只作为 debug payload，不作为外层状态迁移依据。
+- workflow artifact/event 仅作为 protocol 暴露的只读引用进入外层 event，不作为 coordinator tool payload。
+
+仍待后续 daemon/reconciliation 迭代补齐：
+
+- `unknown` workflow operation 的 inspect/reconcile 矩阵。
+- protocol 返回 run id 与当前 external id 的一致性校验。
+- capabilities.commands 的 command gate。
+
 ## 11. 禁止事项
 
 - coordinator 不读写 `.workflow` 状态文件。

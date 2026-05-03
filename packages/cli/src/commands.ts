@@ -2,10 +2,17 @@ import { ActiveResourceConflictError, listTaskEvents, runMigrations, withDatabas
 import {
   ProjectRegistryInputError,
   WorkspaceManagerError,
+  WorkflowProtocolError,
   buildTaskSurfaceFromDb,
   createAttemptWorkspace,
+  inspectWorkflowCapabilities,
+  inspectWorkflowRun,
+  invokeWorkflowAction,
+  listWorkflowArtifacts,
+  listWorkflowEvents,
   registerProject,
   resumeWorkspacePreflight,
+  startWorkflowRun,
   viewProjectRegistry
 } from "@coordinator/core";
 import { getHealthStatus } from "@coordinator/shared";
@@ -216,10 +223,152 @@ export function runCli(args: string[]): CliResult {
     };
   }
 
+  if (command === "workflow") {
+    const [subcommand, ...workflowArgs] = rest;
+    try {
+      if (subcommand === "capabilities") {
+        const databasePathResult = readRequiredOption(workflowArgs, "--db");
+        const projectIdResult = readRequiredOption(workflowArgs, "--project");
+        const error = databasePathResult.error ?? projectIdResult.error;
+        if (error) {
+          return { exitCode: 1, stdout: "", stderr: `${error}\n` };
+        }
+        const databasePath = databasePathResult.value;
+        const projectId = projectIdResult.value;
+        if (!databasePath || !projectId) {
+          return { exitCode: 1, stdout: "", stderr: "workflow capabilities 参数不完整\n" };
+        }
+        const result = withDatabase(databasePath, (context) =>
+          inspectWorkflowCapabilities(context, { projectId })
+        );
+        return { exitCode: 0, stdout: `${JSON.stringify(result)}\n`, stderr: "" };
+      }
+
+      if (subcommand === "start") {
+        const databasePathResult = readRequiredOption(workflowArgs, "--db");
+        const attemptIdResult = readRequiredOption(workflowArgs, "--attempt");
+        const profileResult = readRequiredOption(workflowArgs, "--profile");
+        const ownerResult = readOption(workflowArgs, "--owner");
+        const error = databasePathResult.error ?? attemptIdResult.error ?? profileResult.error ?? ownerResult.error;
+        if (error) {
+          return { exitCode: 1, stdout: "", stderr: `${error}\n` };
+        }
+        const databasePath = databasePathResult.value;
+        const attemptId = attemptIdResult.value;
+        const profileId = profileResult.value;
+        if (!databasePath || !attemptId || !profileId) {
+          return { exitCode: 1, stdout: "", stderr: "workflow start 参数不完整\n" };
+        }
+        const result = withDatabase(databasePath, (context) =>
+          startWorkflowRun(context, {
+            attemptId,
+            profileId,
+            owner: ownerResult.value ?? "cli"
+          })
+        );
+        return { exitCode: 0, stdout: `${JSON.stringify(result)}\n`, stderr: "" };
+      }
+
+      if (subcommand === "status") {
+        const databasePathResult = readRequiredOption(workflowArgs, "--db");
+        const workflowRunIdResult = readRequiredOption(workflowArgs, "--run");
+        const error = databasePathResult.error ?? workflowRunIdResult.error;
+        if (error) {
+          return { exitCode: 1, stdout: "", stderr: `${error}\n` };
+        }
+        const databasePath = databasePathResult.value;
+        const workflowRunId = workflowRunIdResult.value;
+        if (!databasePath || !workflowRunId) {
+          return { exitCode: 1, stdout: "", stderr: "workflow status 参数不完整\n" };
+        }
+        const result = withDatabase(databasePath, (context) =>
+          inspectWorkflowRun(context, { workflowRunId })
+        );
+        return { exitCode: 0, stdout: `${JSON.stringify(result)}\n`, stderr: "" };
+      }
+
+      if (subcommand === "action") {
+        const databasePathResult = readRequiredOption(workflowArgs, "--db");
+        const workflowRunIdResult = readRequiredOption(workflowArgs, "--run");
+        const actionResult = readRequiredOption(workflowArgs, "--action");
+        const expectedVersionResult = readRequiredOption(workflowArgs, "--expected-version");
+        const argResult = readOption(workflowArgs, "--arg");
+        const error =
+          databasePathResult.error ?? workflowRunIdResult.error ?? actionResult.error ?? expectedVersionResult.error ?? argResult.error;
+        if (error) {
+          return { exitCode: 1, stdout: "", stderr: `${error}\n` };
+        }
+        const databasePath = databasePathResult.value;
+        const workflowRunId = workflowRunIdResult.value;
+        const action = actionResult.value;
+        const expectedStateVersion = Number(expectedVersionResult.value);
+        if (!databasePath || !workflowRunId || !action || !Number.isInteger(expectedStateVersion) || expectedStateVersion < 0) {
+          return { exitCode: 1, stdout: "", stderr: "workflow action 参数不完整\n" };
+        }
+        const result = withDatabase(databasePath, (context) =>
+          invokeWorkflowAction(context, {
+            workflowRunId,
+            action,
+            expectedStateVersion,
+            arg: argResult.value
+          })
+        );
+        return { exitCode: 0, stdout: `${JSON.stringify(result)}\n`, stderr: "" };
+      }
+
+      if (subcommand === "artifacts") {
+        const databasePathResult = readRequiredOption(workflowArgs, "--db");
+        const workflowRunIdResult = readRequiredOption(workflowArgs, "--run");
+        const error = databasePathResult.error ?? workflowRunIdResult.error;
+        if (error) {
+          return { exitCode: 1, stdout: "", stderr: `${error}\n` };
+        }
+        const databasePath = databasePathResult.value;
+        const workflowRunId = workflowRunIdResult.value;
+        if (!databasePath || !workflowRunId) {
+          return { exitCode: 1, stdout: "", stderr: "workflow artifacts 参数不完整\n" };
+        }
+        const result = withDatabase(databasePath, (context) =>
+          listWorkflowArtifacts(context, { workflowRunId })
+        );
+        return { exitCode: 0, stdout: `${JSON.stringify(result)}\n`, stderr: "" };
+      }
+
+      if (subcommand === "events") {
+        const databasePathResult = readRequiredOption(workflowArgs, "--db");
+        const workflowRunIdResult = readRequiredOption(workflowArgs, "--run");
+        const error = databasePathResult.error ?? workflowRunIdResult.error;
+        if (error) {
+          return { exitCode: 1, stdout: "", stderr: `${error}\n` };
+        }
+        const databasePath = databasePathResult.value;
+        const workflowRunId = workflowRunIdResult.value;
+        if (!databasePath || !workflowRunId) {
+          return { exitCode: 1, stdout: "", stderr: "workflow events 参数不完整\n" };
+        }
+        const result = withDatabase(databasePath, (context) =>
+          listWorkflowEvents(context, { workflowRunId })
+        );
+        return { exitCode: 0, stdout: `${JSON.stringify(result)}\n`, stderr: "" };
+      }
+    } catch (error) {
+      if (error instanceof WorkflowProtocolError || error instanceof ActiveResourceConflictError) {
+        return { exitCode: 1, stdout: "", stderr: `${error.message}\n` };
+      }
+      throw error;
+    }
+
+    return {
+      exitCode: 1,
+      stdout: "",
+      stderr: "未知 workflow 子命令，可用：workflow capabilities, workflow start, workflow status, workflow action, workflow artifacts, workflow events\n"
+    };
+  }
+
   return {
     exitCode: 1,
     stdout: "",
-    stderr: `未知命令：${command}\n可用命令：health, migrate --db <path>, timeline --db <path> --task <task-id>, surface --db <path> --task <task-id>, register --db <path> --repo <path>, projects --db <path>, workspace create, workspace preflight\n`
+    stderr: `未知命令：${command}\n可用命令：health, migrate --db <path>, timeline --db <path> --task <task-id>, surface --db <path> --task <task-id>, register --db <path> --repo <path>, projects --db <path>, workspace create, workspace preflight, workflow <subcommand>\n`
   };
 }
 

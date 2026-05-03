@@ -26,7 +26,8 @@ describe("runCli", () => {
       applied: [
         { id: "0001_metadata.sql", applied: true },
         { id: "0002_core_data_model.sql", applied: true },
-        { id: "0003_project_registry.sql", applied: true }
+        { id: "0003_project_registry.sql", applied: true },
+        { id: "0004_workflow_protocol_adapter.sql", applied: true }
       ]
     });
   });
@@ -178,5 +179,25 @@ describe("runCli", () => {
       status: "retryable",
       checks: [{ name: "workspace-record" }]
     });
+  });
+
+  it("workflow capabilities 要求 project 参数", () => {
+    const databasePath = join(mkdtempSync(join(tmpdir(), "coordinator-cli-workflow-")), "workflow.sqlite");
+    runMigrations(databasePath);
+
+    const result = runCli(["workflow", "capabilities", "--db", databasePath]);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("缺少 --project 参数");
+  });
+
+  it("workflow action 要求 expected version 参数", () => {
+    const databasePath = join(mkdtempSync(join(tmpdir(), "coordinator-cli-workflow-")), "workflow.sqlite");
+    runMigrations(databasePath);
+
+    const result = runCli(["workflow", "action", "--db", databasePath, "--run", "run-1", "--action", "continue"]);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("缺少 --expected-version 参数");
   });
 });

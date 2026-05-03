@@ -131,6 +131,43 @@ export type UpdateWorkspaceInput = {
   };
 };
 
+export type CreateWorkflowRunInput = {
+  id?: string;
+  projectId: string;
+  taskId: string;
+  attemptId: string;
+  profileId: string;
+  status?: string;
+  externalId?: string;
+  handoffKind?: string;
+};
+
+export type WorkflowRunRecord = {
+  id: string;
+  projectId: string;
+  taskId: string;
+  attemptId: string;
+  profileId: string;
+  status: string;
+  externalId?: string;
+  handoffKind?: string;
+  stateVersion: number;
+};
+
+export type UpdateWorkflowRunInput = {
+  workflowRunId: string;
+  expectedStateVersion: number;
+  status: string;
+  externalId?: string;
+  handoffKind?: string;
+  lock?: {
+    resourceKind: string;
+    resourceId: string;
+    lockToken: string;
+    now?: Date;
+  };
+};
+
 export type CreateArtifactInput = {
   id?: string;
   projectId?: string;
@@ -159,6 +196,7 @@ export type AppendEventInput = {
   taskId?: string;
   attemptId?: string;
   workspaceId?: string;
+  workflowRunId?: string;
   operationId?: string;
   transitionId?: string;
   lockToken?: string;
@@ -377,6 +415,59 @@ export function getActiveWorkspaceByAttempt(context: DbContext, attemptId: strin
   return row ? mapWorkspaceRow(row) : undefined;
 }
 
+export function createWorkflowRun(context: DbContext, input: CreateWorkflowRunInput): WorkflowRunRecord {
+  return withTransaction(context, () => insertWorkflowRun(context, input));
+}
+
+export function getWorkflowRun(context: DbContext, id: string): WorkflowRunRecord | undefined {
+  const row = context.db.prepare("SELECT * FROM workflow_runs WHERE id = ?").get(id);
+  return row ? mapWorkflowRunRow(row) : undefined;
+}
+
+export function getActiveWorkflowRunByAttempt(context: DbContext, attemptId: string): WorkflowRunRecord | undefined {
+  const row = context.db
+    .prepare(
+      `SELECT * FROM workflow_runs
+       WHERE attempt_id = ? AND status IN ('planned', 'starting', 'running', 'blocked', 'handoff', 'unknown')
+       ORDER BY created_at ASC, id ASC
+       LIMIT 1`
+    )
+    .get(attemptId);
+  return row ? mapWorkflowRunRow(row) : undefined;
+}
+
+export function updateWorkflowRun(context: DbContext, input: UpdateWorkflowRunInput): WorkflowRunRecord {
+  return withTransaction(context, () => {
+    if (input.lock) {
+      assertLockHeld(context, input.lock.resourceKind, input.lock.resourceId, input.lock.lockToken, input.lock.now);
+    }
+
+    const result = context.db
+      .prepare(
+        `UPDATE workflow_runs
+         SET status = ?,
+             external_id = COALESCE(?, external_id),
+             handoff_kind = ?,
+             state_version = state_version + 1,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ? AND state_version = ?`
+      )
+      .run(
+        input.status,
+        input.externalId ?? null,
+        input.handoffKind ?? null,
+        input.workflowRunId,
+        input.expectedStateVersion
+      );
+
+    if (result.changes === 0) {
+      throw new CasConflictError(`workflow run ${input.workflowRunId} state_version mismatch`);
+    }
+
+    return requireWorkflowRun(context, input.workflowRunId);
+  });
+}
+
 export function updateWorkspace(context: DbContext, input: UpdateWorkspaceInput): WorkspaceRecord {
   return withTransaction(context, () => {
     if (input.lock) {
@@ -465,9 +556,9 @@ export function appendEvent(context: DbContext, input: AppendEventInput): EventR
   const result = context.db
     .prepare(
       `INSERT INTO events (
-        operation_id, transition_id, lock_token, project_id, task_id, attempt_id, workspace_id, type, summary,
+        operation_id, transition_id, lock_token, project_id, task_id, attempt_id, workspace_id, workflow_run_id, type, summary,
         payload_json, artifact_refs_json, severity
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       input.operationId ?? null,
@@ -477,6 +568,7 @@ export function appendEvent(context: DbContext, input: AppendEventInput): EventR
       input.taskId ?? null,
       input.attemptId ?? null,
       input.workspaceId ?? null,
+      input.workflowRunId ?? null,
       input.type,
       input.summary,
       input.payload === undefined ? null : JSON.stringify(input.payload),
@@ -764,6 +856,39 @@ function insertWorkspace(context: DbContext, input: CreateWorkspaceInput): Works
   return requireWorkspace(context, id);
 }
 
+function insertWorkflowRun(context: DbContext, input: CreateWorkflowRunInput): WorkflowRunRecord {
+  const id = input.id ?? randomUUID();
+  context.db
+    .prepare(
+      `INSERT INTO workflow_runs (
+         id, project_id, task_id, attempt_id, profile_id, status, external_id, handoff_kind
+       )
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      id,
+      input.projectId,
+      input.taskId,
+      input.attemptId,
+      input.profileId,
+      input.status ?? "planned",
+      input.externalId ?? null,
+      input.handoffKind ?? null
+    );
+
+  appendEvent(context, {
+    type: "workflow.record_created",
+    summary: `workflow run record created: ${id}`,
+    projectId: input.projectId,
+    taskId: input.taskId,
+    attemptId: input.attemptId,
+    workflowRunId: id,
+    payload: { status: input.status ?? "planned", profileId: input.profileId }
+  });
+
+  return requireWorkflowRun(context, id);
+}
+
 function requireProject(context: DbContext, id: string): ProjectRecord {
   const row = context.db.prepare("SELECT * FROM projects WHERE id = ?").get(id);
   if (!row) {
@@ -794,6 +919,14 @@ function requireWorkspace(context: DbContext, id: string): WorkspaceRecord {
     throw new Error(`workspace not found: ${id}`);
   }
   return mapWorkspaceRow(row);
+}
+
+function requireWorkflowRun(context: DbContext, id: string): WorkflowRunRecord {
+  const row = context.db.prepare("SELECT * FROM workflow_runs WHERE id = ?").get(id);
+  if (!row) {
+    throw new Error(`workflow run not found: ${id}`);
+  }
+  return mapWorkflowRunRow(row);
 }
 
 function requireArtifact(context: DbContext, id: string): ArtifactRecord {
@@ -956,6 +1089,31 @@ function mapWorkspaceRow(row: unknown): WorkspaceRecord {
     repoPath: value.repo_path ?? undefined,
     branch: value.branch ?? undefined,
     baseBranch: value.base_branch ?? undefined,
+    stateVersion: value.state_version
+  };
+}
+
+function mapWorkflowRunRow(row: unknown): WorkflowRunRecord {
+  const value = row as {
+    id: string;
+    project_id: string;
+    task_id: string;
+    attempt_id: string;
+    profile_id: string;
+    status: string;
+    external_id: string | null;
+    handoff_kind: string | null;
+    state_version: number;
+  };
+  return {
+    id: value.id,
+    projectId: value.project_id,
+    taskId: value.task_id,
+    attemptId: value.attempt_id,
+    profileId: value.profile_id,
+    status: value.status,
+    externalId: value.external_id ?? undefined,
+    handoffKind: value.handoff_kind ?? undefined,
     stateVersion: value.state_version
   };
 }

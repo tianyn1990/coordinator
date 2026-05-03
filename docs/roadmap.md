@@ -156,11 +156,11 @@ P2 只预留接口和规划，不进入 V1 完成标准：
 
 ### 当前进度
 
-- 当前阶段：`Iteration 5: Workspace Manager` 已完成。
-- 当前 OpenSpec change：`add-workspace-manager` 已归档为 `openspec/changes/archive/2026-05-03-add-workspace-manager`。
-- 当前正式规格：`openspec/specs/workspace-manager/spec.md`。
-- 下一阶段：`Iteration 6: Workflow Protocol Adapter`。
-- 下一阶段重点：实现 workflow protocol capabilities/status/start/action/artifacts/events 的外层 adapter；如果 `workflow` 暂未提供完整 protocol，则用 compatibility adapter 包装现有 CLI，并明确标记为临时。
+- 当前阶段：`Iteration 6: Workflow Protocol Adapter` 已完成。
+- 当前 OpenSpec change：`add-workflow-protocol-adapter` 已归档为 `openspec/changes/archive/2026-05-03-add-workflow-protocol-adapter`。
+- 当前正式规格：`openspec/specs/workflow-protocol-adapter/spec.md`。
+- 下一阶段：`Iteration 7: Agent Provider Adapter / Coordinator Agent Runtime`。
+- 下一阶段重点：实现外层 Coordinator Agent provider/runtime 的最小执行底座，使 agent 能基于 Coordinator Surface 和受控 tools 进行一次决策；继续保持 provider 与 workflow adapter 解耦，不提前实现 daemon 或 PR/MR provider。
 
 ### 重点关注事项
 
@@ -181,8 +181,16 @@ P2 只预留接口和规划，不进入 V1 完成标准：
 - Resume preflight 是只读检查：path containment 逐项 fail-fast，path 失败后不执行 git、不读取 manifest/checkpoint、不创建缺失目录；对 workspace/repo/coordinator/artifact/manifest/checkpoint 做 realpath containment。
 - 已补充 Workspace Manager 高风险测试：deterministic branch、缺失 default branch、branch exists、active/ready 复用、creating workspace 收敛、operation terminal 防回退、workspace lock conflict、symlink escape、dirty/branch mismatch、missing workspace path fail-fast。
 - 第五轮独立 `gpt-5.5 high` subagent review 已确认无必须修复项。后续可加强但不阻塞本轮：更严格确认 git worktree 属于 project repo；如果未来 `assertArtifactRelativePath` 接收用户输入，应改为原始 path segment 级拒绝 `..`，不要依赖 normalize 后判断。
+- 已实现 Workflow Protocol Adapter：支持 capabilities/start/status/action/artifacts/events，所有入口只消费 workflow protocol JSON stdout，不读写 `.workflow` private state，不根据 workflow stage/substate/gate 推进外层业务状态。
+- Workflow capabilities 在 project repo 中查询，start/status/action/artifacts/events 在 ready workspace repo 中执行；profile 必须来自 capabilities 中 `implemented=true` 的声明，active workflow run 复用时必须匹配 profile。
+- Workflow start 已按 operation-first 与 fail-safe replay 收敛：先创建 `workflow:start:<attempt-id>:<profile-id>` operation 并获取 `attempt-workflow` lock，再落 `starting` workflow run 记录，之后执行 protocol start；start 成功后 workflow run 更新、`workflow.started` event、operation succeeded 在同一 transaction 内完成；side effect 窗口开始后的失败标记 operation `unknown`，避免自动重跑。
+- Workflow action 已纳入副作用契约：operator 必须传 expected workflow run state version，idempotency key 使用 canonical JSON + sha256，action/arg 先规范化再同时用于 protocol 入参和 idempotency key；action 成功后的 workflow run 更新、`workflow.action` event、operation succeeded 同 transaction 提交，并携带 lock token 做 fencing。
+- Workflow status 只用 lifecycle/handoff/artifacts/recovery/summary 更新 workflow run 粗粒度状态；stage/substate/gate/allowedActions/deniedActions 只进入 event debug payload。
+- 已实现 CLI/API operator-only workflow 调试入口：capabilities/start/status/action/artifacts/events；这些入口未进入 Coordinator Surface，也不是 agent tools。`workflow action` CLI/API 需要显式 expected state version，避免响应丢失后的重复副作用。
+- 已补充 Workflow Protocol Adapter contract tests：capabilities cwd、profile implemented gate、operation-first start、start side effect 后 unknown、stage/substate 不驱动 handoff、action operation/idempotency/replay、arg 规范化、artifact/event 只读引用、`.workflow` private state 不读写、active run 复用与 profile conflict。
+- 第六轮经过多轮独立 `gpt-5.5 high` subagent review，所有必须修复项已处理并复验。后续可加强但不阻塞本轮：status/action/artifacts/events 校验返回 runId 与当前 externalId 一致；API 对 CAS/lock conflict 返回更细的 409 与 machine-readable code；capabilities.commands 按命令做 gate；daemon/reconciliation 迭代补齐 `unknown` operation 的 inspect/reconcile 矩阵。
 - 本轮验证通过：`openspec validate --all --strict`、`pnpm typecheck`、`pnpm test`、`pnpm build`。
-- 本轮已经过独立 `gpt-5.5 high` subagent review；review 明确检查了是否符合 `docs/` 总体设计心智、是否持续对齐必要设计文档、是否过度设计、是否污染分层边界、是否存在协议漂移和过度暴露复杂 JSON。多轮 review 提出的 ready 持久化顺序、operation replay、lock/fencing、deterministic sanitize、LocalWorker、preflight fail-fast、symlink escape 等问题均已修复并复验。
+- 本轮已经过独立 `gpt-5.5 high` subagent review；review 明确检查了是否符合 `docs/` 总体设计心智、是否持续对齐必要设计文档、是否过度设计、是否污染分层边界、是否存在协议漂移和过度暴露复杂 JSON。多轮 review 提出的 workflow start/action 幂等、operation replay、lock/fencing、expected state version、action key 碰撞、arg 规范化、side effect 后 unknown 等问题均已修复并复验。
 
 ## 6. 实现顺序
 
