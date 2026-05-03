@@ -251,7 +251,7 @@ function watchActiveAgentSessions(context: DbContext, tickId: string, owner: str
     });
     if (row.task_id) {
       const task = getTask(context, row.task_id);
-      if (task && !["waiting_human", "waiting_review", "waiting_merge_approval"].includes(task.status)) {
+      if (task && !["paused", "canceled", "waiting_human", "waiting_review", "waiting_merge_approval"].includes(task.status)) {
         scheduleTaskRetry(context, task.id, now, tickId, "stalled-agent-session");
       }
     }
@@ -387,6 +387,18 @@ function wakeAnsweredHumanRequest(
   now: Date,
   input: DaemonRuntimeInput
 ): DaemonActionResult[] {
+  const currentTask = requireTask(context, request.taskId);
+  if (currentTask.status === "paused" || currentTask.status === "canceled") {
+    return [
+      {
+        kind: "retry_blocked",
+        taskId: request.taskId,
+        humanRequestId: request.id,
+        status: "skipped",
+        summary: `human wake-up skipped because task is ${currentTask.status}`
+      }
+    ];
+  }
   const operation = createOperation(context, {
     idempotencyKey: `daemon:human:wake:${request.id}:${request.stateVersion}`,
     kind: "daemon:human:wake",
@@ -758,7 +770,7 @@ function getLatestRetrySchedule(context: DbContext, taskId: string): { dueAt: st
   const row = context.db
     .prepare(
       `SELECT payload_json FROM events
-       WHERE task_id = ? AND type = 'daemon.retry_scheduled'
+       WHERE task_id = ? AND type IN ('daemon.retry_scheduled', 'operator.task_retry_requested', 'operator.task_resumed')
        ORDER BY created_at DESC, id DESC
        LIMIT 1`
     )

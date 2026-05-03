@@ -11,6 +11,7 @@ import {
   WorkflowProtocolError,
   approveMergeRuntime,
   buildTaskSurfaceFromDb,
+  controlTaskRuntime,
   createManualTask,
   createAttemptWorkspace,
   createPullRequestRuntime,
@@ -98,6 +99,56 @@ export function buildServer(): FastifyInstance {
         return { task };
       } catch (error) {
         if (error instanceof OperatorSurfaceError) {
+          return reply.code(400).send({ error: error.message });
+        }
+        throw error;
+      }
+    }
+  );
+  server.post<{
+    Params: { taskId: string };
+    Body: TaskControlBody;
+  }>(
+    "/tasks/:taskId/control",
+    {
+      schema: {
+        body: {
+          type: "object",
+          required: ["action", "expectedStateVersion"],
+          additionalProperties: false,
+          properties: {
+            action: { type: "string", enum: ["pause", "resume", "cancel", "retry"] },
+            expectedStateVersion: { type: "integer", minimum: 0 },
+            reason: { type: "string" },
+            actor: { type: "string", minLength: 1 },
+            retryDelayMs: { type: "integer", minimum: 0 }
+          }
+        }
+      }
+    },
+    async (request, reply) => {
+      const databasePath = process.env.COORDINATOR_DB_PATH;
+      if (!databasePath) {
+        return reply.code(503).send({ error: "COORDINATOR_DB_PATH 未配置" });
+      }
+
+      try {
+        return withDatabase(databasePath, (context) =>
+          controlTaskRuntime(context, {
+            taskId: request.params.taskId,
+            action: request.body.action,
+            expectedStateVersion: request.body.expectedStateVersion,
+            reason: request.body.reason,
+            actor: request.body.actor ?? "api",
+            retryDelayMs: request.body.retryDelayMs
+          })
+        );
+      } catch (error) {
+        if (
+          error instanceof OperatorSurfaceError ||
+          error instanceof ActiveResourceConflictError ||
+          error instanceof CasConflictError
+        ) {
           return reply.code(400).send({ error: error.message });
         }
         throw error;
@@ -813,6 +864,14 @@ type CreateTaskBody = {
   title: string;
   description?: string;
   autonomy?: "conservative" | "balanced" | "aggressive";
+};
+
+type TaskControlBody = {
+  action: "pause" | "resume" | "cancel" | "retry";
+  expectedStateVersion: number;
+  reason?: string;
+  actor?: string;
+  retryDelayMs?: number;
 };
 
 type CreateWorkspaceBody = {

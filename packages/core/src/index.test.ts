@@ -201,4 +201,26 @@ describe("project registry", () => {
 
     expect(surface.json.available_tools.map((tool) => tool.name)).toEqual([]);
   });
+
+  it("Coordinator Surface 不暴露 operator-only task controls", () => {
+    const databasePath = join(mkdtempSync(join(tmpdir(), "coordinator-surface-db-")), "surface.sqlite");
+    runMigrations(databasePath);
+
+    const toolNames = withDatabase(databasePath, (context) => {
+      const project = createProject(context, {
+        id: "project-task-controls",
+        name: "coordinator",
+        defaultBranch: "main",
+        workflowLauncher: "workflow"
+      });
+      const task = createTask(context, {
+        id: "task-controls",
+        projectId: project.id,
+        title: "surface controls"
+      });
+      return buildTaskSurfaceFromDb(context, task.id).json.available_tools.map((tool) => tool.name);
+    });
+
+    expect(toolNames).not.toEqual(expect.arrayContaining(["pause_task", "resume_task", "cancel_task", "retry_task"]));
+  });
 });

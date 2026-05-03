@@ -19,6 +19,7 @@ export {
 export { DaemonRuntimeError, parseAgentToolRequest, runDaemonTick } from "./daemon-runtime.js";
 export {
   OperatorSurfaceError,
+  controlTaskRuntime,
   createManualTask,
   getOperatorTaskDetail,
   listOperatorTasks,
@@ -75,7 +76,10 @@ export type {
 } from "./agent-provider-runtime.js";
 export type { DaemonActionResult, DaemonRuntimeInput, DaemonTickResult, ParsedAgentToolRequest } from "./daemon-runtime.js";
 export type {
+  ControlTaskInput,
+  ControlTaskResult,
   CreateManualTaskInput,
+  OperatorTaskControlAction,
   OperatorTaskDetail,
   OperatorTaskListItem,
   RecordHumanAnswerInput,

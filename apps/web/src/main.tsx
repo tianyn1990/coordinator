@@ -249,6 +249,25 @@ function App() {
     }
   }
 
+  async function controlTask(action: "pause" | "resume" | "cancel" | "retry", reason: string) {
+    if (!detail) return;
+    try {
+      const result = await request<{ task: TaskListItem; nextStatus: string }>(`/tasks/${detail.task.id}/control`, {
+        method: "POST",
+        body: JSON.stringify({
+          action,
+          expectedStateVersion: detail.task.stateVersion,
+          reason,
+          actor: "web-operator"
+        })
+      });
+      setFlash({ tone: "ok", message: `task ${action}: ${result.nextStatus}` });
+      await refresh(result.task.id);
+    } catch (error) {
+      setFlash({ tone: "error", message: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
   return (
     <main className="app-shell">
       <aside className="sidebar">
@@ -332,6 +351,7 @@ function App() {
             onAnswer={answerHumanRequest}
             onDecideMerge={decideMerge}
             onMerge={mergeAfterApproval}
+            onTaskControl={controlTask}
           />
         ) : (
           <div className="empty-state">暂无 task。先注册 project 并创建 manual task。</div>
@@ -345,12 +365,14 @@ function TaskDetailView({
   detail,
   onAnswer,
   onDecideMerge,
-  onMerge
+  onMerge,
+  onTaskControl
 }: {
   detail: TaskDetail;
   onAnswer: (event: React.FormEvent<HTMLFormElement>, request: HumanRequest) => void;
   onDecideMerge: (pr: PullRequest, request: HumanRequest, decision: "approve" | "reject") => void;
   onMerge: (pr: PullRequest) => void;
+  onTaskControl: (action: "pause" | "resume" | "cancel" | "retry", reason: string) => void;
 }) {
   const mergeRequest = detail.humanRequests.find((request) => request.kind === "merge_approval");
   const pendingRequests = detail.humanRequests.filter((request) => request.status === "pending" && request.kind !== "merge_approval");
@@ -364,6 +386,34 @@ function TaskDetailView({
         <Fact label="Blocker" value={detail.currentBlocker} />
         <Fact label="Surface" value={detail.surface.surfaceKind} />
         <Fact label="Artifact root" value={detail.surface.json.artifact_root} mono />
+      </section>
+
+      <section className="panel wide">
+        <h3>Task Controls</h3>
+        <div className="control-grid">
+          <TaskControlButton
+            label="Pause"
+            disabled={!canPauseTask(detail.task.status)}
+            onClick={() => onTaskControl("pause", "operator-paused-from-web")}
+          />
+          <TaskControlButton
+            label="Resume"
+            disabled={detail.task.status !== "paused"}
+            onClick={() => onTaskControl("resume", "operator-resumed-from-web")}
+          />
+          <TaskControlButton
+            label="Retry"
+            disabled={!canRetryTask(detail.task.status)}
+            onClick={() => onTaskControl("retry", "operator-retry-from-web")}
+          />
+          <TaskControlButton
+            label="Cancel"
+            danger
+            disabled={isTerminalTaskStatus(detail.task.status)}
+            onClick={() => onTaskControl("cancel", "operator-canceled-from-web")}
+          />
+        </div>
+        <p className="muted">Cancel 只停止 coordinator 自动推进，不会删除 workspace、关闭 PR/MR 或清理 artifact。</p>
       </section>
 
       <section className="panel wide">
@@ -504,6 +554,43 @@ function TaskDetailView({
       </section>
     </div>
   );
+}
+
+function TaskControlButton({
+  label,
+  disabled,
+  danger = false,
+  onClick
+}: {
+  label: string;
+  disabled: boolean;
+  danger?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button type="button" className={danger ? "danger-button" : undefined} disabled={disabled} onClick={onClick}>
+      {label}
+    </button>
+  );
+}
+
+function canPauseTask(status: string): boolean {
+  return !isTerminalTaskStatus(status) && status !== "paused";
+}
+
+function canRetryTask(status: string): boolean {
+  return (
+    !isTerminalTaskStatus(status) &&
+    status !== "paused" &&
+    status !== "waiting_human" &&
+    status !== "waiting_review" &&
+    status !== "waiting_merge_approval" &&
+    status !== "merge_waiting"
+  );
+}
+
+function isTerminalTaskStatus(status: string): boolean {
+  return status === "completed" || status === "handoff" || status === "canceled" || status === "failed";
 }
 
 function Fact({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {

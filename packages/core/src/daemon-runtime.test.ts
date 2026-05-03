@@ -334,6 +334,49 @@ describe("daemon runtime", () => {
     expect(surface.json.human_requests[0]).toMatchObject({ status: "consumed" });
   });
 
+  it("answered human request 不会唤醒 paused task", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createTaskFixture(databasePath);
+
+    withDatabase(databasePath, (context) => {
+      const request = createHumanRequest(context, {
+        projectId: fixture.projectId,
+        taskId: fixture.taskId,
+        blockedKey: "agent:requirements-clarification:paused",
+        kind: "requirements-clarification",
+        status: "answered",
+        answerArtifactPath: "human-answer.md"
+      });
+      expect(request.status).toBe("answered");
+      context.db.prepare("UPDATE tasks SET status = ?, state_version = state_version + 1 WHERE id = ?").run("paused", fixture.taskId);
+    });
+
+    const result = withDatabase(databasePath, (context) =>
+      runDaemonTick(context, {
+        provider: {
+          id: "must-not-run-paused-human",
+          kind: "fake",
+          capabilities: ["test"],
+          run(_input: AgentProviderRunInput) {
+            throw new Error("provider should not run for paused human wake-up");
+          }
+        }
+      })
+    );
+
+    expect(result.actions).toContainEqual(
+      expect.objectContaining({
+        kind: "retry_blocked",
+        humanRequestId: expect.any(String),
+        status: "skipped",
+        summary: expect.stringContaining("task is paused")
+      })
+    );
+    const surface = withDatabase(databasePath, (context) => buildTaskSurfaceFromDb(context, fixture.taskId));
+    expect(surface.json.task.status).toBe("paused");
+    expect(surface.json.human_requests[0]).toMatchObject({ status: "answered" });
+  });
+
   it("retry budget 耗尽时 daemon 不继续启动 agent", () => {
     const databasePath = createMigratedDatabase();
     const fixture = createTaskFixture(databasePath);
@@ -438,6 +481,88 @@ describe("daemon runtime", () => {
       runDaemonTick(context, {
         now: new Date("2026-05-04T00:00:11.000Z"),
         provider: new FakeAgentProvider("retry due but no tool")
+      })
+    );
+    expect(due.actions).toContainEqual(expect.objectContaining({ kind: "agent_tool_skipped" }));
+  });
+
+  it("paused 和 canceled task 不会被 daemon 推进或因 stale session 安排 retry", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createTaskFixture(databasePath);
+    withDatabase(databasePath, (context) => {
+      context.db.prepare("UPDATE tasks SET status = ?, state_version = state_version + 1 WHERE id = ?").run("paused", fixture.taskId);
+      createAgentSession(context, {
+        id: "paused-stale-agent",
+        projectId: fixture.projectId,
+        taskId: fixture.taskId,
+        providerKind: "fake",
+        role: "outer",
+        status: "running"
+      });
+      context.db.prepare("UPDATE agent_sessions SET updated_at = ? WHERE id = ?").run("2026-05-03T23:00:00.000Z", "paused-stale-agent");
+    });
+
+    const paused = withDatabase(databasePath, (context) =>
+      runDaemonTick(context, {
+        now: new Date("2026-05-04T00:00:00.000Z"),
+        provider: {
+          id: "must-not-run-paused",
+          kind: "fake",
+          capabilities: ["test"],
+          run(_input: AgentProviderRunInput) {
+            throw new Error("provider should not run for paused task");
+          }
+        }
+      })
+    );
+    const pausedEvents = withDatabase(databasePath, (context) => listTaskEvents(context, fixture.taskId));
+    expect(paused.actions).toContainEqual(expect.objectContaining({ agentSessionId: "paused-stale-agent" }));
+    expect(pausedEvents.map((event) => event.type)).not.toContain("daemon.retry_scheduled");
+
+    withDatabase(databasePath, (context) => {
+      context.db.prepare("UPDATE tasks SET status = ?, state_version = state_version + 1 WHERE id = ?").run("canceled", fixture.taskId);
+    });
+    const canceled = withDatabase(databasePath, (context) =>
+      runDaemonTick(context, { provider: new FakeAgentProvider("no-op") })
+    );
+    expect(canceled.actions.some((action) => action.taskId === fixture.taskId && action.kind === "agent_session_started")).toBe(false);
+  });
+
+  it("operator retry dueAt 未到期不启动 provider，到期后复用 daemon 恢复路径", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createTaskFixture(databasePath);
+    withDatabase(databasePath, (context) => {
+      appendEvent(context, {
+        type: "operator.task_retry_requested",
+        summary: "operator retry",
+        projectId: fixture.projectId,
+        taskId: fixture.taskId,
+        payload: { dueAt: "2026-05-04T00:00:10.000Z", action: "retry" }
+      });
+      context.db.prepare("UPDATE tasks SET status = ?, state_version = state_version + 1 WHERE id = ?").run("resuming", fixture.taskId);
+    });
+
+    const early = withDatabase(databasePath, (context) =>
+      runDaemonTick(context, {
+        now: new Date("2026-05-04T00:00:05.000Z"),
+        provider: {
+          id: "must-not-run-operator-retry",
+          kind: "fake",
+          capabilities: ["test"],
+          run(_input: AgentProviderRunInput) {
+            throw new Error("provider should not run before operator retry due");
+          }
+        }
+      })
+    );
+    expect(early.actions).toContainEqual(
+      expect.objectContaining({ kind: "retry_blocked", summary: expect.stringContaining("retry not due yet") })
+    );
+
+    const due = withDatabase(databasePath, (context) =>
+      runDaemonTick(context, {
+        now: new Date("2026-05-04T00:00:11.000Z"),
+        provider: new FakeAgentProvider("operator retry due but no tool")
       })
     );
     expect(due.actions).toContainEqual(expect.objectContaining({ kind: "agent_tool_skipped" }));

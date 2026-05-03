@@ -75,6 +75,26 @@ export type RecordHumanAnswerResult = {
   artifactPath: string;
 };
 
+export type OperatorTaskControlAction = "pause" | "resume" | "cancel" | "retry";
+
+export type ControlTaskInput = {
+  taskId: string;
+  expectedStateVersion: number;
+  action: OperatorTaskControlAction;
+  reason?: string;
+  actor?: string;
+  now?: Date;
+  retryDelayMs?: number;
+};
+
+export type ControlTaskResult = {
+  task: TaskRecord;
+  action: OperatorTaskControlAction;
+  previousStatus: string;
+  nextStatus: string;
+  dueAt?: string;
+};
+
 export class OperatorSurfaceError extends Error {
   constructor(message: string) {
     super(message);
@@ -100,6 +120,52 @@ export function createManualTask(context: DbContext, input: CreateManualTaskInpu
     description,
     autonomy,
     sourceKind: "manual"
+  });
+}
+
+export function controlTaskRuntime(context: DbContext, input: ControlTaskInput): ControlTaskResult {
+  const task = getTask(context, input.taskId);
+  if (!task) {
+    throw new OperatorSurfaceError(`task not found: ${input.taskId}`);
+  }
+  if (task.stateVersion !== input.expectedStateVersion) {
+    throw new ActiveResourceConflictError(`task ${task.id} state_version mismatch`);
+  }
+  const action = normalizeTaskControlAction(input.action);
+  const actor = normalizeRequiredText(input.actor ?? "operator", "actor", 120);
+  const reason = normalizeOptionalText(input.reason, 2_000) || defaultTaskControlReason(action);
+  const now = input.now ?? new Date();
+  const nextStatus = deriveTaskControlNextStatus(task, action);
+  const dueAt =
+    action === "resume" || action === "retry"
+      ? new Date(now.getTime() + Math.max(0, input.retryDelayMs ?? 0)).toISOString()
+      : undefined;
+
+  return withTransaction(context, () => {
+    const updated = updateTaskStatus(context, task.id, task.stateVersion, nextStatus);
+    appendEvent(context, {
+      type: taskControlEventType(action),
+      summary: `operator ${action} task: ${task.id}`,
+      projectId: task.projectId,
+      taskId: task.id,
+      severity: action === "cancel" ? "warn" : "info",
+      payload: {
+        action,
+        actor,
+        reason,
+        previousStatus: task.status,
+        nextStatus,
+        expectedStateVersion: input.expectedStateVersion,
+        dueAt
+      }
+    });
+    return {
+      task: updated,
+      action,
+      previousStatus: task.status,
+      nextStatus,
+      dueAt
+    };
   });
 }
 
@@ -249,6 +315,76 @@ function deriveCurrentBlocker(
     return `waiting PR/MR: ${latestPullRequest.status}`;
   }
   return task.status;
+}
+
+function deriveTaskControlNextStatus(task: TaskRecord, action: OperatorTaskControlAction): string {
+  if (action === "resume") {
+    if (task.status !== "paused") {
+      throw new ActiveResourceConflictError(`task is not paused: ${task.id}:${task.status}`);
+    }
+    return "resuming";
+  }
+  if (isTerminalTaskStatus(task.status)) {
+    throw new ActiveResourceConflictError(`task is terminal: ${task.id}:${task.status}`);
+  }
+  if (action === "pause") {
+    if (task.status === "paused") {
+      throw new ActiveResourceConflictError(`task is already paused: ${task.id}`);
+    }
+    return "paused";
+  }
+  if (action === "cancel") {
+    return "canceled";
+  }
+  if (action === "retry") {
+    if (task.status === "paused") {
+      throw new ActiveResourceConflictError(`paused task must be resumed, not retried: ${task.id}`);
+    }
+    if (isHumanOrApprovalWaitingStatus(task.status)) {
+      throw new ActiveResourceConflictError(`task is waiting for human/operator gate: ${task.id}:${task.status}`);
+    }
+    return "resuming";
+  }
+  return assertNeverTaskControl(action);
+}
+
+function normalizeTaskControlAction(value: string): OperatorTaskControlAction {
+  if (value === "pause" || value === "resume" || value === "cancel" || value === "retry") {
+    return value;
+  }
+  throw new OperatorSurfaceError(`不支持的 task control action：${value}`);
+}
+
+function taskControlEventType(action: OperatorTaskControlAction): string {
+  return action === "pause"
+    ? "operator.task_paused"
+    : action === "resume"
+      ? "operator.task_resumed"
+      : action === "cancel"
+        ? "operator.task_canceled"
+        : "operator.task_retry_requested";
+}
+
+function defaultTaskControlReason(action: OperatorTaskControlAction): string {
+  return action === "pause"
+    ? "operator-paused"
+    : action === "resume"
+      ? "operator-resumed"
+      : action === "cancel"
+        ? "operator-canceled"
+        : "operator-retry-requested";
+}
+
+function isTerminalTaskStatus(status: string): boolean {
+  return status === "completed" || status === "handoff" || status === "canceled" || status === "failed";
+}
+
+function isHumanOrApprovalWaitingStatus(status: string): boolean {
+  return status === "waiting_human" || status === "waiting_review" || status === "waiting_merge_approval" || status === "merge_waiting";
+}
+
+function assertNeverTaskControl(value: never): never {
+  throw new OperatorSurfaceError(`未知 task control action：${String(value)}`);
 }
 
 function normalizeAutonomy(value: string | undefined): string {

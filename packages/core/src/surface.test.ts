@@ -119,6 +119,30 @@ describe("Coordinator Surface", () => {
     expect(surface.json.available_tools.map((tool) => tool.name)).not.toContain("record_human_answer");
   });
 
+  it("paused 和 canceled task 的 surface 只保留 inspect 语义，不暴露执行工具", () => {
+    const paused = buildCoordinatorSurface(
+      baseSnapshot({
+        surfaceKind: "resume",
+        task: { ...baseSnapshot().task, status: "paused" },
+        workflowRuns: [{ id: "run-paused", status: "running", profileId: "feature" }]
+      })
+    );
+    const canceled = buildCoordinatorSurface(
+      baseSnapshot({
+        surfaceKind: "completed",
+        task: { ...baseSnapshot().task, status: "canceled" },
+        workflowRuns: [{ id: "run-canceled", status: "completed", profileId: "feature" }]
+      })
+    );
+
+    expect(paused.json.available_tools.map((tool) => tool.name)).toEqual(["inspect_workflow_run"]);
+    expect(paused.json.denied_actions).toContain("任务已被 operator pause；不要继续执行副作用操作，等待 operator resume。");
+    expect(paused.json.recommended_next_step).toContain("operator resume");
+    expect(canceled.json.available_tools.map((tool) => tool.name)).toEqual(["inspect_workflow_run"]);
+    expect(canceled.json.denied_actions).toContain("任务已被 operator cancel；不要继续推进 task、workspace、workflow 或 PR/MR。");
+    expect(canceled.json.recommended_next_step).toContain("已取消");
+  });
+
   it("PR/MR open surface 暴露 review/update 相关工具", () => {
     const surface = buildCoordinatorSurface(
       baseSnapshot({

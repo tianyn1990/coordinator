@@ -619,6 +619,10 @@ export function renderSurfaceMarkdown(
 }
 
 function deriveVisibleTools(snapshot: SurfaceSnapshot): SurfaceToolJson[] {
+  if (isPausedOrCanceledTask(snapshot.task.status)) {
+    return snapshot.workflowRuns.length > 0 ? [inspectTool("inspect_workflow_run", "查看当前 workflow run 状态，但不要继续执行副作用操作。")] : [];
+  }
+
   const humanPending = snapshot.surfaceKind === "human_waiting" || snapshot.humanRequests.some((request) => request.status === "pending");
   if (humanPending) {
     return snapshot.workflowRuns.length > 0
@@ -748,6 +752,12 @@ function deriveDeniedActions(snapshot: SurfaceSnapshot): string[] {
   if (snapshot.surfaceKind === "human_waiting" || snapshot.humanRequests.some((request) => request.status === "pending")) {
     denied.push("不要在 human request 等待中继续执行副作用操作。");
   }
+  if (snapshot.task.status === "paused") {
+    denied.push("任务已被 operator pause；不要继续执行副作用操作，等待 operator resume。");
+  }
+  if (snapshot.task.status === "canceled") {
+    denied.push("任务已被 operator cancel；不要继续推进 task、workspace、workflow 或 PR/MR。");
+  }
   if (!snapshot.pullRequest || snapshot.pullRequest.status !== "open") {
     denied.push("不要在没有有效 PR/MR 时执行 merge。");
   }
@@ -755,6 +765,12 @@ function deriveDeniedActions(snapshot: SurfaceSnapshot): string[] {
 }
 
 function deriveRecommendedNextStep(snapshot: SurfaceSnapshot): string {
+  if (snapshot.task.status === "paused") {
+    return "任务已暂停；等待 operator resume 后再由 daemon 基于最新 surface 继续。";
+  }
+  if (snapshot.task.status === "canceled") {
+    return "任务已取消；不要继续推进，保留现有 workspace、PR/MR 和 artifact 供 operator 排查。";
+  }
   if (snapshot.surfaceKind === "human_waiting" || snapshot.humanRequests.some((request) => request.status === "pending")) {
     return "等待 human request 被回答后再继续。";
   }
@@ -774,6 +790,12 @@ function deriveRecommendedNextStep(snapshot: SurfaceSnapshot): string {
 }
 
 function deriveRecovery(snapshot: SurfaceSnapshot): string {
+  if (snapshot.task.status === "paused") {
+    return "operator resume 后会进入 resuming，并由 daemon 重新生成 surface；暂停期间不要自动推进。";
+  }
+  if (snapshot.task.status === "canceled") {
+    return "cancel 只停止 coordinator 自动推进；外部资源清理需要后续独立 operator action。";
+  }
   if (snapshot.surfaceKind === "human_waiting" || snapshot.humanRequests.some((request) => request.status === "pending")) {
     return "如果需要新的信息，先等待 human answer；不要在等待中继续执行副作用操作。";
   }
@@ -813,7 +835,9 @@ function renderAutonomyGuidance(level: AutonomyGuidanceSnapshot["level"]): strin
 function deriveSurfaceKind(task: TaskRecord): SurfaceKind {
   if (task.status === "created") return "bootstrap";
   if (task.status === "planning") return "planning";
+  if (task.status === "paused") return "resume";
   if (task.status === "completed") return "completed";
+  if (task.status === "canceled") return "completed";
   if (task.status === "failed") return "failure";
   if (task.status === "waiting_human") return "human_waiting";
   if (task.status === "human_answered") return "human_answered";
@@ -821,6 +845,10 @@ function deriveSurfaceKind(task: TaskRecord): SurfaceKind {
   if (task.status === "merge_waiting") return "merge_waiting";
   if (task.status === "resuming") return "resume";
   return "execution";
+}
+
+function isPausedOrCanceledTask(status: string): boolean {
+  return status === "paused" || status === "canceled";
 }
 
 function normalizeAutonomy(value: string): AutonomyGuidanceSnapshot["level"] {

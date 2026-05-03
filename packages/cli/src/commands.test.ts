@@ -301,6 +301,38 @@ describe("runCli", () => {
     });
   });
 
+  it("task control 命令可通过 Core runtime 暂停 task", () => {
+    const databasePath = join(mkdtempSync(join(tmpdir(), "coordinator-cli-task-control-")), "task-control.sqlite");
+    runMigrations(databasePath);
+    withDatabase(databasePath, (context) => {
+      const project = createProject(context, { id: "project-cli-task-control", name: "control" });
+      createTask(context, { id: "task-cli-task-control", projectId: project.id, title: "control" });
+    });
+
+    const result = runCli([
+      "task",
+      "control",
+      "--db",
+      databasePath,
+      "--task",
+      "task-cli-task-control",
+      "--action",
+      "pause",
+      "--expected-version",
+      "0",
+      "--actor",
+      "cli-test"
+    ]);
+
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      action: "pause",
+      previousStatus: "created",
+      nextStatus: "paused",
+      task: { status: "paused" }
+    });
+  });
+
   it("pr create 命令要求 title 和 body artifact 参数", () => {
     const databasePath = join(mkdtempSync(join(tmpdir(), "coordinator-cli-pr-")), "pr.sqlite");
     runMigrations(databasePath);

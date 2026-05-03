@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createHumanRequest, createProject, createTask, runMigrations, withDatabase } from "@coordinator/db";
+import { createHumanRequest, createProject, createTask, listTaskEvents, runMigrations, withDatabase } from "@coordinator/db";
 import { buildServer } from "./server.js";
 
 describe("API health", () => {
@@ -198,6 +198,47 @@ describe("API health", () => {
           )
         )
       ).toBe(true);
+    } finally {
+      if (previous === undefined) {
+        delete process.env.COORDINATOR_DB_PATH;
+      } else {
+        process.env.COORDINATOR_DB_PATH = previous;
+      }
+    }
+  });
+
+  it("Web API 可通过 Core runtime 执行 operator task control", async () => {
+    const databasePath = join(mkdtempSync(join(tmpdir(), "coordinator-api-task-control-")), "api.sqlite");
+    runMigrations(databasePath);
+    withDatabase(databasePath, (context) => {
+      const project = createProject(context, { id: "project-api-control", name: "control" });
+      createTask(context, { id: "task-api-control", projectId: project.id, title: "control" });
+    });
+
+    const previous = process.env.COORDINATOR_DB_PATH;
+    process.env.COORDINATOR_DB_PATH = databasePath;
+    try {
+      const server = buildServer();
+      const response = await server.inject({
+        method: "POST",
+        url: "/tasks/task-api-control/control",
+        payload: {
+          action: "pause",
+          expectedStateVersion: 0,
+          reason: "api pause",
+          actor: "api-test"
+        }
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({
+        action: "pause",
+        previousStatus: "created",
+        nextStatus: "paused",
+        task: { status: "paused" }
+      });
+      const events = withDatabase(databasePath, (context) => listTaskEvents(context, "task-api-control"));
+      expect(events.map((event) => event.type)).toContain("operator.task_paused");
     } finally {
       if (previous === undefined) {
         delete process.env.COORDINATOR_DB_PATH;

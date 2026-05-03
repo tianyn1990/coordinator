@@ -176,6 +176,18 @@ textarea {
   gap: 8px;
 }
 
+.control-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.danger-button {
+  border-color: #8e3f32;
+  background: #7d352a;
+}
+
 .flash {
   border-radius: 6px;
   margin: 0 0 14px;

@@ -17,6 +17,7 @@ import {
 import {
   OperatorSurfaceError,
   buildTaskSurfaceFromDb,
+  controlTaskRuntime,
   createManualTask,
   getOperatorTaskDetail,
   listOperatorTasks,
@@ -104,6 +105,107 @@ describe("operator surface", () => {
     });
     expect(detail.surface.json.task.id).toBe("task-detail");
     expect(detail.surface.json.available_tools.map((tool) => tool.name)).not.toContain("record_human_answer");
+  });
+
+  it("controlTaskRuntime 通过 Core gate 暂停、恢复、retry 和取消 task，并写入 operator event", () => {
+    const databasePath = createMigratedDatabase();
+
+    const result = withDatabase(databasePath, (context) => {
+      const project = createProject(context, { id: "project-control", name: "control" });
+      const task = createTask(context, { id: "task-control", projectId: project.id, title: "control" });
+      const paused = controlTaskRuntime(context, {
+        taskId: task.id,
+        expectedStateVersion: task.stateVersion,
+        action: "pause",
+        reason: "operator pause",
+        actor: "operator"
+      });
+      const resumed = controlTaskRuntime(context, {
+        taskId: task.id,
+        expectedStateVersion: paused.task.stateVersion,
+        action: "resume",
+        actor: "operator",
+        now: new Date("2026-05-04T00:00:00.000Z")
+      });
+      const retried = controlTaskRuntime(context, {
+        taskId: task.id,
+        expectedStateVersion: resumed.task.stateVersion,
+        action: "retry",
+        actor: "operator",
+        now: new Date("2026-05-04T00:01:00.000Z"),
+        retryDelayMs: 5_000
+      });
+      const canceled = controlTaskRuntime(context, {
+        taskId: task.id,
+        expectedStateVersion: retried.task.stateVersion,
+        action: "cancel",
+        reason: "stop automation",
+        actor: "operator"
+      });
+      return { paused, resumed, retried, canceled, events: listTaskEvents(context, task.id) };
+    });
+
+    expect(result.paused).toMatchObject({ previousStatus: "created", nextStatus: "paused" });
+    expect(result.resumed).toMatchObject({ previousStatus: "paused", nextStatus: "resuming", dueAt: "2026-05-04T00:00:00.000Z" });
+    expect(result.retried).toMatchObject({ nextStatus: "resuming", dueAt: "2026-05-04T00:01:05.000Z" });
+    expect(result.canceled.task.status).toBe("canceled");
+    expect(result.events.map((event) => event.type)).toEqual(
+      expect.arrayContaining([
+        "operator.task_paused",
+        "operator.task_resumed",
+        "operator.task_retry_requested",
+        "operator.task_canceled"
+      ])
+    );
+    expect(result.events.find((event) => event.type === "operator.task_canceled")?.payload).toMatchObject({
+      action: "cancel",
+      actor: "operator",
+      previousStatus: "resuming",
+      nextStatus: "canceled",
+      expectedStateVersion: 3
+    });
+  });
+
+  it("controlTaskRuntime 拒绝过期 version、terminal task 和等待人工 gate 的 retry", () => {
+    const databasePath = createMigratedDatabase();
+
+    expect(() =>
+      withDatabase(databasePath, (context) => {
+        const project = createProject(context, { id: "project-control-stale", name: "control stale" });
+        const task = createTask(context, { id: "task-control-stale", projectId: project.id, title: "control stale" });
+        controlTaskRuntime(context, {
+          taskId: task.id,
+          expectedStateVersion: task.stateVersion + 1,
+          action: "pause"
+        });
+      })
+    ).toThrow(ActiveResourceConflictError);
+
+    expect(() =>
+      withDatabase(databasePath, (context) => {
+        const project = createProject(context, { id: "project-control-terminal", name: "control terminal" });
+        const task = createTask(context, { id: "task-control-terminal", projectId: project.id, title: "control terminal" });
+        context.db.prepare("UPDATE tasks SET status = ?, state_version = state_version + 1 WHERE id = ?").run("completed", task.id);
+        controlTaskRuntime(context, {
+          taskId: task.id,
+          expectedStateVersion: task.stateVersion + 1,
+          action: "retry"
+        });
+      })
+    ).toThrow(ActiveResourceConflictError);
+
+    expect(() =>
+      withDatabase(databasePath, (context) => {
+        const project = createProject(context, { id: "project-control-gate", name: "control gate" });
+        const task = createTask(context, { id: "task-control-gate", projectId: project.id, title: "control gate" });
+        context.db.prepare("UPDATE tasks SET status = ?, state_version = state_version + 1 WHERE id = ?").run("waiting_human", task.id);
+        controlTaskRuntime(context, {
+          taskId: task.id,
+          expectedStateVersion: task.stateVersion + 1,
+          action: "retry"
+        });
+      })
+    ).toThrow(ActiveResourceConflictError);
   });
 
   it("recordHumanAnswerRuntime 写 artifact、更新 request 为 answered，并只唤醒 task", () => {

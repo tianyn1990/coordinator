@@ -156,11 +156,11 @@ P2 只预留接口和规划，不进入 V1 完成标准：
 
 ### 当前进度
 
-- 当前阶段：`Iteration 11: Web UI / Human Review 操作面` 已完成。
-- 当前 OpenSpec change：`add-web-human-review-surface` 已完成实现、验证和独立 review；归档后位置为 `openspec/changes/archive/2026-05-04-add-web-human-review-surface`。
-- 当前正式规格：归档前已同步到 `openspec/specs/web-human-review-surface/spec.md`、`openspec/specs/core-data-model/spec.md`、`openspec/specs/project-skeleton/spec.md`、`openspec/specs/pr-mr-provider/spec.md`。
-- 下一阶段：`Iteration 12: P1 / P2 Hardening`。
-- 下一阶段重点：在 P0 Web/operator 闭环基础上做 hardening，优先检查 P1/P2 边界、第二套 provider/platform 补齐策略、daemon/reconciliation 恢复矩阵、UI/observability 缺口和长期接口污染风险。
+- 当前阶段：`Iteration 12: P1 / P2 Hardening` 已完成第一个切片 `operator task controls hardening`。
+- 当前 OpenSpec change：`harden-operator-task-controls` 已完成实现、验证和独立 review；归档后位置为 `openspec/changes/archive/2026-05-04-harden-operator-task-controls`。
+- 当前正式规格：归档前已同步到 `openspec/specs/operator-task-controls/spec.md`、`openspec/specs/web-human-review-surface/spec.md`、`openspec/specs/daemon-runtime/spec.md`、`openspec/specs/core-data-model/spec.md`。
+- 下一阶段：继续 `Iteration 12: P1 / P2 Hardening`。
+- 下一阶段重点：继续在 P0 Web/operator 闭环基础上做 hardening，优先补第二套真实 provider/platform、daemon/reconciliation 恢复矩阵、UI/observability 缺口、lock/lease/fencing 风险和长期接口污染风险。
 
 ### 重点关注事项
 
@@ -234,6 +234,14 @@ P2 只预留接口和规划，不进入 V1 完成标准：
 - Web 默认 API base 为 `VITE_COORDINATOR_API_BASE ?? "http://127.0.0.1:4310"`，保持本机开发优先，同时为后续部署配置留出口。
 - 第十一轮独立 `gpt-5.5 high` subagent review 已完成。首次 review 指出 tool trace 展示不足、human answer artifact 先写文件后事务失败可能留下 stale artifact；两项均已修复并复验，最终 review 确认无必须修复项。
 - 本轮验证通过：`openspec validate --all --strict`、`pnpm typecheck`、`pnpm test`、`pnpm build`；review 修复后也通过 targeted tests、typecheck、build 和 OpenSpec strict validation。
+- 已实现 operator-only task controls：Core 新增统一 task control runtime，支持 pause/resume/cancel/retry，所有入口必须携带 expected task state version，并由 Core 校验 terminal state、human/review/merge gate、状态合法性和 event 写入。
+- Task control 仍保持 operator surface 边界：API `POST /tasks/:taskId/control`、CLI `task control`、Web task detail 按钮都只调用 Core runtime；`pause_task`、`resume_task`、`cancel_task`、`retry_task` 不进入 Coordinator Surface `available_tools`。
+- cancel 语义已明确为停止 coordinator 自动推进，不默认删除 workspace、关闭 PR/MR 或清理 artifact；这些外部副作用保留给后续独立 operator cleanup 能力。
+- resume/retry 已接入 daemon 恢复路径：二者写带 dueAt 的 operator event，daemon 只有在 dueAt 到期后才会基于最新 surface 继续推进；resume 使用 dueAt=now，以复用 retry_due gate 而不新增状态字段。
+- daemon 已补强 paused/canceled 守卫：candidate advance、stale session retry、answered human request wake-up 都不会在 paused/canceled task 上启动 Coordinator Agent 或执行 agent tools。
+- Coordinator Surface 已补强 paused/canceled 语义：paused 映射到现有 resume surface、canceled 映射到 completed terminal surface；二者只保留 inspect 或空工具，并在 recommended next step、recovery 和 denied actions 中明确不得继续执行副作用操作。
+- 第十二轮第一个切片经过独立 `gpt-5.5 high` subagent review。首次 review 指出 paused/canceled surface 仍可能暴露执行工具；已修复并补回归测试，复审确认无 must-fix。
+- 本切片验证通过：`openspec validate --all --strict`、`pnpm typecheck`、`pnpm test`、`pnpm build`；review 修复后也通过 focused tests 和最终全量验证。
 
 ## 6. 实现顺序
 
@@ -544,6 +552,7 @@ P2 只预留接口和规划，不进入 V1 完成标准：
 - human request answer 通过 operator-only API 记录到 artifact，并用 CAS 防止过期回答覆盖。
 - merge approval/reject/merge 通过 Web 调用 Core PR/MR Provider Runtime，仍由 Core 校验 snapshot 和 merge policy。
 - pause/resume/cancel/retry 尚未在 Web 中完成完整按钮闭环；进入 Iteration 12 hardening 时继续按 operator-only/Core gate 原则补齐或明确推迟。
+- pause/resume/cancel/retry 已在 Iteration 12 第一个 hardening 切片中补齐 operator-only Core/API/CLI/Web 闭环。
 
 ### Iteration 12: P1 / P2 Hardening
 

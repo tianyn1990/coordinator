@@ -3,12 +3,14 @@ import {
   AgentProviderRuntimeError,
   CoordinatorAgentToolError,
   DaemonRuntimeError,
+  OperatorSurfaceError,
   ProjectRegistryInputError,
   PullRequestProviderError,
   WorkspaceManagerError,
   WorkflowProtocolError,
   approveMergeRuntime,
   buildTaskSurfaceFromDb,
+  controlTaskRuntime,
   createAttemptWorkspace,
   createPullRequestRuntime,
   executeCoordinatorAgentTool,
@@ -114,6 +116,69 @@ export function runCli(args: string[]): CliResult {
       exitCode: 0,
       stdout: format === "markdown" ? surface.markdown : `${JSON.stringify(surface.json)}\n`,
       stderr: ""
+    };
+  }
+
+  if (command === "task") {
+    const [subcommand, ...taskArgs] = rest;
+    if (subcommand === "control") {
+      const databasePathResult = readRequiredOption(taskArgs, "--db");
+      const taskIdResult = readRequiredOption(taskArgs, "--task");
+      const actionResult = readRequiredOption(taskArgs, "--action");
+      const expectedVersionResult = readRequiredOption(taskArgs, "--expected-version");
+      const reasonResult = readOption(taskArgs, "--reason");
+      const actorResult = readOption(taskArgs, "--actor");
+      const retryDelayResult = readOption(taskArgs, "--retry-delay-ms");
+      const error =
+        databasePathResult.error ??
+        taskIdResult.error ??
+        actionResult.error ??
+        expectedVersionResult.error ??
+        reasonResult.error ??
+        actorResult.error ??
+        retryDelayResult.error;
+      if (error) {
+        return { exitCode: 1, stdout: "", stderr: `${error}\n` };
+      }
+      const databasePath = databasePathResult.value;
+      const taskId = taskIdResult.value;
+      const action = actionResult.value;
+      const expectedStateVersion = Number(expectedVersionResult.value);
+      let retryDelayMs: number | undefined;
+      if (retryDelayResult.value !== undefined) {
+        const parsed = Number(retryDelayResult.value);
+        if (!Number.isInteger(parsed) || parsed < 0) {
+          return { exitCode: 1, stdout: "", stderr: "task control 参数不完整\n" };
+        }
+        retryDelayMs = parsed;
+      }
+      if (!databasePath || !taskId || !action || !Number.isInteger(expectedStateVersion) || expectedStateVersion < 0) {
+        return { exitCode: 1, stdout: "", stderr: "task control 参数不完整\n" };
+      }
+      try {
+        const result = withDatabase(databasePath, (context) =>
+          controlTaskRuntime(context, {
+            taskId,
+            action: action as "pause" | "resume" | "cancel" | "retry",
+            expectedStateVersion,
+            reason: reasonResult.value,
+            actor: actorResult.value ?? "cli",
+            retryDelayMs
+          })
+        );
+        return { exitCode: 0, stdout: `${JSON.stringify(result)}\n`, stderr: "" };
+      } catch (error) {
+        if (error instanceof ActiveResourceConflictError || error instanceof OperatorSurfaceError) {
+          return { exitCode: 1, stdout: "", stderr: `${error.message}\n` };
+        }
+        throw error;
+      }
+    }
+
+    return {
+      exitCode: 1,
+      stdout: "",
+      stderr: "未知 task 子命令，可用：task control\n"
     };
   }
 
@@ -655,7 +720,7 @@ export function runCli(args: string[]): CliResult {
   return {
     exitCode: 1,
       stdout: "",
-      stderr: `未知命令：${command}\n可用命令：health, migrate --db <path>, timeline --db <path> --task <task-id>, surface --db <path> --task <task-id>, register --db <path> --repo <path>, projects --db <path>, workspace create, workspace preflight, workflow <subcommand>, agent <subcommand>, agent-tool <subcommand>, daemon <subcommand>, pr <subcommand>\n`
+      stderr: `未知命令：${command}\n可用命令：health, migrate --db <path>, timeline --db <path> --task <task-id>, surface --db <path> --task <task-id>, task control, register --db <path> --repo <path>, projects --db <path>, workspace create, workspace preflight, workflow <subcommand>, agent <subcommand>, agent-tool <subcommand>, daemon <subcommand>, pr <subcommand>\n`
   };
 }
 
