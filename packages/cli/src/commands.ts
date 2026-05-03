@@ -1,5 +1,13 @@
-import { listTaskEvents, runMigrations, withDatabase } from "@coordinator/db";
-import { ProjectRegistryInputError, buildTaskSurfaceFromDb, registerProject, viewProjectRegistry } from "@coordinator/core";
+import { ActiveResourceConflictError, listTaskEvents, runMigrations, withDatabase } from "@coordinator/db";
+import {
+  ProjectRegistryInputError,
+  WorkspaceManagerError,
+  buildTaskSurfaceFromDb,
+  createAttemptWorkspace,
+  registerProject,
+  resumeWorkspacePreflight,
+  viewProjectRegistry
+} from "@coordinator/core";
 import { getHealthStatus } from "@coordinator/shared";
 
 export type CliResult = {
@@ -156,10 +164,62 @@ export function runCli(args: string[]): CliResult {
     };
   }
 
+  if (command === "workspace") {
+    const [subcommand, ...workspaceArgs] = rest;
+    if (subcommand === "create") {
+      const databasePathResult = readRequiredOption(workspaceArgs, "--db");
+      const attemptIdResult = readRequiredOption(workspaceArgs, "--attempt");
+      const ownerResult = readOption(workspaceArgs, "--owner");
+      const error = databasePathResult.error ?? attemptIdResult.error ?? ownerResult.error;
+      if (error) {
+        return { exitCode: 1, stdout: "", stderr: `${error}\n` };
+      }
+      const databasePath = databasePathResult.value;
+      const attemptId = attemptIdResult.value;
+      const owner = ownerResult.value ?? "cli";
+      if (!databasePath || !attemptId) {
+        return { exitCode: 1, stdout: "", stderr: "workspace create 参数不完整\n" };
+      }
+      try {
+        const result = withDatabase(databasePath, (context) =>
+          createAttemptWorkspace(context, { attemptId, owner })
+        );
+        return { exitCode: 0, stdout: `${JSON.stringify(result)}\n`, stderr: "" };
+      } catch (error) {
+        if (error instanceof WorkspaceManagerError || error instanceof ActiveResourceConflictError) {
+          return { exitCode: 1, stdout: "", stderr: `${error.message}\n` };
+        }
+        throw error;
+      }
+    }
+
+    if (subcommand === "preflight") {
+      const databasePathResult = readRequiredOption(workspaceArgs, "--db");
+      const workspaceIdResult = readRequiredOption(workspaceArgs, "--workspace");
+      const error = databasePathResult.error ?? workspaceIdResult.error;
+      if (error) {
+        return { exitCode: 1, stdout: "", stderr: `${error}\n` };
+      }
+      const databasePath = databasePathResult.value;
+      const workspaceId = workspaceIdResult.value;
+      if (!databasePath || !workspaceId) {
+        return { exitCode: 1, stdout: "", stderr: "workspace preflight 参数不完整\n" };
+      }
+      const result = withDatabase(databasePath, (context) => resumeWorkspacePreflight(context, { workspaceId }));
+      return { exitCode: 0, stdout: `${JSON.stringify(result)}\n`, stderr: "" };
+    }
+
+    return {
+      exitCode: 1,
+      stdout: "",
+      stderr: "未知 workspace 子命令，可用：workspace create, workspace preflight\n"
+    };
+  }
+
   return {
     exitCode: 1,
     stdout: "",
-    stderr: `未知命令：${command}\n可用命令：health, migrate --db <path>, timeline --db <path> --task <task-id>, surface --db <path> --task <task-id>, register --db <path> --repo <path>, projects --db <path>\n`
+    stderr: `未知命令：${command}\n可用命令：health, migrate --db <path>, timeline --db <path> --task <task-id>, surface --db <path> --task <task-id>, register --db <path> --repo <path>, projects --db <path>, workspace create, workspace preflight\n`
   };
 }
 

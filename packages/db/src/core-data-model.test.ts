@@ -7,12 +7,19 @@ import {
   ActiveResourceConflictError,
   CasConflictError,
   acquireLock,
+  assertLockHeld,
   createOperation,
+  createArtifact,
+  createAttempt,
   createProject,
   createTask,
+  createWorkspace,
+  getActiveWorkspaceByAttempt,
   listTaskEvents,
   releaseLock,
   runMigrations,
+  updateOperation,
+  updateWorkspace,
   updateTaskStatus,
   withDatabase
 } from "./index.js";
@@ -111,6 +118,41 @@ describe("core data model", () => {
     expect(operations.second.id).toBe(operations.first.id);
   });
 
+  it("operation 可记录运行状态和 observed state", () => {
+    const databasePath = createMigratedDatabase();
+
+    const operation = withDatabase(databasePath, (context) => {
+      const created = createOperation(context, { idempotencyKey: "workspace:create:attempt-op", kind: "workspace:create" });
+      updateOperation(context, {
+        operationId: created.id,
+        status: "running",
+        lastObservedState: { phase: "start" }
+      });
+      return updateOperation(context, {
+        operationId: created.id,
+        status: "succeeded",
+        lastObservedState: { phase: "done" }
+      });
+    });
+
+    expect(operation).toMatchObject({
+      status: "succeeded",
+      lastObservedState: { phase: "done" }
+    });
+  });
+
+  it("operation terminal status 不允许被回退", () => {
+    const databasePath = createMigratedDatabase();
+
+    expect(() =>
+      withDatabase(databasePath, (context) => {
+        const created = createOperation(context, { idempotencyKey: "workspace:create:terminal", kind: "workspace:create" });
+        updateOperation(context, { operationId: created.id, status: "succeeded" });
+        updateOperation(context, { operationId: created.id, status: "running" });
+      })
+    ).toThrow(ActiveResourceConflictError);
+  });
+
   it("active workspace uniqueness 由数据库约束保障", () => {
     const databasePath = createMigratedDatabase();
 
@@ -129,6 +171,96 @@ describe("core data model", () => {
           .run("workspace-2", project.id, task.id, "attempt-active", "creating");
       })
     ).toThrow(/constraint/);
+  });
+
+  it("attempt/workspace repository 可创建并查询 active workspace", () => {
+    const databasePath = createMigratedDatabase();
+
+    const result = withDatabase(databasePath, (context) => {
+      const project = createProject(context, { id: "project-workspace", name: "coordinator" });
+      const task = createTask(context, { id: "task-workspace", projectId: project.id, title: "workspace" });
+      const attempt = createAttempt(context, { id: "attempt-workspace", projectId: project.id, taskId: task.id });
+      const workspace = createWorkspace(context, {
+        id: "workspace-workspace",
+        projectId: project.id,
+        taskId: task.id,
+        attemptId: attempt.id,
+        status: "creating",
+        branch: "coordinator/task-workspace/attempt-workspace",
+        baseBranch: "main"
+      });
+      const ready = updateWorkspace(context, {
+        workspaceId: workspace.id,
+        expectedStateVersion: workspace.stateVersion,
+        status: "ready",
+        workspacePath: "/tmp/workspace",
+        repoPath: "/tmp/workspace/repo",
+        branch: workspace.branch,
+        baseBranch: workspace.baseBranch
+      });
+      return {
+        ready,
+        active: getActiveWorkspaceByAttempt(context, attempt.id),
+        events: listTaskEvents(context, task.id)
+      };
+    });
+
+    expect(result.ready).toMatchObject({
+      id: "workspace-workspace",
+      status: "ready",
+      repoPath: "/tmp/workspace/repo"
+    });
+    expect(result.active?.id).toBe("workspace-workspace");
+    expect(result.events.map((event) => event.type)).toContain("workspace.created");
+  });
+
+  it("workspace update 使用过期 state_version 会触发 CAS conflict", () => {
+    const databasePath = createMigratedDatabase();
+
+    expect(() =>
+      withDatabase(databasePath, (context) => {
+        const { project, task, attemptId } = createAttemptFixture(context, "workspace-cas");
+        const workspace = createWorkspace(context, {
+          projectId: project.id,
+          taskId: task.id,
+          attemptId
+        });
+        updateWorkspace(context, {
+          workspaceId: workspace.id,
+          expectedStateVersion: workspace.stateVersion,
+          status: "creating"
+        });
+        updateWorkspace(context, {
+          workspaceId: workspace.id,
+          expectedStateVersion: workspace.stateVersion,
+          status: "ready"
+        });
+      })
+    ).toThrow(CasConflictError);
+  });
+
+  it("artifact repository 可登记 checkpoint artifact", () => {
+    const databasePath = createMigratedDatabase();
+
+    const artifact = withDatabase(databasePath, (context) => {
+      const { project, task, attemptId } = createAttemptFixture(context, "artifact");
+      return createArtifact(context, {
+        id: "artifact-checkpoint",
+        projectId: project.id,
+        taskId: task.id,
+        attemptId,
+        kind: "checkpoint",
+        owner: "workspace-manager",
+        path: "checkpoint.md"
+      });
+    });
+
+    expect(artifact).toMatchObject({
+      id: "artifact-checkpoint",
+      kind: "checkpoint",
+      owner: "workspace-manager",
+      path: "checkpoint.md"
+    });
   });
 
   it("active workflow run uniqueness 由数据库约束保障", () => {
@@ -279,6 +411,29 @@ describe("core data model", () => {
       });
       expect(expired.owner).toBe("owner-3");
       expect(expired.leaseVersion).toBe(2);
+    });
+  });
+
+  it("assertLockHeld 拒绝过期或错误 token", () => {
+    const databasePath = createMigratedDatabase();
+    const baseTime = new Date("2026-05-03T00:00:00.000Z");
+
+    withDatabase(databasePath, (context) => {
+      const lock = acquireLock(context, {
+        resourceKind: "workspace",
+        resourceId: "workspace-1",
+        owner: "owner-1",
+        ttlMs: 1000,
+        now: baseTime
+      });
+
+      expect(() => assertLockHeld(context, "workspace", "workspace-1", lock.lockToken, baseTime)).not.toThrow();
+      expect(() => assertLockHeld(context, "workspace", "workspace-1", "wrong-token", baseTime)).toThrow(
+        ActiveResourceConflictError
+      );
+      expect(() =>
+        assertLockHeld(context, "workspace", "workspace-1", lock.lockToken, new Date("2026-05-03T00:00:02.000Z"))
+      ).toThrow(ActiveResourceConflictError);
     });
   });
 });

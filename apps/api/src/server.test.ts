@@ -145,4 +145,53 @@ describe("API health", () => {
       }
     }
   });
+
+  it("workspace preflight API 可报告缺失 workspace record", async () => {
+    const databasePath = join(mkdtempSync(join(tmpdir(), "coordinator-api-workspace-")), "api.sqlite");
+    runMigrations(databasePath);
+
+    const previous = process.env.COORDINATOR_DB_PATH;
+    process.env.COORDINATOR_DB_PATH = databasePath;
+    try {
+      const server = buildServer();
+      const response = await server.inject({ method: "GET", url: "/workspaces/missing-workspace/preflight" });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({
+        status: "retryable",
+        checks: [{ name: "workspace-record" }]
+      });
+    } finally {
+      if (previous === undefined) {
+        delete process.env.COORDINATOR_DB_PATH;
+      } else {
+        process.env.COORDINATOR_DB_PATH = previous;
+      }
+    }
+  });
+
+  it("workspace create API 缺少 attempt 时返回受控错误", async () => {
+    const databasePath = join(mkdtempSync(join(tmpdir(), "coordinator-api-workspace-")), "api.sqlite");
+    runMigrations(databasePath);
+
+    const previous = process.env.COORDINATOR_DB_PATH;
+    process.env.COORDINATOR_DB_PATH = databasePath;
+    try {
+      const server = buildServer();
+      const response = await server.inject({
+        method: "POST",
+        url: "/attempts/missing-attempt/workspace",
+        payload: { owner: "api-test" }
+      });
+
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toMatchObject({ error: "attempt not found: missing-attempt" });
+    } finally {
+      if (previous === undefined) {
+        delete process.env.COORDINATOR_DB_PATH;
+      } else {
+        process.env.COORDINATOR_DB_PATH = previous;
+      }
+    }
+  });
 });

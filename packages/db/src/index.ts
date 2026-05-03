@@ -74,14 +74,94 @@ export type TaskRecord = {
   stateVersion: number;
 };
 
+export type CreateAttemptInput = {
+  id?: string;
+  projectId: string;
+  taskId: string;
+  reason?: string;
+};
+
+export type AttemptRecord = {
+  id: string;
+  projectId: string;
+  taskId: string;
+  status: string;
+  reason: string;
+  stateVersion: number;
+};
+
+export type CreateWorkspaceInput = {
+  id?: string;
+  projectId: string;
+  taskId: string;
+  attemptId: string;
+  status?: string;
+  workspacePath?: string;
+  repoPath?: string;
+  branch?: string;
+  baseBranch?: string;
+};
+
+export type WorkspaceRecord = {
+  id: string;
+  projectId: string;
+  taskId: string;
+  attemptId: string;
+  status: string;
+  workspacePath?: string;
+  repoPath?: string;
+  branch?: string;
+  baseBranch?: string;
+  stateVersion: number;
+};
+
+export type UpdateWorkspaceInput = {
+  workspaceId: string;
+  expectedStateVersion: number;
+  status: string;
+  workspacePath?: string;
+  repoPath?: string;
+  branch?: string;
+  baseBranch?: string;
+  lock?: {
+    resourceKind: string;
+    resourceId: string;
+    lockToken: string;
+    now?: Date;
+  };
+};
+
+export type CreateArtifactInput = {
+  id?: string;
+  projectId?: string;
+  taskId?: string;
+  attemptId?: string;
+  kind: string;
+  owner: string;
+  path: string;
+  eventId?: number;
+};
+
+export type ArtifactRecord = {
+  id: string;
+  projectId?: string;
+  taskId?: string;
+  attemptId?: string;
+  kind: string;
+  owner: string;
+  path: string;
+};
+
 export type AppendEventInput = {
   type: string;
   summary: string;
   projectId?: string;
   taskId?: string;
   attemptId?: string;
+  workspaceId?: string;
   operationId?: string;
   transitionId?: string;
+  lockToken?: string;
   payload?: unknown;
   artifactRefs?: string[];
   severity?: "debug" | "info" | "warn" | "error";
@@ -116,6 +196,16 @@ export type OperationRecord = {
   kind: string;
   status: string;
   prId?: string;
+  lastObservedState?: unknown;
+};
+
+export type UpdateOperationInput = {
+  operationId: string;
+  status: "planned" | "running" | "succeeded" | "failed" | "unknown" | "reconciled" | "canceled";
+  externalId?: string;
+  failureCode?: string;
+  lastObservedState?: unknown;
+  now?: Date;
 };
 
 export type AcquireLockInput = {
@@ -257,6 +347,89 @@ export function getTask(context: DbContext, id: string): TaskRecord | undefined 
   return row ? mapTaskRow(row) : undefined;
 }
 
+export function createAttempt(context: DbContext, input: CreateAttemptInput): AttemptRecord {
+  return withTransaction(context, () => insertAttempt(context, input));
+}
+
+export function getAttempt(context: DbContext, id: string): AttemptRecord | undefined {
+  const row = context.db.prepare("SELECT * FROM attempts WHERE id = ?").get(id);
+  return row ? mapAttemptRow(row) : undefined;
+}
+
+export function createWorkspace(context: DbContext, input: CreateWorkspaceInput): WorkspaceRecord {
+  return withTransaction(context, () => insertWorkspace(context, input));
+}
+
+export function getWorkspace(context: DbContext, id: string): WorkspaceRecord | undefined {
+  const row = context.db.prepare("SELECT * FROM workspaces WHERE id = ?").get(id);
+  return row ? mapWorkspaceRow(row) : undefined;
+}
+
+export function getActiveWorkspaceByAttempt(context: DbContext, attemptId: string): WorkspaceRecord | undefined {
+  const row = context.db
+    .prepare(
+      `SELECT * FROM workspaces
+       WHERE attempt_id = ? AND status IN ('planned', 'creating', 'ready', 'dirty')
+       ORDER BY created_at ASC, id ASC
+       LIMIT 1`
+    )
+    .get(attemptId);
+  return row ? mapWorkspaceRow(row) : undefined;
+}
+
+export function updateWorkspace(context: DbContext, input: UpdateWorkspaceInput): WorkspaceRecord {
+  return withTransaction(context, () => {
+    if (input.lock) {
+      assertLockHeld(context, input.lock.resourceKind, input.lock.resourceId, input.lock.lockToken, input.lock.now);
+    }
+
+    const result = context.db
+      .prepare(
+        `UPDATE workspaces
+         SET status = ?, workspace_path = ?, repo_path = ?, branch = ?, base_branch = ?,
+             state_version = state_version + 1, updated_at = CURRENT_TIMESTAMP
+         WHERE id = ? AND state_version = ?`
+      )
+      .run(
+        input.status,
+        input.workspacePath ?? null,
+        input.repoPath ?? null,
+        input.branch ?? null,
+        input.baseBranch ?? null,
+        input.workspaceId,
+        input.expectedStateVersion
+      );
+
+    if (result.changes === 0) {
+      throw new CasConflictError(`workspace ${input.workspaceId} state_version mismatch`);
+    }
+
+    return requireWorkspace(context, input.workspaceId);
+  });
+}
+
+export function createArtifact(context: DbContext, input: CreateArtifactInput): ArtifactRecord {
+  return withTransaction(context, () => {
+    const id = input.id ?? randomUUID();
+    context.db
+      .prepare(
+        `INSERT INTO artifacts (id, project_id, task_id, attempt_id, kind, owner, path, event_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        id,
+        input.projectId ?? null,
+        input.taskId ?? null,
+        input.attemptId ?? null,
+        input.kind,
+        input.owner,
+        input.path,
+        input.eventId ?? null
+      );
+    return requireArtifact(context, id);
+  });
+}
+
 export function updateTaskStatus(
   context: DbContext,
   taskId: string,
@@ -292,16 +465,18 @@ export function appendEvent(context: DbContext, input: AppendEventInput): EventR
   const result = context.db
     .prepare(
       `INSERT INTO events (
-        operation_id, transition_id, project_id, task_id, attempt_id, type, summary,
+        operation_id, transition_id, lock_token, project_id, task_id, attempt_id, workspace_id, type, summary,
         payload_json, artifact_refs_json, severity
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       input.operationId ?? null,
       input.transitionId ?? null,
+      input.lockToken ?? null,
       input.projectId ?? null,
       input.taskId ?? null,
       input.attemptId ?? null,
+      input.workspaceId ?? null,
       input.type,
       input.summary,
       input.payload === undefined ? null : JSON.stringify(input.payload),
@@ -365,6 +540,49 @@ export function createOperation(context: DbContext, input: CreateOperationInput)
   });
 }
 
+export function getOperationByIdempotencyKey(context: DbContext, idempotencyKey: string): OperationRecord | undefined {
+  return findOperationByIdempotencyKey(context, idempotencyKey);
+}
+
+export function updateOperation(context: DbContext, input: UpdateOperationInput): OperationRecord {
+  return withTransaction(context, () => {
+    const now = input.now ?? new Date();
+    const existing = requireOperationById(context, input.operationId);
+    if (isTerminalOperationStatus(existing.status) && existing.status !== input.status) {
+      throw new ActiveResourceConflictError(`operation is terminal: ${input.operationId}:${existing.status}`);
+    }
+    const result = context.db
+      .prepare(
+        `UPDATE operations
+         SET status = ?,
+             external_id = COALESCE(?, external_id),
+             failure_code = ?,
+             last_observed_state = ?,
+             started_at = CASE WHEN ? = 'running' AND started_at IS NULL THEN ? ELSE started_at END,
+             completed_at = CASE WHEN ? IN ('succeeded', 'failed', 'unknown', 'reconciled', 'canceled') THEN ? ELSE completed_at END,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE id = ?`
+      )
+      .run(
+        input.status,
+        input.externalId ?? null,
+        input.failureCode ?? null,
+        input.lastObservedState === undefined ? null : JSON.stringify(input.lastObservedState),
+        input.status,
+        now.toISOString(),
+        input.status,
+        now.toISOString(),
+        input.operationId
+      );
+
+    if (result.changes === 0) {
+      throw new Error(`operation not found: ${input.operationId}`);
+    }
+
+    return requireOperationById(context, input.operationId);
+  });
+}
+
 export function acquireLock(context: DbContext, input: AcquireLockInput): LockRecord {
   return withTransaction(context, () => {
     const now = input.now ?? new Date();
@@ -405,6 +623,19 @@ export function releaseLock(context: DbContext, resourceKind: string, resourceId
       .run(resourceKind, resourceId, lockToken);
     return result.changes === 1;
   });
+}
+
+export function assertLockHeld(
+  context: DbContext,
+  resourceKind: string,
+  resourceId: string,
+  lockToken: string,
+  now = new Date()
+): void {
+  const lock = findLock(context, resourceKind, resourceId);
+  if (!lock || lock.lockToken !== lockToken || Date.parse(lock.expiresAt) <= now.getTime()) {
+    throw new ActiveResourceConflictError(`lock token mismatch: ${resourceKind}:${resourceId}`);
+  }
 }
 
 function ensureMigrationTable(db: DatabaseSync): void {
@@ -479,6 +710,60 @@ function insertTask(context: DbContext, input: CreateTaskInput): TaskRecord {
   return requireTask(context, id);
 }
 
+function insertAttempt(context: DbContext, input: CreateAttemptInput): AttemptRecord {
+  const id = input.id ?? randomUUID();
+  context.db
+    .prepare(
+      `INSERT INTO attempts (id, project_id, task_id, reason)
+       VALUES (?, ?, ?, ?)`
+    )
+    .run(id, input.projectId, input.taskId, input.reason ?? "initial");
+
+  appendEvent(context, {
+    type: "attempt.created",
+    summary: `attempt created: ${id}`,
+    projectId: input.projectId,
+    taskId: input.taskId,
+    attemptId: id
+  });
+
+  return requireAttempt(context, id);
+}
+
+function insertWorkspace(context: DbContext, input: CreateWorkspaceInput): WorkspaceRecord {
+  const id = input.id ?? randomUUID();
+  context.db
+    .prepare(
+      `INSERT INTO workspaces (
+         id, project_id, task_id, attempt_id, status, workspace_path, repo_path, branch, base_branch
+       )
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      id,
+      input.projectId,
+      input.taskId,
+      input.attemptId,
+      input.status ?? "planned",
+      input.workspacePath ?? null,
+      input.repoPath ?? null,
+      input.branch ?? null,
+      input.baseBranch ?? null
+    );
+
+  appendEvent(context, {
+    type: "workspace.created",
+    summary: `workspace record created: ${id}`,
+    projectId: input.projectId,
+    taskId: input.taskId,
+    attemptId: input.attemptId,
+    workspaceId: id,
+    payload: { status: input.status ?? "planned" }
+  });
+
+  return requireWorkspace(context, id);
+}
+
 function requireProject(context: DbContext, id: string): ProjectRecord {
   const row = context.db.prepare("SELECT * FROM projects WHERE id = ?").get(id);
   if (!row) {
@@ -495,6 +780,30 @@ function requireTask(context: DbContext, id: string): TaskRecord {
   return mapTaskRow(row);
 }
 
+function requireAttempt(context: DbContext, id: string): AttemptRecord {
+  const row = context.db.prepare("SELECT * FROM attempts WHERE id = ?").get(id);
+  if (!row) {
+    throw new Error(`attempt not found: ${id}`);
+  }
+  return mapAttemptRow(row);
+}
+
+function requireWorkspace(context: DbContext, id: string): WorkspaceRecord {
+  const row = context.db.prepare("SELECT * FROM workspaces WHERE id = ?").get(id);
+  if (!row) {
+    throw new Error(`workspace not found: ${id}`);
+  }
+  return mapWorkspaceRow(row);
+}
+
+function requireArtifact(context: DbContext, id: string): ArtifactRecord {
+  const row = context.db.prepare("SELECT * FROM artifacts WHERE id = ?").get(id);
+  if (!row) {
+    throw new Error(`artifact not found: ${id}`);
+  }
+  return mapArtifactRow(row);
+}
+
 function requireEvent(context: DbContext, id: number): EventRecord {
   const row = context.db.prepare("SELECT * FROM events WHERE id = ?").get(id);
   if (!row) {
@@ -505,7 +814,7 @@ function requireEvent(context: DbContext, id: number): EventRecord {
 
 function requireOperationByIdempotencyKey(context: DbContext, idempotencyKey: string): OperationRecord {
   const row = context.db
-    .prepare("SELECT id, idempotency_key, kind, status FROM operations WHERE idempotency_key = ?")
+    .prepare("SELECT id, idempotency_key, kind, status, pr_id, last_observed_state FROM operations WHERE idempotency_key = ?")
     .get(idempotencyKey);
   if (!row) {
     throw new Error(`operation not found: ${idempotencyKey}`);
@@ -515,14 +824,14 @@ function requireOperationByIdempotencyKey(context: DbContext, idempotencyKey: st
 
 function findOperationByIdempotencyKey(context: DbContext, idempotencyKey: string): OperationRecord | undefined {
   const row = context.db
-    .prepare("SELECT id, idempotency_key, kind, status, pr_id FROM operations WHERE idempotency_key = ?")
+    .prepare("SELECT id, idempotency_key, kind, status, pr_id, last_observed_state FROM operations WHERE idempotency_key = ?")
     .get(idempotencyKey);
   return row ? mapOperationRow(row) : undefined;
 }
 
 function requireOperationById(context: DbContext, id: string): OperationRecord {
   const row = context.db
-    .prepare("SELECT id, idempotency_key, kind, status, pr_id FROM operations WHERE id = ?")
+    .prepare("SELECT id, idempotency_key, kind, status, pr_id, last_observed_state FROM operations WHERE id = ?")
     .get(id);
   if (!row) {
     throw new Error(`operation not found: ${id}`);
@@ -605,6 +914,73 @@ function mapTaskRow(row: unknown): TaskRecord {
   };
 }
 
+function mapAttemptRow(row: unknown): AttemptRecord {
+  const value = row as {
+    id: string;
+    project_id: string;
+    task_id: string;
+    status: string;
+    reason: string;
+    state_version: number;
+  };
+  return {
+    id: value.id,
+    projectId: value.project_id,
+    taskId: value.task_id,
+    status: value.status,
+    reason: value.reason,
+    stateVersion: value.state_version
+  };
+}
+
+function mapWorkspaceRow(row: unknown): WorkspaceRecord {
+  const value = row as {
+    id: string;
+    project_id: string;
+    task_id: string;
+    attempt_id: string;
+    status: string;
+    workspace_path: string | null;
+    repo_path: string | null;
+    branch: string | null;
+    base_branch: string | null;
+    state_version: number;
+  };
+  return {
+    id: value.id,
+    projectId: value.project_id,
+    taskId: value.task_id,
+    attemptId: value.attempt_id,
+    status: value.status,
+    workspacePath: value.workspace_path ?? undefined,
+    repoPath: value.repo_path ?? undefined,
+    branch: value.branch ?? undefined,
+    baseBranch: value.base_branch ?? undefined,
+    stateVersion: value.state_version
+  };
+}
+
+function mapArtifactRow(row: unknown): ArtifactRecord {
+  const value = row as {
+    id: string;
+    project_id: string | null;
+    task_id: string | null;
+    attempt_id: string | null;
+    kind: string;
+    owner: string;
+    path: string;
+  };
+  return {
+    id: value.id,
+    projectId: value.project_id ?? undefined,
+    taskId: value.task_id ?? undefined,
+    attemptId: value.attempt_id ?? undefined,
+    kind: value.kind,
+    owner: value.owner,
+    path: value.path
+  };
+}
+
 function mapEventRow(row: unknown): EventRecord {
   const value = row as {
     id: number;
@@ -631,13 +1007,21 @@ function mapEventRow(row: unknown): EventRecord {
 }
 
 function mapOperationRow(row: unknown): OperationRecord {
-  const value = row as { id: string; idempotency_key: string; kind: string; status: string; pr_id?: string | null };
+  const value = row as {
+    id: string;
+    idempotency_key: string;
+    kind: string;
+    status: string;
+    pr_id?: string | null;
+    last_observed_state?: string | null;
+  };
   return {
     id: value.id,
     idempotencyKey: value.idempotency_key,
     kind: value.kind,
     status: value.status,
-    prId: value.pr_id ?? undefined
+    prId: value.pr_id ?? undefined,
+    lastObservedState: value.last_observed_state ? JSON.parse(value.last_observed_state) : undefined
   };
 }
 
@@ -664,4 +1048,8 @@ function mapLockRow(row: unknown): LockRecord {
 
 function isSqliteConstraint(error: unknown): boolean {
   return error instanceof Error && error.message.includes("constraint");
+}
+
+function isTerminalOperationStatus(status: string): boolean {
+  return status === "succeeded" || status === "reconciled" || status === "canceled";
 }

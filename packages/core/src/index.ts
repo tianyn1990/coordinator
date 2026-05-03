@@ -3,6 +3,23 @@ import { basename, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { createProject, getProject, listProjects, type DbContext, type ProjectRecord } from "@coordinator/db";
 export { buildCoordinatorSurface, buildTaskSurfaceFromDb, renderSurfaceMarkdown } from "./surface.js";
+export {
+  WorkspaceManagerError,
+  WorkspacePathError,
+  assertArtifactRelativePath,
+  buildWorkspaceBranch,
+  createAttemptWorkspace,
+  removeWorkspaceForTest,
+  resumeWorkspacePreflight
+} from "./workspace-manager.js";
+export type {
+  CreateAttemptWorkspaceInput,
+  PreflightStatus,
+  ResumeWorkspacePreflightInput,
+  ResumeWorkspacePreflightResult,
+  WorkspaceGitRunner,
+  WorkspaceManagerResult
+} from "./workspace-manager.js";
 export type {
   AgentSessionSnapshot,
   AutonomyGuidanceSnapshot,

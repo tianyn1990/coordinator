@@ -156,4 +156,27 @@ describe("runCli", () => {
     expect(result.stdout).toContain("# Coordinator Surface");
     expect(result.stdout).toContain("当前自主级别：conservative。");
   });
+
+  it("workspace create 要求 attempt 参数", () => {
+    const databasePath = join(mkdtempSync(join(tmpdir(), "coordinator-cli-workspace-")), "workspace.sqlite");
+    runMigrations(databasePath);
+
+    const result = runCli(["workspace", "create", "--db", databasePath]);
+
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("缺少 --attempt 参数");
+  });
+
+  it("workspace preflight 可报告缺失 workspace record", () => {
+    const databasePath = join(mkdtempSync(join(tmpdir(), "coordinator-cli-workspace-")), "workspace.sqlite");
+    runMigrations(databasePath);
+
+    const result = runCli(["workspace", "preflight", "--db", databasePath, "--workspace", "missing-workspace"]);
+
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      status: "retryable",
+      checks: [{ name: "workspace-record" }]
+    });
+  });
 });

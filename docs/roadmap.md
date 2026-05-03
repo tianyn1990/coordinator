@@ -156,11 +156,11 @@ P2 只预留接口和规划，不进入 V1 完成标准：
 
 ### 当前进度
 
-- 当前阶段：`Iteration 4: Coordinator Surface` 已完成。
-- 当前 OpenSpec change：`add-coordinator-surface` 已归档为 `openspec/changes/archive/2026-05-03-add-coordinator-surface`。
-- 当前正式规格：`openspec/specs/coordinator-surface/spec.md`。
-- 下一阶段：`Iteration 5: Workspace Manager`。
-- 下一阶段重点：实现 LocalWorker、git worktree workspace、branch 创建、workspace lock、path realpath containment、checkpoint artifact 和 resume preflight。
+- 当前阶段：`Iteration 5: Workspace Manager` 已完成。
+- 当前 OpenSpec change：`add-workspace-manager` 已归档为 `openspec/changes/archive/2026-05-03-add-workspace-manager`。
+- 当前正式规格：`openspec/specs/workspace-manager/spec.md`。
+- 下一阶段：`Iteration 6: Workflow Protocol Adapter`。
+- 下一阶段重点：实现 workflow protocol capabilities/status/start/action/artifacts/events 的外层 adapter；如果 `workflow` 暂未提供完整 protocol，则用 compatibility adapter 包装现有 CLI，并明确标记为临时。
 
 ### 重点关注事项
 
@@ -175,8 +175,14 @@ P2 只预留接口和规划，不进入 V1 完成标准：
 - Merge approval 可见性已改为显式 `mergeApproval` snapshot 校验，只有匹配当前 PR/MR 且 head/base/validation/merge strategy 有效时才暴露 `merge_after_approval`。
 - Tool 参数已对齐 `agent-tools.md` 的窄参数契约，复杂内容仍通过 artifact path 引用，不使用复杂 JSON 作为主交互方式。
 - SQLite 当前使用 Node 内置 `node:sqlite`，并通过 `engines.node >=22.22.2` 明确运行时约束；测试仍会出现 Node 的 ExperimentalWarning。后续如部署环境或稳定性要求变化，应在独立 change 中评估替换 driver。
+- 已实现 Workspace Manager：支持最小 `LocalWorker`、确定性 branch、project default branch 作为 base、git worktree 创建、workspace/attempt/project-branch lock、operation 状态推进、ownership manifest、checkpoint artifact 和 resume preflight。
+- Workspace Manager 遵守本轮边界：不实现 daemon、workflow adapter、AgentProvider、PR/MR provider，不读写 `.workflow` private state；CLI/API workspace create/preflight 只是 operator 调试入口，不进入 Coordinator Surface。
+- Workspace 创建已经覆盖 operation-first 与 fencing：创建 `workspace:create:<attempt-id>` operation，获取必要 lock 后推进 running；ready 状态、artifact record、`workspace.ready` event、operation succeeded 在同一 transaction 内提交；lock conflict 不污染共享 operation。
+- Resume preflight 是只读检查：path containment 逐项 fail-fast，path 失败后不执行 git、不读取 manifest/checkpoint、不创建缺失目录；对 workspace/repo/coordinator/artifact/manifest/checkpoint 做 realpath containment。
+- 已补充 Workspace Manager 高风险测试：deterministic branch、缺失 default branch、branch exists、active/ready 复用、creating workspace 收敛、operation terminal 防回退、workspace lock conflict、symlink escape、dirty/branch mismatch、missing workspace path fail-fast。
+- 第五轮独立 `gpt-5.5 high` subagent review 已确认无必须修复项。后续可加强但不阻塞本轮：更严格确认 git worktree 属于 project repo；如果未来 `assertArtifactRelativePath` 接收用户输入，应改为原始 path segment 级拒绝 `..`，不要依赖 normalize 后判断。
 - 本轮验证通过：`openspec validate --all --strict`、`pnpm typecheck`、`pnpm test`、`pnpm build`。
-- 本轮已经过独立 `gpt-5.5 high` subagent review；review 明确检查了是否符合 `docs/` 总体设计心智、是否过度设计、是否污染分层边界、是否存在协议漂移和过度暴露复杂 JSON。review 提出的 merge approval visibility、PR/MR open tool visibility、tool args contract drift 已修复并复验。
+- 本轮已经过独立 `gpt-5.5 high` subagent review；review 明确检查了是否符合 `docs/` 总体设计心智、是否持续对齐必要设计文档、是否过度设计、是否污染分层边界、是否存在协议漂移和过度暴露复杂 JSON。多轮 review 提出的 ready 持久化顺序、operation replay、lock/fencing、deterministic sanitize、LocalWorker、preflight fail-fast、symlink escape 等问题均已修复并复验。
 
 ## 6. 实现顺序
 
