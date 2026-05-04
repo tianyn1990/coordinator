@@ -160,7 +160,110 @@ P2 只预留接口和规划，不进入 V1 完成标准：
 - 当前 OpenSpec change：`harden-operator-task-controls` 已完成实现、验证和独立 review；归档后位置为 `openspec/changes/archive/2026-05-04-harden-operator-task-controls`。
 - 当前正式规格：归档前已同步到 `openspec/specs/operator-task-controls/spec.md`、`openspec/specs/web-human-review-surface/spec.md`、`openspec/specs/daemon-runtime/spec.md`、`openspec/specs/core-data-model/spec.md`。
 - 下一阶段：继续 `Iteration 12: P1 / P2 Hardening`。
-- 下一阶段重点：继续在 P0 Web/operator 闭环基础上做 hardening，优先补第二套真实 provider/platform、daemon/reconciliation 恢复矩阵、UI/observability 缺口、lock/lease/fencing 风险和长期接口污染风险。
+- 下一阶段重点：继续在 P0 Web/operator 闭环基础上做 hardening。优先顺序调整为先补 daemon/Core recovery 底座，再补 workspace/lock/fencing，再补 PR/MR/provider-specific reconciliation，最后补第二套真实 provider/platform；避免在恢复语义尚未稳定前放大多 provider / 多平台副作用风险。
+
+### Iteration 12 后续切片顺序
+
+Iteration 12 后续按以下切片推进。每个切片都必须继续执行第 4 节固定动作：开始前重读根目录 `AGENTS.md`、`docs/AGENTS.md` 与相关专题文档；创建 OpenSpec change；实现和测试；交给独立 `gpt-5.5 high` subagent review；修复并复审到无必须修复项；归档 change；更新进度和已落地事实；提交。
+
+#### Slice 12.2: daemon/Core recovery matrix
+
+建议 OpenSpec change：
+
+```text
+harden-daemon-reconciliation-matrix
+```
+
+目标：
+
+- 将恢复逻辑表达为有限的 `Observation -> Core RecoveryDecision -> Daemon Action`，明确 recovery decision owner 是 `Coordinator Core`，daemon 只是 runtime driver。
+- 补齐 operation replay matrix，重点处理 `running`、`failed`、`unknown` operation 在外部状态 `absent`、`matches intent`、`conflicts with intent`、`unclear` 下的恢复策略。
+- 补强 workflow run reconciliation：只通过 workflow protocol；`runId/profile mismatch` 视为 protocol consistency violation；不得读取 `.workflow` private state；不得用 stage/substate/gate 推导外层完成、PR readiness 或 blocked 语义。
+- 补强 outer agent session stalled/no-progress 恢复：先 inspect，再按 retry budget 和 dueAt 决定是否唤醒；避免同一 `task.stateVersion` 无进展重复启动 provider。
+- 统一 paused / canceled / retry_due gate：paused/canceled 阻止新副作用，但允许 read-only inspect 和事件记录；answered human request 对 paused task 不应被 daemon 消费。
+- 记录 recovery decision event，payload 保持窄字段和 artifact refs，不把 provider raw output、lock token、operation 大对象暴露给 agent-facing surface。
+
+边界：
+
+- 不新增 agent tools。
+- 不引入通用 reconciliation DSL。
+- 不实现 PR/MR merge 全矩阵。
+- 不实现 remote worker offline/fleet 状态机。
+- 不吸收 Multica skills / 能力包；coding 能力继续由 `workflow` 工程承接。
+
+验收建议：
+
+- failure injection / contract tests 覆盖 operation unknown replay、workflow unavailable、workflow runId/profile mismatch、agent stalled、paused/canceled guard、retry budget exhausted、same stateVersion no-progress 防重复唤醒。
+- 测试断言 Coordinator Surface 不新增内部 recovery tool，不暴露 lock token、provider raw response、operation replay 细节或复杂 JSON。
+
+#### Slice 12.3: workspace/lock/fencing reconciliation
+
+目标：
+
+- 补齐 workspace、branch、artifact root、ownership manifest、lock/lease/fencing 的恢复矩阵。
+- 过期 lock 不静默接管；必须先 inspect owner/resource 状态，再由 Core 通过 CAS/lease/fencing 校验决定释放、续租、block 或 operator review。
+- workspace 缺失、branch mismatch、dirty 来源不明、symlink/realpath 风险继续 fail-fast 或进入 operator review。
+
+边界：
+
+- 不让 daemon 直接修改 workspace 语义。
+- 不读取 `workflow` private state。
+- 不把 lock/lease 内部字段暴露给 Coordinator Agent。
+
+验收建议：
+
+- tests 覆盖 expired lock reconcile-before-release、workspace path missing、branch mismatch、dirty unknown、manifest mismatch、stale lock token rejected。
+
+#### Slice 12.4: PR/MR and merge reconciliation
+
+目标：
+
+- 补齐 PR/MR inspect/create/update/merge 的 provider-specific reconciliation。
+- 让 provider adapter 只返回外部事实，Core 决定 approval 是否失效、是否允许 merge、是否进入 human/operator review。
+- 补齐 approval snapshot invalidation、PR already exists reconcile、closed/unmerged、merged reconcile、merge race、merge conflict 的恢复策略。
+
+边界：
+
+- merge 仍必须有显式 human approval。
+- daemon 不判断 review 是否通过，不自行决定业务完成。
+- provider raw output 不直接进入 agent-facing surface。
+
+验收建议：
+
+- tests 覆盖 PR already exists matches intent、external conflicts intent、approval invalidated、merge race、merge conflict、provider timeout/rate-limit/auth_missing 分类。
+
+#### Slice 12.5: second real provider/platform
+
+目标：
+
+- 在 recovery 底座稳定后，补齐 P1 的第二套真实 provider / platform。
+- GitHub/GitLab 和 Codex/Claude Code 的缺口按当前实现状态选择顺序推进。
+- 保持 provider/platform 通过 interface/capability matrix 接入，不让品牌语义进入 Core 状态机或 Coordinator Agent 工具参数。
+
+边界：
+
+- 不为了接入第二 provider/platform 放宽 operation/idempotency、inspect-before-create、merge approval 或 artifact-first 契约。
+- 不将 source-specific 或 provider-specific 状态机污染 Core。
+
+验收建议：
+
+- 新 provider/platform 至少有 contract tests、fake/failure tests 和真实路径最小 smoke 验证。
+
+#### Slice 12.6: observability and operator diagnosis polish
+
+目标：
+
+- 补齐 operator 视角的 recovery 诊断能力：operation ledger 摘要、recovery decision timeline、current blocker、retry budget、provider/protocol inspect 摘要。
+- Web/operator UI 可以展示比 agent surface 更多的机器事实，但这些事实不得自动进入 Coordinator Agent Markdown surface。
+
+边界：
+
+- agent-facing Markdown 只保留摘要、blocker、recommended next step、allowed/denied tools 和必要 artifact refs。
+- 大块诊断信息继续通过 artifact 或 operator-only API 展示。
+
+验收建议：
+
+- UI/API tests 或 contract tests 覆盖 recovery event 展示和 agent surface 不泄漏内部字段。
 
 ### 重点关注事项
 
