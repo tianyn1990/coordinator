@@ -41,6 +41,19 @@ Iteration 9 已落地最小 `runDaemonTick`：
 
 当前 P0 子集仍保持 daemon 不是 agent：daemon 不判断需求、方案、review 结论或 workflow profile 语义，只负责唤醒、reconcile、retry、事件记录和调用已存在 Core service。
 
+### 1.2 当前已落地的 recovery hardening 子集
+
+Iteration 12.2 已补齐 daemon/Core recovery matrix 的第一层实现：
+
+- daemon 只收集 observation，并通过 Core recovery service 获取 `RecoveryDecision`。
+- operation replay 已覆盖 `running`、`failed`、`unknown` operation 的主要恢复分支。
+- active workflow run reconciliation 只通过 workflow protocol `status`，`runId/profile mismatch` 进入 protocol consistency violation，不读取 `.workflow` private state。
+- active outer agent session stalled/no-progress 会先 inspect，再按 retry budget、task gate 和 stateVersion 约束决定是否重试或停止 session。
+- paused/canceled/waiting task 只允许 safe inspect 和 recovery event，不启动 Coordinator Agent 或外部 mutation。
+- recovery decision 以窄 payload 写入 append-only event，供 operator timeline 和审计排查使用。
+
+当前实现仍是 P1 hardening 子集，不代表 workspace/lock/fencing、PR/MR merge、remote worker 的完整恢复矩阵已经完成。
+
 ## 2. Daemon 职责
 
 daemon 负责：

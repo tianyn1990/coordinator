@@ -96,6 +96,19 @@ CAS 失败：
 | unknown | external unclear | inspect again, then handoff or retry |
 | reconciled | external matches DB | no-op |
 
+### 4.2 当前已落地的 Replay 子集
+
+Iteration 12.2 已在 Core recovery service 中落地 daemon operation replay 的有限矩阵：
+
+- daemon 只处理 `daemon:*` operation replay；其他 provider/workflow/PR/MR operation 的更深恢复留给对应后续切片。
+- 候选 operation 在 DB 层先过滤 `daemon:*` 和未持久化 recovery decision，再按时间顺序 `LIMIT`，避免已处理 operation 或其他 kind operation 阻塞未处理 recovery。
+- `matches-intent` 会把 operation 标记为 `reconciled`。
+- `absent` 会按 retry budget 安排 retry；预算不足时进入 operator attention。
+- `conflicts-with-intent` 进入 `unknown` / operator attention，不自动覆盖外部状态。
+- `unknown` operation 会先做 read-only inspect，再根据 observation 决定下一步。
+
+Recovery decision event 与相关 operation 状态变化必须同 transaction 提交；外部 inspect/action 仍不在 SQLite transaction 内执行。
+
 ## 5. Idempotency Key
 
 idempotency key 必须稳定。

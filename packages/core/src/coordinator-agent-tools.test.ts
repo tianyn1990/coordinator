@@ -245,6 +245,68 @@ describe("coordinator agent tools executor", () => {
     expect(JSON.stringify(result.result)).not.toContain("allowedActions");
   });
 
+  it("inspect_workflow_run 失败 tool event 不记录 workflow protocol 原始 mismatch 细节", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createTaskFixture(databasePath);
+    const workspacePath = mkdtempSync(join(tmpdir(), "coordinator-agent-tools-wf-workspace-"));
+    const repoPath = join(workspacePath, "repo");
+    mkdirSync(join(repoPath, ".git"), { recursive: true });
+    const runner: WorkflowProtocolRunner = () =>
+      JSON.stringify({
+        runId: "wrong-inner-run-secret-provider-output-lockToken-completeOperationJson",
+        profile: "bugfix",
+        lifecycle: "active",
+        handoff: { available: false, artifacts: [], deniedActions: [] },
+        summary: "wrong run"
+      });
+
+    withDatabase(databasePath, (context) => {
+      const task = createTask(context, { id: "task-wf-inspect-mismatch", projectId: fixture.projectId, title: "wf mismatch" });
+      createExecutionPlanForTest(context, fixture.projectId, task.id);
+      const attempt = createAttempt(context, { id: "attempt-wf-inspect-mismatch", projectId: fixture.projectId, taskId: task.id });
+      createWorkspace(context, {
+        projectId: fixture.projectId,
+        taskId: task.id,
+        attemptId: attempt.id,
+        status: "ready",
+        workspacePath,
+        repoPath,
+        branch: "coordinator/task-wf-inspect-mismatch/attempt-wf-inspect-mismatch",
+        baseBranch: "main"
+      });
+      context.db
+        .prepare(
+          `INSERT INTO workflow_runs (id, project_id, task_id, attempt_id, profile_id, status, external_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run("workflow-run-inspect-mismatch", fixture.projectId, task.id, attempt.id, "feature", "running", "inner-run-1");
+    });
+
+    expect(() =>
+      withDatabase(databasePath, (context) =>
+        executeCoordinatorAgentTool(context, {
+          taskId: "task-wf-inspect-mismatch",
+          toolName: "inspect_workflow_run",
+          args: { run: "workflow-run-inspect-mismatch" },
+          workflowInspect: { runner }
+        })
+      )
+    ).toThrow(CoordinatorAgentToolError);
+
+    const events = withDatabase(databasePath, (context) => listTaskEvents(context, "task-wf-inspect-mismatch"));
+    const toolEvent = events.find((event) => event.type === "agent_tool_call");
+    expect(toolEvent?.payload).toMatchObject({
+      toolName: "inspect_workflow_run",
+      status: "failed",
+      failureCode: "tool_execution_failed",
+      failureMessage: "tool execution failed: WorkflowProtocolError"
+    });
+    expect(JSON.stringify(toolEvent?.payload)).not.toContain("wrong-inner-run");
+    expect(JSON.stringify(toolEvent?.payload)).not.toContain("secret-provider-output");
+    expect(JSON.stringify(toolEvent?.payload)).not.toContain("lockToken");
+    expect(JSON.stringify(toolEvent?.payload)).not.toContain("completeOperationJson");
+  });
+
   it("create_pr 通过 body artifact 创建 PR/MR，并返回 sanitized result", () => {
     const databasePath = createMigratedDatabase();
     const fixture = createTaskFixture(databasePath);

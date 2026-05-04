@@ -437,7 +437,11 @@ export type OperationRecord = {
   idempotencyKey: string;
   kind: string;
   status: string;
+  projectId?: string;
+  taskId?: string;
+  attemptId?: string;
   prId?: string;
+  externalId?: string;
   lastObservedState?: unknown;
 };
 
@@ -1215,6 +1219,53 @@ export function getOperationByIdempotencyKey(context: DbContext, idempotencyKey:
   return findOperationByIdempotencyKey(context, idempotencyKey);
 }
 
+export function getOperationById(context: DbContext, id: string): OperationRecord | undefined {
+  const row = context.db.prepare("SELECT * FROM operations WHERE id = ?").get(id);
+  return row ? mapOperationRow(row) : undefined;
+}
+
+export function listOperationsByStatus(context: DbContext, statuses: string[], limit = 50): OperationRecord[] {
+  if (statuses.length === 0) {
+    return [];
+  }
+  const placeholders = statuses.map(() => "?").join(", ");
+  return context.db
+    .prepare(
+      `SELECT * FROM operations
+       WHERE status IN (${placeholders})
+       ORDER BY updated_at ASC, created_at ASC, id ASC
+       LIMIT ?`
+    )
+    .all(...statuses, limit)
+    .map(mapOperationRow);
+}
+
+export function listOperationsByStatusAndKindPrefix(
+  context: DbContext,
+  statuses: string[],
+  kindPrefix: string,
+  limit = 50
+): OperationRecord[] {
+  if (statuses.length === 0) {
+    return [];
+  }
+  const placeholders = statuses.map(() => "?").join(", ");
+  return context.db
+    .prepare(
+      `SELECT * FROM operations
+       WHERE status IN (${placeholders}) AND kind LIKE ?
+         AND (
+           last_observed_state IS NULL
+           OR json_extract(last_observed_state, '$.decision') IS NULL
+           OR json_extract(last_observed_state, '$.reasonCode') IS NULL
+         )
+       ORDER BY updated_at ASC, created_at ASC, id ASC
+       LIMIT ?`
+    )
+    .all(...statuses, `${kindPrefix}%`, limit)
+    .map(mapOperationRow);
+}
+
 export function updateOperation(context: DbContext, input: UpdateOperationInput): OperationRecord {
   return withTransaction(context, () => {
     const now = input.now ?? new Date();
@@ -1728,7 +1779,7 @@ function requireEvent(context: DbContext, id: number): EventRecord {
 
 function requireOperationByIdempotencyKey(context: DbContext, idempotencyKey: string): OperationRecord {
   const row = context.db
-    .prepare("SELECT id, idempotency_key, kind, status, pr_id, last_observed_state FROM operations WHERE idempotency_key = ?")
+    .prepare("SELECT * FROM operations WHERE idempotency_key = ?")
     .get(idempotencyKey);
   if (!row) {
     throw new Error(`operation not found: ${idempotencyKey}`);
@@ -1738,14 +1789,14 @@ function requireOperationByIdempotencyKey(context: DbContext, idempotencyKey: st
 
 function findOperationByIdempotencyKey(context: DbContext, idempotencyKey: string): OperationRecord | undefined {
   const row = context.db
-    .prepare("SELECT id, idempotency_key, kind, status, pr_id, last_observed_state FROM operations WHERE idempotency_key = ?")
+    .prepare("SELECT * FROM operations WHERE idempotency_key = ?")
     .get(idempotencyKey);
   return row ? mapOperationRow(row) : undefined;
 }
 
 function requireOperationById(context: DbContext, id: string): OperationRecord {
   const row = context.db
-    .prepare("SELECT id, idempotency_key, kind, status, pr_id, last_observed_state FROM operations WHERE id = ?")
+    .prepare("SELECT * FROM operations WHERE id = ?")
     .get(id);
   if (!row) {
     throw new Error(`operation not found: ${id}`);
@@ -2122,7 +2173,11 @@ function mapOperationRow(row: unknown): OperationRecord {
     idempotency_key: string;
     kind: string;
     status: string;
+    project_id?: string | null;
+    task_id?: string | null;
+    attempt_id?: string | null;
     pr_id?: string | null;
+    external_id?: string | null;
     last_observed_state?: string | null;
   };
   return {
@@ -2130,7 +2185,11 @@ function mapOperationRow(row: unknown): OperationRecord {
     idempotencyKey: value.idempotency_key,
     kind: value.kind,
     status: value.status,
+    projectId: value.project_id ?? undefined,
+    taskId: value.task_id ?? undefined,
+    attemptId: value.attempt_id ?? undefined,
     prId: value.pr_id ?? undefined,
+    externalId: value.external_id ?? undefined,
     lastObservedState: value.last_observed_state ? JSON.parse(value.last_observed_state) : undefined
   };
 }

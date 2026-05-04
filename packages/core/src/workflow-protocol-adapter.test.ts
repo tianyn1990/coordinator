@@ -259,6 +259,63 @@ describe("workflow protocol adapter", () => {
     expect(result.status.debug).toMatchObject({ stage: "review", substate: "complete-looking-debug-only" });
   });
 
+  it("status 返回 runId 不匹配时拒绝持久化，避免通过私有状态猜测恢复", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createAttemptWithReadyWorkspace(databasePath);
+    const protocol = createProtocolRunner();
+    const started = withDatabase(databasePath, (context) =>
+      startWorkflowRun(context, { attemptId: fixture.attemptId, profileId: "feature", runner: protocol.runner })
+    );
+    const mismatchRunner: WorkflowProtocolRunner = (args, options) => {
+      if (args[1] === "status") {
+        return JSON.stringify({
+          runId: "different-inner-run",
+          profile: "feature",
+          lifecycle: "active",
+          handoff: { available: false, artifacts: [], deniedActions: [] },
+          summary: "wrong run"
+        });
+      }
+      return protocol.runner(args, options);
+    };
+
+    expect(() =>
+      withDatabase(databasePath, (context) =>
+        inspectWorkflowRun(context, { workflowRunId: started.workflowRun.id, runner: mismatchRunner })
+      )
+    ).toThrow(WorkflowProtocolError);
+
+    const persisted = withDatabase(databasePath, (context) => getWorkflowRun(context, started.workflowRun.id));
+    expect(persisted).toMatchObject({ status: "running", externalId: "inner-run-1" });
+  });
+
+  it("status 返回 profile 不匹配时拒绝持久化", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createAttemptWithReadyWorkspace(databasePath);
+    const protocol = createProtocolRunner();
+    const started = withDatabase(databasePath, (context) =>
+      startWorkflowRun(context, { attemptId: fixture.attemptId, profileId: "feature", runner: protocol.runner })
+    );
+    const mismatchRunner: WorkflowProtocolRunner = (args, options) => {
+      if (args[1] === "status") {
+        return JSON.stringify({
+          runId: "inner-run-1",
+          profile: "bugfix",
+          lifecycle: "active",
+          handoff: { available: false, artifacts: [], deniedActions: [] },
+          summary: "wrong profile"
+        });
+      }
+      return protocol.runner(args, options);
+    };
+
+    expect(() =>
+      withDatabase(databasePath, (context) =>
+        inspectWorkflowRun(context, { workflowRunId: started.workflowRun.id, runner: mismatchRunner })
+      )
+    ).toThrow(WorkflowProtocolError);
+  });
+
   it("action 返回 pr_ready handoff 时只更新 workflow run handoff，不推进 task", () => {
     const databasePath = createMigratedDatabase();
     const fixture = createAttemptWithReadyWorkspace(databasePath);

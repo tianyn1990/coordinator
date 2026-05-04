@@ -142,14 +142,14 @@ export function executeCoordinatorAgentTool(
     const failure =
       error instanceof CoordinatorAgentToolError
         ? error
-        : new CoordinatorAgentToolError(error instanceof Error ? error.message : String(error), "tool_execution_failed");
+        : new CoordinatorAgentToolError(errorNameSummary(error, "tool execution failed"), "tool_execution_failed");
     appendToolEvent(context, {
       input,
       surface,
       actor,
       status: "failed",
       failureCode: failure.code,
-      failureMessage: failure.message,
+      failureMessage: safeFailureMessage(failure),
       artifactRefs
     });
     throw failure;
@@ -520,6 +520,18 @@ function normalizeShortString(value: string, fieldName: string): string {
     throw new CoordinatorAgentToolError(`${fieldName} 过长`, "invalid_argument");
   }
   return trimmed;
+}
+
+function safeFailureMessage(error: CoordinatorAgentToolError): string {
+  if (error.code !== "tool_execution_failed") {
+    return error.message;
+  }
+  return error.message.startsWith("tool execution failed") ? error.message : "tool execution failed";
+}
+
+function errorNameSummary(error: unknown, fallback: string): string {
+  const name = error instanceof Error && error.name && error.name !== "Error" ? error.name : undefined;
+  return name ? `${fallback}: ${name}` : fallback;
 }
 
 function appendToolEvent(

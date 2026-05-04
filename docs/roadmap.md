@@ -156,11 +156,11 @@ P2 只预留接口和规划，不进入 V1 完成标准：
 
 ### 当前进度
 
-- 当前阶段：`Iteration 12: P1 / P2 Hardening` 已完成第一个切片 `operator task controls hardening`。
-- 当前 OpenSpec change：`harden-operator-task-controls` 已完成实现、验证和独立 review；归档后位置为 `openspec/changes/archive/2026-05-04-harden-operator-task-controls`。
-- 当前正式规格：归档前已同步到 `openspec/specs/operator-task-controls/spec.md`、`openspec/specs/web-human-review-surface/spec.md`、`openspec/specs/daemon-runtime/spec.md`、`openspec/specs/core-data-model/spec.md`。
+- 当前阶段：`Iteration 12: P1 / P2 Hardening` 已完成第二个切片 `daemon/Core recovery matrix`。
+- 当前 OpenSpec change：`harden-daemon-reconciliation-matrix` 已完成实现、验证和独立 review；归档后位置为 `openspec/changes/archive/2026-05-04-harden-daemon-reconciliation-matrix`。
+- 当前正式规格：归档时已同步到 `openspec/specs/daemon-recovery-matrix/spec.md`、`openspec/specs/daemon-runtime/spec.md`、`openspec/specs/core-data-model/spec.md`、`openspec/specs/coordinator-surface/spec.md`。
 - 下一阶段：继续 `Iteration 12: P1 / P2 Hardening`。
-- 下一阶段重点：继续在 P0 Web/operator 闭环基础上做 hardening。优先顺序调整为先补 daemon/Core recovery 底座，再补 workspace/lock/fencing，再补 PR/MR/provider-specific reconciliation，最后补第二套真实 provider/platform；避免在恢复语义尚未稳定前放大多 provider / 多平台副作用风险。
+- 下一阶段重点：进入 `Slice 12.3: workspace/lock/fencing reconciliation`。daemon/Core recovery 底座已具备有限 recovery decision 与 operation replay 能力，后续应继续保持 `Coordinator Core` 作为唯一状态机和恢复策略入口，重点补 workspace、lock、lease、fencing 的恢复矩阵。
 
 ### Iteration 12 后续切片顺序
 
@@ -345,6 +345,16 @@ harden-daemon-reconciliation-matrix
 - Coordinator Surface 已补强 paused/canceled 语义：paused 映射到现有 resume surface、canceled 映射到 completed terminal surface；二者只保留 inspect 或空工具，并在 recommended next step、recovery 和 denied actions 中明确不得继续执行副作用操作。
 - 第十二轮第一个切片经过独立 `gpt-5.5 high` subagent review。首次 review 指出 paused/canceled surface 仍可能暴露执行工具；已修复并补回归测试，复审确认无 must-fix。
 - 本切片验证通过：`openspec validate --all --strict`、`pnpm typecheck`、`pnpm test`、`pnpm build`；review 修复后也通过 focused tests 和最终全量验证。
+- 已实现 daemon/Core recovery matrix：新增 Core-owned `RecoveryDecision`，将 daemon 恢复路径收敛为有限的 `Observation -> Core RecoveryDecision -> Daemon Action`，daemon 继续只做 runtime driver，不判断业务完成、review 结论、workflow profile 或 merge readiness。
+- Operation replay 已覆盖 `running`、`failed`、`unknown` operation 的主要恢复场景：`matches-intent` 标记 reconciled，`absent` 按 retry budget 安排 retry 或 operator attention，`conflicts-with-intent` 进入 operator attention，`unclear` 保持 unknown/operator review。
+- Daemon operation replay 候选查询已在 DB 层按 `kind LIKE 'daemon:%'` 和未持久化 recovery decision 过滤后再 `LIMIT`，避免非 daemon backlog 或已处理 daemon backlog 挤占候选窗口。
+- Workflow reconciliation 已补强 protocol-only 边界：只通过 workflow protocol `status`，`runId/profile mismatch` 进入 protocol consistency violation，不读取 `.workflow` private state，不用 stage/substate/gate 推导 completed 或 pr_ready。
+- Recovery observability 已落地为 `daemon.recovery_decision` event，payload 保持窄字段：resource、operation、decision、reason code、observed summary、next action、retry dueAt、operator attention 和 artifact refs；不写 provider raw output、lock token、完整 operation JSON、完整 workflow status 或完整 recovery matrix。
+- Agent surface/tool 泄漏防护已补强：Coordinator Surface 不新增内部 recovery tools；`inspect_workflow_run` 等 agent tool 失败事件不会把 workflow protocol mismatch 的 expected/actual、raw run id/profile、provider raw output、lock token 或完整 operation 信息写入 agent-facing event payload。
+- Paused/canceled/waiting gate 已纳入 safe inspect 语义：paused/canceled 阻止 agent 启动、agent tools、workflow action、PR/MR mutation 和 merge，但允许 read-only inspect 与 recovery event；answered human request 对 paused task 不被 daemon 消费。
+- 本切片经过多轮独立 `gpt-5.5 high` subagent review。review 发现并已修复：workflow mismatch error 泄漏、agent tool failureMessage 泄漏、workflow reconcile 成功/失败路径事务一致性、同 tick 重复 workflow inspect、operation replay 候选饥饿问题；最终复审确认无 must-fix。
+- 本切片验证通过：targeted tests、`pnpm typecheck`、`openspec validate --all --strict`、`pnpm test`（182 passed）、`pnpm build`。
+- 已知后续收敛项：same task stateVersion no-progress 的判断当前仍在 daemon advance path 中做短路，行为已受控且不扩大 surface；后续可在独立 change 中进一步改为显式 Core recovery observation/decision。
 
 ## 6. 实现顺序
 

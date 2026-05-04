@@ -10,6 +10,7 @@ import {
   getHumanRequest,
   getOperationByIdempotencyKey,
   getTask,
+  listOperationsByStatusAndKindPrefix,
   listHumanRequestsByStatus,
   listTasks,
   listWorkflowRunsByStatus,
@@ -17,8 +18,10 @@ import {
   updateAgentSession,
   updateOperation,
   updateTaskStatus,
+  withTransaction,
   type DbContext,
   type HumanRequestRecord,
+  type OperationRecord,
   type TaskRecord,
   type WorkflowRunRecord
 } from "@coordinator/db";
@@ -41,6 +44,17 @@ import {
   type InspectWorkflowRunInput,
   type WorkflowProtocolRunner
 } from "./workflow-protocol-adapter.js";
+import { inspectAgentSession } from "./agent-provider-runtime.js";
+import {
+  decideAgentSessionRecovery,
+  decideOperationInspectFailure,
+  decideOperationRecovery,
+  decideTaskGateRecovery,
+  decideWorkflowRecovery,
+  persistRecoveryDecision,
+  type ObservedExternalState,
+  type RecoveryDecision
+} from "./recovery-decision.js";
 
 const DEFAULT_DAEMON_CANDIDATE_LIMIT = 10;
 const DEFAULT_RETRY_BUDGET = 3;
@@ -99,12 +113,197 @@ export class DaemonRuntimeError extends Error {
   }
 }
 
+function reconcileActiveOperations(
+  context: DbContext,
+  tickId: string,
+  now: Date,
+  input: DaemonRuntimeInput,
+  touchedWorkflowRunIds: Set<string>
+): DaemonActionResult[] {
+  const operations = listOperationsByStatusAndKindPrefix(context, ["running", "failed", "unknown"], "daemon:", input.candidateLimit ?? 5)
+    .filter((operation) => !hasPersistedRecoveryDecision(operation.lastObservedState));
+  const actions: DaemonActionResult[] = [];
+  for (const operation of operations) {
+    const task = operation.taskId ? getTask(context, operation.taskId) : undefined;
+    const workflowRunId = workflowRunIdFromOperation(operation);
+    if (workflowRunId) {
+      touchedWorkflowRunIds.add(workflowRunId);
+    }
+    if (task && (task.status === "paused" || task.status === "canceled")) {
+      const decision = decideTaskGateRecovery({
+        task,
+        resourceKind: "operation",
+        resourceId: operation.id,
+        operationId: operation.id,
+        attemptId: operation.attemptId,
+        reasonCode: `operation-replay-${task.status}-safe-inspect`,
+        observedSummary: `operation replay skipped while task is ${task.status}`
+      });
+      persistRecoveryDecision(context, decision, {
+        tickId,
+        now,
+        operationStatus: "unknown",
+        severity: "debug"
+      });
+      actions.push({
+        kind: "retry_blocked",
+        taskId: operation.taskId,
+        status: "skipped",
+        summary: decision.observedSummary
+      });
+      continue;
+    }
+    const observation = observeDaemonOperationSafely(context, operation, input.workflowInspectRunner);
+    if ("error" in observation) {
+      const decision = decideOperationInspectFailure({ operation, error: observation.error });
+      persistRecoveryDecision(context, decision, {
+        tickId,
+        now,
+        operationStatus: "unknown",
+        severity: "warn"
+      });
+      actions.push({
+        kind: "reconcile_failed",
+        taskId: operation.taskId,
+        status: "failed",
+        summary: decision.observedSummary
+      });
+      continue;
+    }
+    const observedExternalState = observation.observedExternalState;
+    const decision = decideOperationRecovery({
+      operation,
+      observedExternalState,
+      observedSummary: observation.observedSummary,
+      retryAllowed: operation.kind !== "daemon:workflow:inspect" && task !== undefined && countTaskRetryEvents(context, task.id) < DEFAULT_RETRY_BACKOFF_MS.length
+    });
+    const retryOutcome = decision.kind === "retry" && operation.taskId
+      ? persistOperationRetryDecision(context, operation, decision, now, tickId)
+      : undefined;
+    if (retryOutcome === undefined) {
+      persistRecoveryDecision(context, decision, {
+        tickId,
+        now,
+        operationStatus: operationStatusForDecision(decision),
+        severity: decision.operatorAttentionRequired ? "warn" : "debug"
+      });
+    }
+    actions.push({
+      kind: decision.kind === "reconciled" ? "workflow_inspected" : "retry_blocked",
+      taskId: operation.taskId,
+      status: decision.kind === "operator_attention" || retryOutcome === "exhausted" ? "failed" : "skipped",
+      summary: decision.observedSummary
+    });
+  }
+  return actions;
+}
+
+function workflowRunIdFromOperation(operation: OperationRecord): string | undefined {
+  if (operation.kind !== "daemon:workflow:inspect") {
+    return undefined;
+  }
+  return isRecord(operation.lastObservedState) ? toOptionalString(operation.lastObservedState.workflowRunId) : undefined;
+}
+
+function observeDaemonOperationSafely(
+  context: DbContext,
+  operation: OperationRecord,
+  runner: WorkflowProtocolRunner | undefined
+): { observedExternalState: ObservedExternalState; observedSummary: string } | { error: Error } {
+  try {
+    return observeDaemonOperation(context, operation, runner);
+  } catch (error) {
+    return { error: error instanceof Error ? error : new Error(String(error)) };
+  }
+}
+
+function observeDaemonOperation(
+  context: DbContext,
+  operation: { id: string; kind: string; lastObservedState?: unknown; status: string },
+  runner: WorkflowProtocolRunner | undefined
+): { observedExternalState: ObservedExternalState; observedSummary: string } {
+  if (operation.kind === "daemon:workflow:inspect") {
+    const workflowRunId = isRecord(operation.lastObservedState) ? toOptionalString(operation.lastObservedState.workflowRunId) : undefined;
+    if (workflowRunId) {
+      const inspected = inspectWorkflowRun(context, buildWorkflowInspectInput(workflowRunId, runner));
+      return {
+        observedExternalState: "matches-intent",
+        observedSummary: `workflow run ${workflowRunId} inspected: ${inspected.status.summary ?? inspected.workflowRun.status}`
+      };
+    }
+  }
+  if (operation.kind === "daemon:agent:stale") {
+    const agentSessionId = isRecord(operation.lastObservedState) ? toOptionalString(operation.lastObservedState.agentSessionId) : undefined;
+    if (agentSessionId) {
+      const inspected = inspectAgentSession(context, { agentSessionId });
+      return {
+        observedExternalState: "matches-intent",
+        observedSummary: `agent session ${agentSessionId} inspected: ${inspected.session.status}`
+      };
+    }
+  }
+  const observedExternalState = observedStateFromOperation(operation);
+  return {
+    observedExternalState,
+    observedSummary: summarizeOperationObservation(operation, observedExternalState)
+  };
+}
+
+function observedStateFromOperation(operation: { lastObservedState?: unknown; status: string }): ObservedExternalState {
+  const observed = operation.lastObservedState;
+  if (isRecord(observed) && typeof observed.observedExternalState === "string") {
+    const value = observed.observedExternalState;
+    if (value === "absent" || value === "matches-intent" || value === "conflicts-with-intent" || value === "unclear") {
+      return value;
+    }
+  }
+  if (operation.status === "unknown") {
+    return "unclear";
+  }
+  return "absent";
+}
+
+function summarizeOperationObservation(operation: { id: string; kind: string }, observedExternalState: ObservedExternalState): string {
+  return `operation ${operation.kind}:${operation.id} observed ${observedExternalState}`;
+}
+
+function operationStatusForDecision(decision: RecoveryDecision): "reconciled" | "unknown" | undefined {
+  if (decision.kind === "no_op") {
+    return undefined;
+  }
+  if (decision.kind === "operator_attention" || decision.kind === "unknown") {
+    return "unknown";
+  }
+  // retry 已经转换成新的 task retry schedule；这里封口旧 operation，避免同一 tick 事实被反复重放。
+  return "reconciled";
+}
+
+function persistOperationRetryDecision(
+  context: DbContext,
+  operation: OperationRecord,
+  decision: RecoveryDecision,
+  now: Date,
+  tickId: string
+): "scheduled" | "exhausted" | "already-terminal" {
+  return withTransaction(context, () => {
+    const retryOutcome = scheduleTaskRetry(context, operation.taskId ?? "", now, tickId, `operation-replay:${operation.kind}`);
+    persistRecoveryDecision(context, decision, {
+      tickId,
+      now,
+      operationStatus: retryOutcome === "scheduled" ? "reconciled" : "unknown",
+      severity: retryOutcome === "scheduled" ? "debug" : "warn"
+    });
+    return retryOutcome;
+  });
+}
+
 export function runDaemonTick(context: DbContext, input: DaemonRuntimeInput = {}): DaemonTickResult {
   const tickId = randomUUID();
   const owner = normalizeOwner(input.owner ?? "daemon");
   const now = input.now ?? new Date();
   const actions: DaemonActionResult[] = [];
   const touchedTaskIds = new Set<string>();
+  const touchedWorkflowRunIds = new Set<string>();
 
   appendEvent(context, {
     type: "daemon.tick_started",
@@ -113,8 +312,9 @@ export function runDaemonTick(context: DbContext, input: DaemonRuntimeInput = {}
     severity: "debug"
   });
 
+  actions.push(...reconcileActiveOperations(context, tickId, now, input, touchedWorkflowRunIds));
   actions.push(...watchActiveAgentSessions(context, tickId, owner, now));
-  actions.push(...reconcileWorkflowRuns(context, tickId, owner, input));
+  actions.push(...reconcileWorkflowRuns(context, tickId, owner, input, touchedWorkflowRunIds));
   actions.push(...wakeAnsweredHumanRequests(context, tickId, owner, now, input, touchedTaskIds));
   actions.push(...advanceCandidateTasks(context, tickId, owner, now, input, touchedTaskIds));
 
@@ -186,11 +386,16 @@ function reconcileWorkflowRuns(
   context: DbContext,
   tickId: string,
   owner: string,
-  input: DaemonRuntimeInput
+  input: DaemonRuntimeInput,
+  skippedWorkflowRunIds: Set<string>
 ): DaemonActionResult[] {
   const runs = listWorkflowRunsByStatus(context, ["starting", "running", "blocked", "unknown"], input.candidateLimit ?? 5);
   const actions: DaemonActionResult[] = [];
   for (const run of runs) {
+    if (skippedWorkflowRunIds.has(run.id)) {
+      // operation replay 已在本 tick 触达该 workflow run，避免重复 inspect 和重复事件。
+      continue;
+    }
     actions.push(reconcileWorkflowRun(context, run, tickId, owner, input.workflowInspectRunner));
   }
   return actions;
@@ -236,48 +441,68 @@ function watchActiveAgentSessions(context: DbContext, tickId: string, owner: str
       operationId: operation.id,
       status: "running",
       now,
-      lastObservedState: { tickId, owner, agentSessionId: row.id, ageMs }
+      lastObservedState: { tickId, owner, agentSessionId: row.id, ageMs, observedExternalState: "unclear" }
     });
-    appendEvent(context, {
-      type: "daemon.agent_session_stalled",
-      summary: `agent session stalled: ${row.id}`,
-      projectId: row.project_id,
-      taskId: row.task_id ?? undefined,
-      attemptId: row.attempt_id ?? undefined,
-      agentSessionId: row.id,
+    const inspected = inspectAgentSession(context, { agentSessionId: row.id });
+    const task = row.task_id ? getTask(context, row.task_id) : undefined;
+    const retryAllowed = task ? countTaskRetryEvents(context, task.id) < DEFAULT_RETRY_BACKOFF_MS.length : false;
+    const decision = decideAgentSessionRecovery({
+      session: {
+        id: inspected.session.id,
+        projectId: inspected.session.projectId,
+        taskId: inspected.session.taskId,
+        attemptId: inspected.session.attemptId,
+        providerKind: inspected.session.providerKind,
+        role: inspected.session.role,
+        status: inspected.session.status,
+        stateVersion: inspected.session.stateVersion
+      },
       operationId: operation.id,
-      severity: "warn",
-      payload: { tickId, ageMs, providerKind: row.provider_kind, role: row.role }
+      ageMs,
+      retryAllowed,
+      task
     });
-    if (row.task_id) {
-      const task = getTask(context, row.task_id);
-      if (task && !["paused", "canceled", "waiting_human", "waiting_review", "waiting_merge_approval"].includes(task.status)) {
-        scheduleTaskRetry(context, task.id, now, tickId, "stalled-agent-session");
-      }
-    }
-    // stale session 需要离开 active 集合，否则 retry_due 会被 active outer session 唯一性永久挡住。
-    const latestSession = context.db.prepare("SELECT state_version FROM agent_sessions WHERE id = ?").get(row.id) as
-      | { state_version: number }
-      | undefined;
-    if (latestSession) {
-      updateAgentSession(context, {
-        agentSessionId: row.id,
-        expectedStateVersion: latestSession.state_version,
-        status: "stopped"
+    withTransaction(context, () => {
+      const retryOutcome = task && decision.kind === "retry" && !["waiting_human", "waiting_review", "waiting_merge_approval"].includes(task.status)
+        ? scheduleTaskRetry(context, task.id, now, tickId, "stalled-agent-session")
+        : undefined;
+      persistRecoveryDecision(context, decision, {
+        tickId,
+        now,
+        operationStatus: decision.kind === "operator_attention" || retryOutcome === "exhausted" || retryOutcome === "already-terminal" ? "unknown" : "reconciled",
+        severity: decision.operatorAttentionRequired || retryOutcome === "exhausted" || retryOutcome === "already-terminal" ? "warn" : "debug"
       });
-    }
-    updateOperation(context, {
-      operationId: operation.id,
-      status: "succeeded",
-      now,
-      lastObservedState: { tickId, agentSessionId: row.id, action: "retry-scheduled" }
+      appendEvent(context, {
+        type: "daemon.agent_session_stalled",
+        summary: `agent session stalled: ${row.id}`,
+        projectId: row.project_id,
+        taskId: row.task_id ?? undefined,
+        attemptId: row.attempt_id ?? undefined,
+        agentSessionId: row.id,
+        operationId: operation.id,
+        severity: decision.operatorAttentionRequired ? "warn" : "debug",
+        payload: { tickId, ageMs, providerKind: row.provider_kind, role: row.role, decision: decision.kind, retryOutcome }
+      });
+      if (decision.nextAction === "stop_session") {
+        // 只有 Core recovery decision 明确允许时才把 stale session 移出 active 集合。
+        const latestSession = context.db.prepare("SELECT state_version FROM agent_sessions WHERE id = ?").get(row.id) as
+          | { state_version: number }
+          | undefined;
+        if (latestSession) {
+          updateAgentSession(context, {
+            agentSessionId: row.id,
+            expectedStateVersion: latestSession.state_version,
+            status: "stopped"
+          });
+        }
+      }
     });
     actions.push({
       kind: "reconcile_failed",
       taskId: row.task_id ?? undefined,
       agentSessionId: row.id,
-      status: "failed",
-      summary: `agent session ${row.id} stalled`
+      status: decision.kind === "operator_attention" ? "failed" : "skipped",
+      summary: decision.observedSummary
     });
   }
   return actions;
@@ -305,24 +530,31 @@ function reconcileWorkflowRun(
 
   try {
     const result = inspectWorkflowRun(context, buildWorkflowInspectInput(run.id, runner));
-    updateOperation(context, {
-      operationId: operation.id,
-      status: "succeeded",
-      lastObservedState: {
-        workflowRunId: result.workflowRun.id,
-        status: result.workflowRun.status,
-        handoffKind: result.workflowRun.handoffKind
-      }
-    });
-    appendEvent(context, {
-      type: "daemon.workflow_reconciled",
-      summary: `daemon inspected workflow run: ${run.id}`,
-      projectId: run.projectId,
-      taskId: run.taskId,
-      attemptId: run.attemptId,
-      workflowRunId: run.id,
-      operationId: operation.id,
-      payload: { tickId, status: result.workflowRun.status, handoffKind: result.workflowRun.handoffKind }
+    const decision = decideWorkflowRecovery({ workflowRun: run, operationId: operation.id, status: result.status });
+    withTransaction(context, () => {
+      persistRecoveryDecision(context, decision, {
+        tickId,
+        severity: "debug"
+      });
+      updateOperation(context, {
+        operationId: operation.id,
+        status: "succeeded",
+        lastObservedState: {
+          workflowRunId: result.workflowRun.id,
+          status: result.workflowRun.status,
+          handoffKind: result.workflowRun.handoffKind
+        }
+      });
+      appendEvent(context, {
+        type: "daemon.workflow_reconciled",
+        summary: `daemon inspected workflow run: ${run.id}`,
+        projectId: run.projectId,
+        taskId: run.taskId,
+        attemptId: run.attemptId,
+        workflowRunId: run.id,
+        operationId: operation.id,
+        payload: { tickId, status: result.workflowRun.status, handoffKind: result.workflowRun.handoffKind }
+      });
     });
     return {
       kind: "workflow_inspected",
@@ -332,26 +564,32 @@ function reconcileWorkflowRun(
       summary: `workflow run ${run.id} inspected`
     };
   } catch (error) {
-    updateOperation(context, {
+    const decision = decideWorkflowRecovery({
+      workflowRun: run,
       operationId: operation.id,
-      status: "unknown",
-      failureCode: error instanceof Error ? error.name : "unknown",
-      lastObservedState: { tickId, workflowRunId: run.id, error: error instanceof Error ? error.message : String(error) }
+      error: error instanceof Error ? error : new Error(String(error))
     });
-    appendEvent(context, {
-      type: "daemon.workflow_reconcile_failed",
-      summary: `daemon failed to inspect workflow run: ${run.id}`,
-      projectId: run.projectId,
-      taskId: run.taskId,
-      attemptId: run.attemptId,
-      workflowRunId: run.id,
-      operationId: operation.id,
-      severity: "warn",
-      payload: {
+    withTransaction(context, () => {
+      persistRecoveryDecision(context, decision, {
         tickId,
-        error: error instanceof Error ? error.message : String(error),
-        invariant: "workflow 不可用时不能静默推进 completed"
-      }
+        operationStatus: "unknown",
+        severity: decision.operatorAttentionRequired ? "warn" : "debug"
+      });
+      appendEvent(context, {
+        type: "daemon.workflow_reconcile_failed",
+        summary: `daemon failed to inspect workflow run: ${run.id}`,
+        projectId: run.projectId,
+        taskId: run.taskId,
+        attemptId: run.attemptId,
+        workflowRunId: run.id,
+        operationId: operation.id,
+        severity: "warn",
+        payload: {
+          tickId,
+          error: errorSummaryFrom(error),
+          invariant: "workflow 不可用时不能静默推进 completed"
+        }
+      });
     });
     return {
       kind: "reconcile_failed",
@@ -389,6 +627,14 @@ function wakeAnsweredHumanRequest(
 ): DaemonActionResult[] {
   const currentTask = requireTask(context, request.taskId);
   if (currentTask.status === "paused" || currentTask.status === "canceled") {
+    const decision = decideTaskGateRecovery({
+      task: currentTask,
+      resourceKind: "task_gate",
+      resourceId: request.id,
+      reasonCode: `human-answer-${currentTask.status}-safe-inspect`,
+      observedSummary: `human answer is waiting while task is ${currentTask.status}`
+    });
+    persistRecoveryDecision(context, decision, { tickId, now, severity: "debug" });
     return [
       {
         kind: "retry_blocked",
@@ -451,12 +697,13 @@ function wakeAnsweredHumanRequest(
     const followUp = advanceTaskWithAgent(context, request.taskId, tickId, owner, now, input, "human_answered");
     return followUp ? [action, followUp] : [action];
   } catch (error) {
+    const errorSummary = errorSummaryFrom(error);
     updateOperation(context, {
       operationId: operation.id,
       status: "failed",
       now,
-      failureCode: error instanceof Error ? error.name : "unknown",
-      lastObservedState: { tickId, error: error instanceof Error ? error.message : String(error) }
+      failureCode: errorSummary,
+      lastObservedState: { tickId, error: errorSummary }
     });
     appendEvent(context, {
       type: "daemon.human_wake_up_failed",
@@ -466,7 +713,7 @@ function wakeAnsweredHumanRequest(
       attemptId: request.attemptId,
       operationId: operation.id,
       severity: "warn",
-      payload: { tickId, error: error instanceof Error ? error.message : String(error) }
+      payload: { tickId, error: errorSummary }
     });
     return [{
       kind: "reconcile_failed",
@@ -627,14 +874,15 @@ function advanceTaskWithAgent(
       error instanceof ActiveResourceConflictError ||
       error instanceof DaemonRuntimeError
     ) {
-      const retryOutcome = scheduleTaskRetry(context, task.id, now, tickId, error.message);
+      const errorSummary = errorSummaryFrom(error);
+      const retryOutcome = scheduleTaskRetry(context, task.id, now, tickId, errorSummary);
       appendEvent(context, {
         type: "daemon.advance_failed",
         summary: `daemon failed to advance task: ${task.id}`,
         projectId: task.projectId,
         taskId: task.id,
         severity: "warn",
-        payload: { tickId, error: error.message, errorName: error.name, retryOutcome }
+        payload: { tickId, error: errorSummary, errorName: error.name, retryOutcome }
       });
       if (retryOutcome === "scheduled") {
         return {
@@ -656,11 +904,15 @@ function advanceTaskWithAgent(
         kind: "reconcile_failed",
         taskId: task.id,
         status: "failed",
-        summary: error.message
+        summary: errorSummary
       };
     }
     throw error;
   }
+}
+
+function errorSummaryFrom(error: unknown): string {
+  return error instanceof Error && error.name ? error.name : "unknown";
 }
 
 function ensureRetryBudget(
@@ -935,4 +1187,16 @@ function parseCoordinatorArtifactBlock(block: string): ParsedCoordinatorArtifact
 function isPathInside(root: string, candidate: string): boolean {
   const rel = relative(root, candidate);
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasPersistedRecoveryDecision(value: unknown): boolean {
+  return isRecord(value) && typeof value.decision === "string" && typeof value.reasonCode === "string";
+}
+
+function toOptionalString(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
 }

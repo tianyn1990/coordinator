@@ -485,7 +485,9 @@ function inspectStatusForRun(
     "--run",
     requireExternalRunId(workflowRun)
   ]);
-  return parseWorkflowStatus(raw);
+  const status = parseWorkflowStatus(raw);
+  assertProtocolStatusMatchesRun(workflowRun, status);
+  return status;
 }
 
 function persistWorkflowStatus(
@@ -545,6 +547,15 @@ function persistWorkflowStatus(
     }
     return updated;
   });
+}
+
+function assertProtocolStatusMatchesRun(workflowRun: WorkflowRunRecord, status: WorkflowStatus): void {
+  if (status.runId !== workflowRun.externalId) {
+    throw new WorkflowProtocolError("workflow protocol runId mismatch");
+  }
+  if (status.profile && status.profile !== workflowRun.profileId) {
+    throw new WorkflowProtocolError("workflow protocol profile mismatch");
+  }
 }
 
 function parseWorkflowCapabilities(value: unknown): WorkflowCapabilities {
@@ -715,7 +726,7 @@ function runProtocolJson(
   try {
     return JSON.parse(output);
   } catch (error) {
-    throw new WorkflowProtocolError(`workflow protocol 输出不是合法 JSON：${error instanceof Error ? error.message : String(error)}`);
+    throw new WorkflowProtocolError("workflow protocol 输出不是合法 JSON");
   }
 }
 

@@ -104,6 +104,22 @@ merge event 必须记录 approval snapshot 引用、head/base SHA 和 validation
 
 `events` 应 append-only。
 
+Iteration 12.2 已新增 `daemon.recovery_decision` event，用于记录 Core recovery decision 的窄摘要。该事件服务 operator timeline、debug 和审计，不作为 Coordinator Agent 的完整内部输入。
+
+`daemon.recovery_decision` payload 只能包含：
+
+- resource kind/id。
+- operation id。
+- decision。
+- reason code。
+- observed summary。
+- next action。
+- retry dueAt。
+- operator attention 标记。
+- artifact refs。
+
+它不得包含 provider raw output、secret、lock token、完整 operation JSON、完整 workflow status JSON 或完整 recovery matrix。
+
 建议字段：
 
 ```text

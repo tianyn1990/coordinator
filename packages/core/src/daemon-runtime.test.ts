@@ -8,12 +8,15 @@ import {
   createAttempt,
   createExecutionPlan,
   createHumanRequest,
+  createOperation,
   createProject,
   createTask,
   createWorkspace,
+  getOperationByIdempotencyKey,
   listTaskEvents,
   runMigrations,
   updateHumanRequest,
+  updateOperation,
   withDatabase,
   type DbContext
 } from "@coordinator/db";
@@ -251,6 +254,483 @@ describe("daemon runtime", () => {
     expect(events.filter((event) => event.type === "agent.session_completed")).toHaveLength(1);
   });
 
+  it("daemon operation replay 匹配 intent 时标记 reconciled 并写窄 recovery event", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createTaskFixture(databasePath);
+
+    withDatabase(databasePath, (context) => {
+      const operation = createOperation(context, {
+        idempotencyKey: "daemon:test:replay:matches",
+        kind: "daemon:test",
+        projectId: fixture.projectId,
+        taskId: fixture.taskId
+      });
+      updateOperation(context, {
+        operationId: operation.id,
+        status: "running",
+        lastObservedState: { observedExternalState: "matches-intent", providerRawOutput: "must-not-leak" }
+      });
+    });
+
+    withDatabase(databasePath, (context) => runDaemonTick(context, { provider: new FakeAgentProvider("no-op") }));
+
+    const state = withDatabase(databasePath, (context) => ({
+      operation: getOperationByIdempotencyKey(context, "daemon:test:replay:matches"),
+      events: listTaskEvents(context, fixture.taskId)
+    }));
+    expect(state.operation).toMatchObject({ status: "reconciled" });
+    const recovery = state.events.find((event) => event.type === "daemon.recovery_decision");
+    expect(recovery?.payload).toMatchObject({
+      decision: "reconciled",
+      reasonCode: "operation-matches-intent",
+      resourceKind: "operation"
+    });
+    expect(JSON.stringify(recovery?.payload)).not.toContain("must-not-leak");
+  });
+
+  it("daemon operation replay 冲突时进入 unknown/operator attention，不覆盖外部状态", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createTaskFixture(databasePath);
+
+    withDatabase(databasePath, (context) => {
+      const operation = createOperation(context, {
+        idempotencyKey: "daemon:test:replay:conflict",
+        kind: "daemon:test",
+        projectId: fixture.projectId,
+        taskId: fixture.taskId
+      });
+      updateOperation(context, {
+        operationId: operation.id,
+        status: "running",
+        lastObservedState: { observedExternalState: "conflicts-with-intent" }
+      });
+    });
+
+    withDatabase(databasePath, (context) => runDaemonTick(context, { provider: new FakeAgentProvider("no-op") }));
+
+    const state = withDatabase(databasePath, (context) => ({
+      operation: getOperationByIdempotencyKey(context, "daemon:test:replay:conflict"),
+      events: listTaskEvents(context, fixture.taskId)
+    }));
+    expect(state.operation).toMatchObject({ status: "unknown" });
+    expect(state.events.find((event) => event.type === "daemon.recovery_decision")?.payload).toMatchObject({
+      decision: "operator_attention",
+      reasonCode: "operation-conflicts-with-intent"
+    });
+  });
+
+  it("daemon operation replay absent 会安排 retry 并封口，避免重复 tick 刷 recovery event", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createTaskFixture(databasePath);
+
+    withDatabase(databasePath, (context) => {
+      const operation = createOperation(context, {
+        idempotencyKey: "daemon:test:replay:absent",
+        kind: "daemon:test",
+        projectId: fixture.projectId,
+        taskId: fixture.taskId
+      });
+      updateOperation(context, {
+        operationId: operation.id,
+        status: "running",
+        lastObservedState: { observedExternalState: "absent" }
+      });
+    });
+
+    withDatabase(databasePath, (context) => runDaemonTick(context, { provider: new FakeAgentProvider("no-op") }));
+    withDatabase(databasePath, (context) => runDaemonTick(context, { provider: new FakeAgentProvider("no-op") }));
+
+    const state = withDatabase(databasePath, (context) => ({
+      operation: getOperationByIdempotencyKey(context, "daemon:test:replay:absent"),
+      events: listTaskEvents(context, fixture.taskId)
+    }));
+    expect(state.operation).toMatchObject({ status: "reconciled" });
+    expect(state.events.map((event) => event.type)).toContain("daemon.retry_scheduled");
+    expect(
+      state.events.filter(
+        (event) =>
+          event.type === "daemon.recovery_decision" &&
+          (event.payload as { reasonCode?: string } | undefined)?.reasonCode === "operation-absent-retryable"
+      )
+    ).toHaveLength(1);
+  });
+
+  it("daemon operation replay 不会被非 daemon operation backlog 挤出候选窗口", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createTaskFixture(databasePath);
+
+    withDatabase(databasePath, (context) => {
+      for (let index = 0; index < 3; index += 1) {
+        const operation = createOperation(context, {
+          idempotencyKey: `agent:session:backlog:${index}`,
+          kind: "agent:session",
+          projectId: fixture.projectId,
+          taskId: fixture.taskId
+        });
+        updateOperation(context, {
+          operationId: operation.id,
+          status: "running",
+          lastObservedState: { observedExternalState: "unclear" }
+        });
+      }
+      const daemonOperation = createOperation(context, {
+        idempotencyKey: "daemon:test:replay:not-starved",
+        kind: "daemon:test",
+        projectId: fixture.projectId,
+        taskId: fixture.taskId
+      });
+      updateOperation(context, {
+        operationId: daemonOperation.id,
+        status: "running",
+        lastObservedState: { observedExternalState: "matches-intent" }
+      });
+    });
+
+    withDatabase(databasePath, (context) =>
+      runDaemonTick(context, {
+        provider: new FakeAgentProvider("no-op"),
+        candidateLimit: 1
+      })
+    );
+
+    const state = withDatabase(databasePath, (context) => ({
+      operation: getOperationByIdempotencyKey(context, "daemon:test:replay:not-starved"),
+      events: listTaskEvents(context, fixture.taskId)
+    }));
+    expect(state.operation).toMatchObject({ status: "reconciled" });
+    expect(state.events.find((event) => event.type === "daemon.recovery_decision")?.payload).toMatchObject({
+      reasonCode: "operation-matches-intent",
+      resourceKind: "operation"
+    });
+  });
+
+  it("daemon operation replay 不会被已处理 daemon operation 挤出候选窗口", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createTaskFixture(databasePath);
+
+    withDatabase(databasePath, (context) => {
+      for (let index = 0; index < 3; index += 1) {
+        const operation = createOperation(context, {
+          idempotencyKey: `daemon:test:already-handled:${index}`,
+          kind: "daemon:test",
+          projectId: fixture.projectId,
+          taskId: fixture.taskId
+        });
+        updateOperation(context, {
+          operationId: operation.id,
+          status: "unknown",
+          lastObservedState: {
+            decision: "unknown",
+            reasonCode: "already-handled",
+            observedSummary: "already handled"
+          }
+        });
+      }
+      const daemonOperation = createOperation(context, {
+        idempotencyKey: "daemon:test:replay:not-starved-by-handled",
+        kind: "daemon:test",
+        projectId: fixture.projectId,
+        taskId: fixture.taskId
+      });
+      updateOperation(context, {
+        operationId: daemonOperation.id,
+        status: "running",
+        lastObservedState: { observedExternalState: "matches-intent" }
+      });
+    });
+
+    withDatabase(databasePath, (context) =>
+      runDaemonTick(context, {
+        provider: new FakeAgentProvider("no-op"),
+        candidateLimit: 1
+      })
+    );
+
+    const state = withDatabase(databasePath, (context) => ({
+      operation: getOperationByIdempotencyKey(context, "daemon:test:replay:not-starved-by-handled"),
+      events: listTaskEvents(context, fixture.taskId)
+    }));
+    expect(state.operation).toMatchObject({ status: "reconciled" });
+    expect(
+      state.events.filter(
+        (event) =>
+          event.type === "daemon.recovery_decision" &&
+          (event.payload as { reasonCode?: string } | undefined)?.reasonCode === "operation-matches-intent"
+      )
+    ).toHaveLength(1);
+  });
+
+  it("daemon operation replay 对 paused task 只写 safe inspect，不安排 retry", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createTaskFixture(databasePath);
+
+    withDatabase(databasePath, (context) => {
+      context.db.prepare("UPDATE tasks SET status = ?, state_version = state_version + 1 WHERE id = ?").run("paused", fixture.taskId);
+      const operation = createOperation(context, {
+        idempotencyKey: "daemon:test:replay:paused",
+        kind: "daemon:test",
+        projectId: fixture.projectId,
+        taskId: fixture.taskId
+      });
+      updateOperation(context, {
+        operationId: operation.id,
+        status: "running",
+        lastObservedState: { observedExternalState: "absent" }
+      });
+    });
+
+    withDatabase(databasePath, (context) => runDaemonTick(context, { provider: new FakeAgentProvider("no-op") }));
+
+    const state = withDatabase(databasePath, (context) => ({
+      task: context.db.prepare("SELECT status FROM tasks WHERE id = ?").get(fixture.taskId) as { status: string },
+      operation: getOperationByIdempotencyKey(context, "daemon:test:replay:paused"),
+      events: listTaskEvents(context, fixture.taskId)
+    }));
+    expect(state.task.status).toBe("paused");
+    expect(state.operation).toMatchObject({ status: "unknown" });
+    expect(state.events.map((event) => event.type)).not.toContain("daemon.retry_scheduled");
+    expect(state.events.find((event) => event.type === "daemon.recovery_decision")?.payload).toMatchObject({
+      decision: "safe_inspect_only",
+      reasonCode: "operation-replay-paused-safe-inspect"
+    });
+  });
+
+  it("unknown daemon workflow inspect operation 会先执行 read-only inspect 再 reconcile", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createTaskFixture(databasePath);
+    const workspacePath = mkdtempSync(join(tmpdir(), "coordinator-daemon-workspace-"));
+    const repoPath = join(workspacePath, "repo");
+    mkdirSync(join(repoPath, ".git"), { recursive: true });
+    const calls: string[][] = [];
+    const runner: WorkflowProtocolRunner = (args) => {
+      calls.push(args);
+      return JSON.stringify({
+        runId: "inner-run",
+        profile: "feature",
+        lifecycle: "active",
+        handoff: { available: false, artifacts: [], deniedActions: [] },
+        summary: "read-only inspected"
+      });
+    };
+
+    withDatabase(databasePath, (context) => {
+      createExecutionPlan(context, {
+        projectId: fixture.projectId,
+        taskId: fixture.taskId,
+        status: "active",
+        artifactPath: "execution-plan.md"
+      });
+      const attempt = createAttempt(context, { projectId: fixture.projectId, taskId: fixture.taskId });
+      createWorkspace(context, {
+        projectId: fixture.projectId,
+        taskId: fixture.taskId,
+        attemptId: attempt.id,
+        status: "ready",
+        workspacePath,
+        repoPath,
+        branch: `coordinator/${fixture.taskId}/${attempt.id}`,
+        baseBranch: "main"
+      });
+      context.db
+        .prepare(
+          `INSERT INTO workflow_runs (id, project_id, task_id, attempt_id, profile_id, status, external_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run("workflow-run-unknown-op", fixture.projectId, fixture.taskId, attempt.id, "feature", "running", "inner-run");
+      const operation = createOperation(context, {
+        idempotencyKey: "daemon:workflow:inspect:unknown-replay",
+        kind: "daemon:workflow:inspect",
+        projectId: fixture.projectId,
+        taskId: fixture.taskId,
+        attemptId: attempt.id
+      });
+      updateOperation(context, {
+        operationId: operation.id,
+        status: "unknown",
+        lastObservedState: { workflowRunId: "workflow-run-unknown-op", observedExternalState: "unclear" }
+      });
+    });
+
+    withDatabase(databasePath, (context) => runDaemonTick(context, { workflowInspectRunner: runner }));
+    withDatabase(databasePath, (context) => runDaemonTick(context, { workflowInspectRunner: runner }));
+
+    const state = withDatabase(databasePath, (context) => ({
+      operation: getOperationByIdempotencyKey(context, "daemon:workflow:inspect:unknown-replay"),
+      events: listTaskEvents(context, fixture.taskId)
+    }));
+    expect(calls.map((args) => args.join(" "))).toContain("protocol status --run inner-run");
+    expect(state.operation).toMatchObject({ status: "reconciled" });
+    expect(
+      state.events.filter(
+        (event) =>
+          event.type === "daemon.recovery_decision" &&
+          (event.payload as { reasonCode?: string } | undefined)?.reasonCode === "unknown-operation-external-matches"
+      )
+    ).toHaveLength(1);
+  });
+
+  it("unknown daemon workflow inspect 失败时写 recovery decision 并封口，避免 tick 中断和重复撞错", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createTaskFixture(databasePath);
+    const runner: WorkflowProtocolRunner = () => {
+      throw new Error("workflow inspect still unavailable secret-provider-output lockToken completeOperationJson");
+    };
+
+    withDatabase(databasePath, (context) => {
+      const operation = createOperation(context, {
+        idempotencyKey: "daemon:workflow:inspect:failed-replay",
+        kind: "daemon:workflow:inspect",
+        projectId: fixture.projectId,
+        taskId: fixture.taskId
+      });
+      updateOperation(context, {
+        operationId: operation.id,
+        status: "unknown",
+        lastObservedState: { workflowRunId: "missing-workflow-run", observedExternalState: "unclear" }
+      });
+    });
+
+    const first = withDatabase(databasePath, (context) => runDaemonTick(context, { workflowInspectRunner: runner }));
+    const second = withDatabase(databasePath, (context) => runDaemonTick(context, { workflowInspectRunner: runner }));
+
+    const state = withDatabase(databasePath, (context) => ({
+      operation: getOperationByIdempotencyKey(context, "daemon:workflow:inspect:failed-replay"),
+      events: listTaskEvents(context, fixture.taskId)
+    }));
+    expect(first.status).toBe("failed");
+    expect(second.actions.some((action) => action.summary.includes("workflow inspect still unavailable"))).toBe(false);
+    expect(state.operation).toMatchObject({ status: "unknown" });
+    expect(JSON.stringify(state.events)).not.toContain("secret-provider-output");
+    expect(JSON.stringify(state.events)).not.toContain("lockToken");
+    expect(JSON.stringify(state.events)).not.toContain("completeOperationJson");
+    expect(
+      state.events.filter(
+        (event) =>
+          event.type === "daemon.recovery_decision" &&
+          (event.payload as { reasonCode?: string } | undefined)?.reasonCode === "operation-inspect-failed"
+      )
+    ).toHaveLength(1);
+    expect(state.events.find((event) => event.type === "daemon.recovery_decision")?.payload).toMatchObject({
+      observedSummary: "operation inspect failed: WorkflowProtocolError",
+      artifactRefs: []
+    });
+  });
+
+  it("daemon workflow inspect operation replay 后同一 tick 不再重复 reconcile 同一 workflow run", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createTaskFixture(databasePath);
+    const workspacePath = mkdtempSync(join(tmpdir(), "coordinator-daemon-workspace-"));
+    const repoPath = join(workspacePath, "repo");
+    mkdirSync(join(repoPath, ".git"), { recursive: true });
+    let inspectCount = 0;
+    const runner: WorkflowProtocolRunner = () => {
+      inspectCount += 1;
+      return JSON.stringify({
+        runId: "inner-run",
+        profile: "feature",
+        lifecycle: "active",
+        handoff: { available: false, artifacts: [], deniedActions: [] },
+        summary: "running"
+      });
+    };
+
+    withDatabase(databasePath, (context) => {
+      createExecutionPlan(context, {
+        projectId: fixture.projectId,
+        taskId: fixture.taskId,
+        status: "active",
+        artifactPath: "execution-plan.md"
+      });
+      const attempt = createAttempt(context, { projectId: fixture.projectId, taskId: fixture.taskId });
+      createWorkspace(context, {
+        projectId: fixture.projectId,
+        taskId: fixture.taskId,
+        attemptId: attempt.id,
+        status: "ready",
+        workspacePath,
+        repoPath,
+        branch: `coordinator/${fixture.taskId}/${attempt.id}`,
+        baseBranch: "main"
+      });
+      context.db
+        .prepare(
+          `INSERT INTO workflow_runs (id, project_id, task_id, attempt_id, profile_id, status, external_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run("workflow-run-replay-skip", fixture.projectId, fixture.taskId, attempt.id, "feature", "running", "inner-run");
+      const operation = createOperation(context, {
+        idempotencyKey: "daemon:workflow:inspect:replay-skip",
+        kind: "daemon:workflow:inspect",
+        projectId: fixture.projectId,
+        taskId: fixture.taskId,
+        attemptId: attempt.id
+      });
+      updateOperation(context, {
+        operationId: operation.id,
+        status: "unknown",
+        lastObservedState: { workflowRunId: "workflow-run-replay-skip", observedExternalState: "unclear" }
+      });
+    });
+
+    withDatabase(databasePath, (context) => runDaemonTick(context, { workflowInspectRunner: runner }));
+
+    const state = withDatabase(databasePath, (context) => ({
+      events: listTaskEvents(context, fixture.taskId),
+      operation: getOperationByIdempotencyKey(context, "daemon:workflow:inspect:replay-skip")
+    }));
+    expect(inspectCount).toBe(1);
+    expect(state.operation).toMatchObject({ status: "reconciled" });
+    expect(state.events.filter((event) => event.type === "daemon.workflow_reconciled")).toHaveLength(0);
+    expect(
+      state.events.filter(
+        (event) =>
+          event.type === "daemon.recovery_decision" &&
+          (event.payload as { reasonCode?: string } | undefined)?.reasonCode === "unknown-operation-external-matches"
+      )
+    ).toHaveLength(1);
+  });
+
+  it("daemon operation replay retry budget 耗尽时进入 operator attention，不把 operation 误标 reconciled", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createTaskFixture(databasePath);
+
+    withDatabase(databasePath, (context) => {
+      for (let index = 0; index < 5; index += 1) {
+        appendEvent(context, {
+          type: "daemon.retry_scheduled",
+          summary: `previous retry ${index}`,
+          projectId: fixture.projectId,
+          taskId: fixture.taskId
+        });
+      }
+      const operation = createOperation(context, {
+        idempotencyKey: "daemon:test:replay:retry-exhausted",
+        kind: "daemon:test",
+        projectId: fixture.projectId,
+        taskId: fixture.taskId
+      });
+      updateOperation(context, {
+        operationId: operation.id,
+        status: "running",
+        lastObservedState: { observedExternalState: "absent" }
+      });
+    });
+
+    withDatabase(databasePath, (context) => runDaemonTick(context, { provider: new FakeAgentProvider("no-op") }));
+
+    const state = withDatabase(databasePath, (context) => ({
+      task: context.db.prepare("SELECT status FROM tasks WHERE id = ?").get(fixture.taskId) as { status: string },
+      operation: getOperationByIdempotencyKey(context, "daemon:test:replay:retry-exhausted"),
+      events: listTaskEvents(context, fixture.taskId)
+    }));
+    expect(state.task.status).not.toBe("resuming");
+    expect(state.operation).toMatchObject({ status: "unknown" });
+    expect(state.events.find((event) => event.type === "daemon.recovery_decision")?.payload).toMatchObject({
+      decision: "operator_attention",
+      reasonCode: "operation-absent-retry-exhausted"
+    });
+  });
+
   it("workflow reconcile 只通过 workflow protocol，不因外部不可用而推进 completed", () => {
     const databasePath = createMigratedDatabase();
     const fixture = createTaskFixture(databasePath);
@@ -258,7 +738,7 @@ describe("daemon runtime", () => {
     const repoPath = join(workspacePath, "repo");
     mkdirSync(join(repoPath, ".git"), { recursive: true });
     const runner: WorkflowProtocolRunner = () => {
-      throw new Error("workflow unavailable");
+      throw new Error("workflow unavailable secret-provider-output lockToken completeOperationJson");
     };
 
     withDatabase(databasePath, (context) => {
@@ -297,6 +777,130 @@ describe("daemon runtime", () => {
     );
     const surface = withDatabase(databasePath, (context) => buildTaskSurfaceFromDb(context, fixture.taskId));
     expect(surface.json.workflow_runs[0]).toMatchObject({ id: "workflow-run-daemon", status: "running" });
+    const events = withDatabase(databasePath, (context) => listTaskEvents(context, fixture.taskId));
+    const operation = withDatabase(databasePath, (context) =>
+      context.db.prepare("SELECT last_observed_state FROM operations WHERE kind = ?").get("daemon:workflow:inspect")
+    ) as { last_observed_state: string };
+    const recovery = events.find((event) => event.type === "daemon.recovery_decision");
+    expect(recovery?.payload).toMatchObject({
+      reasonCode: "workflow-protocol-unavailable",
+      decision: "unknown"
+    });
+    expect(events.find((event) => event.type === "daemon.workflow_reconcile_failed")?.payload).toMatchObject({
+      error: "Error"
+    });
+    expect(JSON.stringify(events)).not.toContain("secret-provider-output");
+    expect(JSON.stringify(events)).not.toContain("lockToken");
+    expect(JSON.stringify(events)).not.toContain("completeOperationJson");
+    expect(operation.last_observed_state).not.toContain("secret-provider-output");
+  });
+
+  it("workflow runId mismatch 进入 recovery decision，不推进 completed 或 pr_ready", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createTaskFixture(databasePath);
+    const workspacePath = mkdtempSync(join(tmpdir(), "coordinator-daemon-workspace-"));
+    const repoPath = join(workspacePath, "repo");
+    mkdirSync(join(repoPath, ".git"), { recursive: true });
+    const runner: WorkflowProtocolRunner = () =>
+      JSON.stringify({
+        runId: "wrong-inner-run",
+        profile: "feature",
+        lifecycle: "active",
+        handoff: { available: false, artifacts: [], deniedActions: [] },
+        summary: "wrong run"
+      });
+
+    withDatabase(databasePath, (context) => {
+      createExecutionPlan(context, {
+        projectId: fixture.projectId,
+        taskId: fixture.taskId,
+        status: "active",
+        artifactPath: "execution-plan.md"
+      });
+      const attempt = createAttempt(context, { projectId: fixture.projectId, taskId: fixture.taskId });
+      createWorkspace(context, {
+        projectId: fixture.projectId,
+        taskId: fixture.taskId,
+        attemptId: attempt.id,
+        status: "ready",
+        workspacePath,
+        repoPath,
+        branch: `coordinator/${fixture.taskId}/${attempt.id}`,
+        baseBranch: "main"
+      });
+      context.db
+        .prepare(
+          `INSERT INTO workflow_runs (id, project_id, task_id, attempt_id, profile_id, status, external_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run("workflow-run-mismatch", fixture.projectId, fixture.taskId, attempt.id, "feature", "running", "inner-run");
+    });
+
+    withDatabase(databasePath, (context) => runDaemonTick(context, { workflowInspectRunner: runner }));
+
+    const surface = withDatabase(databasePath, (context) => buildTaskSurfaceFromDb(context, fixture.taskId));
+    expect(surface.json.workflow_runs[0]).toMatchObject({ id: "workflow-run-mismatch", status: "running" });
+    const events = withDatabase(databasePath, (context) => listTaskEvents(context, fixture.taskId));
+    const recovery = events.find((event) => event.type === "daemon.recovery_decision");
+    expect(recovery?.payload).toMatchObject({
+      reasonCode: "workflow-run-id-mismatch",
+      decision: "operator_attention",
+      operatorAttentionRequired: true
+    });
+  });
+
+  it("workflow profile mismatch 进入 recovery decision，不推进 completed 或 pr_ready", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createTaskFixture(databasePath);
+    const workspacePath = mkdtempSync(join(tmpdir(), "coordinator-daemon-workspace-"));
+    const repoPath = join(workspacePath, "repo");
+    mkdirSync(join(repoPath, ".git"), { recursive: true });
+    const runner: WorkflowProtocolRunner = () =>
+      JSON.stringify({
+        runId: "inner-run",
+        profile: "bugfix",
+        lifecycle: "completed",
+        handoff: { available: true, kind: "pr_ready", artifacts: [], deniedActions: [] },
+        summary: "wrong profile"
+      });
+
+    withDatabase(databasePath, (context) => {
+      createExecutionPlan(context, {
+        projectId: fixture.projectId,
+        taskId: fixture.taskId,
+        status: "active",
+        artifactPath: "execution-plan.md"
+      });
+      const attempt = createAttempt(context, { projectId: fixture.projectId, taskId: fixture.taskId });
+      createWorkspace(context, {
+        projectId: fixture.projectId,
+        taskId: fixture.taskId,
+        attemptId: attempt.id,
+        status: "ready",
+        workspacePath,
+        repoPath,
+        branch: `coordinator/${fixture.taskId}/${attempt.id}`,
+        baseBranch: "main"
+      });
+      context.db
+        .prepare(
+          `INSERT INTO workflow_runs (id, project_id, task_id, attempt_id, profile_id, status, external_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run("workflow-run-profile-mismatch", fixture.projectId, fixture.taskId, attempt.id, "feature", "running", "inner-run");
+    });
+
+    withDatabase(databasePath, (context) => runDaemonTick(context, { workflowInspectRunner: runner }));
+
+    const surface = withDatabase(databasePath, (context) => buildTaskSurfaceFromDb(context, fixture.taskId));
+    expect(surface.json.workflow_runs[0]).toMatchObject({ id: "workflow-run-profile-mismatch", status: "running" });
+    const events = withDatabase(databasePath, (context) => listTaskEvents(context, fixture.taskId));
+    const recovery = events.find((event) => event.type === "daemon.recovery_decision");
+    expect(recovery?.payload).toMatchObject({
+      reasonCode: "workflow-profile-mismatch",
+      decision: "operator_attention",
+      operatorAttentionRequired: true
+    });
   });
 
   it("human request answered 后 daemon 标记 consumed 并唤醒 agent", () => {
@@ -436,13 +1040,62 @@ describe("daemon runtime", () => {
       expect.objectContaining({
         kind: "reconcile_failed",
         agentSessionId: "stale-agent-session",
-        status: "failed"
+        status: "skipped"
       })
     );
     const state = withDatabase(databasePath, (context) =>
       context.db.prepare("SELECT status FROM agent_sessions WHERE id = ?").get("stale-agent-session")
     ) as { status: string };
     expect(state.status).toBe("stopped");
+    const events = withDatabase(databasePath, (context) => listTaskEvents(context, fixture.taskId));
+    expect(events.map((event) => event.type)).toContain("agent.session_inspected");
+    expect(events.findIndex((event) => event.type === "agent.session_inspected")).toBeLessThan(
+      events.findIndex((event) => event.type === "daemon.recovery_decision")
+    );
+  });
+
+  it("stale outer session retry 耗尽时仍停止 session 并封口 operation，避免 active session 永久阻塞", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createTaskFixture(databasePath);
+    const now = new Date("2026-05-04T00:00:00.000Z");
+    withDatabase(databasePath, (context) => {
+      for (let index = 0; index < 5; index += 1) {
+        appendEvent(context, {
+          type: "daemon.retry_scheduled",
+          summary: `previous retry ${index}`,
+          projectId: fixture.projectId,
+          taskId: fixture.taskId
+        });
+      }
+      createAgentSession(context, {
+        id: "stale-agent-session-exhausted",
+        projectId: fixture.projectId,
+        taskId: fixture.taskId,
+        providerKind: "fake",
+        role: "outer",
+        status: "running"
+      });
+      context.db
+        .prepare("UPDATE agent_sessions SET updated_at = ? WHERE id = ?")
+        .run("2026-05-03T23:00:00.000Z", "stale-agent-session-exhausted");
+    });
+
+    const first = withDatabase(databasePath, (context) => runDaemonTick(context, { now, provider: new FakeAgentProvider("no-op") }));
+    const second = withDatabase(databasePath, (context) => runDaemonTick(context, { now, provider: new FakeAgentProvider("no-op") }));
+
+    const state = withDatabase(databasePath, (context) => ({
+      session: context.db.prepare("SELECT status FROM agent_sessions WHERE id = ?").get("stale-agent-session-exhausted") as { status: string },
+      operation: getOperationByIdempotencyKey(context, "daemon:agent:stale:stale-agent-session-exhausted"),
+      events: listTaskEvents(context, fixture.taskId)
+    }));
+    expect(first.actions).toContainEqual(expect.objectContaining({ agentSessionId: "stale-agent-session-exhausted", status: "failed" }));
+    expect(second.actions.some((action) => action.agentSessionId === "stale-agent-session-exhausted")).toBe(false);
+    expect(state.session.status).toBe("stopped");
+    expect(state.operation).toMatchObject({ status: "unknown" });
+    expect(state.operation?.lastObservedState).toMatchObject({
+      decision: "operator_attention",
+      reasonCode: "agent-session-retry-exhausted"
+    });
   });
 
   it("retry_due 未到期不启动 provider，到期后可启动 provider", () => {
@@ -518,6 +1171,10 @@ describe("daemon runtime", () => {
     const pausedEvents = withDatabase(databasePath, (context) => listTaskEvents(context, fixture.taskId));
     expect(paused.actions).toContainEqual(expect.objectContaining({ agentSessionId: "paused-stale-agent" }));
     expect(pausedEvents.map((event) => event.type)).not.toContain("daemon.retry_scheduled");
+    expect(pausedEvents.find((event) => event.type === "daemon.recovery_decision")?.payload).toMatchObject({
+      reasonCode: "task-paused-safe-inspect",
+      decision: "safe_inspect_only"
+    });
 
     withDatabase(databasePath, (context) => {
       context.db.prepare("UPDATE tasks SET status = ?, state_version = state_version + 1 WHERE id = ?").run("canceled", fixture.taskId);
@@ -566,5 +1223,33 @@ describe("daemon runtime", () => {
       })
     );
     expect(due.actions).toContainEqual(expect.objectContaining({ kind: "agent_tool_skipped" }));
+  });
+
+  it("Coordinator Surface 不暴露内部 recovery tools 或 raw recovery internals", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createTaskFixture(databasePath);
+    withDatabase(databasePath, (context) => {
+      appendEvent(context, {
+        type: "daemon.recovery_decision",
+        summary: "raw internals must stay out of agent surface",
+        projectId: fixture.projectId,
+        taskId: fixture.taskId,
+        payload: {
+          decision: "operator_attention",
+          providerRawOutput: "secret-provider-output",
+          lockToken: "secret-lock-token",
+          completeOperationJson: { status: "unknown" }
+        }
+      });
+    });
+
+    const surface = withDatabase(databasePath, (context) => buildTaskSurfaceFromDb(context, fixture.taskId));
+
+    expect(surface.json.available_tools.map((tool) => tool.name)).not.toEqual(
+      expect.arrayContaining(["reconcile_resource", "recover_task", "replay_operation", "release_lock"])
+    );
+    expect(surface.markdown).not.toContain("secret-provider-output");
+    expect(surface.markdown).not.toContain("secret-lock-token");
+    expect(JSON.stringify(surface.json)).not.toContain("secret-provider-output");
   });
 });
