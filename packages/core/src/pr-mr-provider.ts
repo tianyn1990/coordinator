@@ -238,7 +238,7 @@ export class CliPullRequestProvider implements PullRequestProvider {
         timeoutMs: DEFAULT_PR_TIMEOUT_MS
       }
     );
-    return parseExistingOutput(stdout, input);
+    return parseExistingOutput(stdout, input, this.kind);
   }
 
   create(input: PullRequestProviderCreateInput): PullRequestProviderCreateResult {
@@ -274,7 +274,7 @@ export class CliPullRequestProvider implements PullRequestProvider {
       cwd: input.workspacePath,
       timeoutMs: DEFAULT_PR_TIMEOUT_MS
     });
-    return parseCreateOutput(stdout, input);
+    return parseCreateOutput(stdout, input, this.kind);
   }
 
   update(input: PullRequestProviderUpdateInput): PullRequestProviderUpdateResult {
@@ -286,12 +286,13 @@ export class CliPullRequestProvider implements PullRequestProvider {
           ...(input.title ? ["--title", input.title] : []),
           ...(input.body ? ["--body", input.body] : [])
         ]
-      : [
+        : [
           "mr",
           "update",
           input.pr.externalId ?? input.pr.headBranch ?? input.pr.id,
           ...(input.title ? ["--title", input.title] : []),
-          ...(input.body ? ["--description", input.body] : [])
+          ...(input.body ? ["--description", input.body] : []),
+          "--yes"
         ];
     const stdout = this.runner(this.kind === "github" ? "gh" : "glab", args, {
       cwd: resolveProjectRoot(input.project.repoPath),
@@ -1575,10 +1576,25 @@ function extractUrl(output: string): string | undefined {
   return urlMatch?.[0];
 }
 
-function parseCreateOutput(output: string, input: PullRequestProviderCreateInput): PullRequestProviderCreateResult {
+function extractGitLabMergeRequestIdentifier(output: string, url?: string): string | undefined {
+  // GitLab CLI 常见输出是 URL 或 !iid；后续 update/view/merge 更适合用短 iid 而不是完整 URL。
+  const candidate = [output, url].filter(Boolean).join("\n");
+  const match =
+    candidate.match(/\/merge_requests\/(\d+)/i) ??
+    candidate.match(/\/!([0-9]+)/) ??
+    candidate.match(/\b!([0-9]+)\b/);
+  return match?.[1];
+}
+
+function parseCreateOutput(
+  output: string,
+  input: PullRequestProviderCreateInput,
+  kind: Exclude<PullRequestProviderKind, "fake">
+): PullRequestProviderCreateResult {
   const url = extractUrl(output);
+  const externalId = kind === "gitlab" ? extractGitLabMergeRequestIdentifier(output, url) : url;
   return {
-    externalId: url ?? `${input.providerId}`,
+    externalId: externalId ?? url ?? `${input.providerId}`,
     url,
     headBranch: input.headBranch,
     baseBranch: input.baseBranch,
@@ -1589,7 +1605,8 @@ function parseCreateOutput(output: string, input: PullRequestProviderCreateInput
 
 function parseExistingOutput(
   output: string,
-  input: PullRequestProviderInspectExistingInput
+  input: PullRequestProviderInspectExistingInput,
+  kind: Exclude<PullRequestProviderKind, "fake">
 ): PullRequestProviderInspectExistingResult {
   const trimmed = output.trim();
   if (!trimmed) {
@@ -1608,10 +1625,15 @@ function parseExistingOutput(
       return { state: "absent" };
     }
     const url = stringValue(record.url) ?? stringValue(record.web_url);
+    const externalId =
+      stringValue(record.iid) ??
+      stringValue(record.id) ??
+      (kind === "gitlab" ? extractGitLabMergeRequestIdentifier(url ?? "") : undefined) ??
+      url;
     return {
       state: "found",
       pullRequest: {
-        externalId: url ?? stringValue(record.iid) ?? stringValue(record.id) ?? `${input.providerId}`,
+        externalId: externalId ?? `${input.providerId}`,
         url,
         headBranch: sourceBranch,
         baseBranch: targetBranch,
@@ -1629,19 +1651,18 @@ function parseExistingOutput(
 function parseReviewOutput(output: string, pr: PullRequestRecord): PullRequestProviderReviewResult {
   try {
     const value = JSON.parse(output) as Record<string, unknown>;
-    const reviewStatus =
-      stringValue(value.reviewDecision) ??
-      stringValue(value.mergeStateStatus) ??
-      stringValue(value.detailed_merge_status) ??
-      stringValue(value.merge_status) ??
-      "unknown";
+    const reviewStatus = reviewStatusFromProviderRecord(value);
     const summary = stringValue(value.summary) ?? stringValue(value.title) ?? stringValue(value.description) ?? "review inspected";
     return {
       reviewStatus: normalizeReviewStatus(reviewStatus),
       reviewSummary: summary,
-      headSha: stringValue(value.headRefOid) ?? stringValue(value.sha) ?? pr.headSha,
-      baseSha: stringValue(value.baseRefOid) ?? pr.baseSha,
-      validationRunId: stringValue(value.validation_run_id) ?? pr.validationRunId,
+      headSha: nestedStringValue(value, "diff_refs", "head_sha") ?? stringValue(value.headRefOid) ?? stringValue(value.sha) ?? pr.headSha,
+      baseSha: nestedStringValue(value, "diff_refs", "base_sha") ?? stringValue(value.baseRefOid) ?? pr.baseSha,
+      validationRunId:
+        stringValue(value.validation_run_id) ??
+        nestedStringValue(value, "head_pipeline", "id") ??
+        nestedStringValue(value, "pipeline", "id") ??
+        pr.validationRunId,
       mergeable: booleanValue(value.mergeable) ?? booleanValue(value.blocking_discussions_resolved),
       url: stringValue(value.url) ?? stringValue(value.web_url) ?? pr.url
     };
@@ -1659,8 +1680,37 @@ function parseReviewOutput(output: string, pr: PullRequestRecord): PullRequestPr
   }
 }
 
+function reviewStatusFromProviderRecord(value: Record<string, unknown>): string {
+  const state = normalizeReviewStatus(stringValue(value.state));
+  if (state === "merged" || state === "closed" || state === "conflict") {
+    return state;
+  }
+  return (
+    stringValue(value.reviewDecision) ??
+    stringValue(value.review_decision) ??
+    stringValue(value.mergeStateStatus) ??
+    stringValue(value.detailed_merge_status) ??
+    stringValue(value.merge_status) ??
+    "unknown"
+  );
+}
+
 function stringValue(value: unknown): string | undefined {
-  return typeof value === "string" ? value : undefined;
+  if (typeof value === "string") {
+    return value;
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return String(value);
+  }
+  return undefined;
+}
+
+function nestedStringValue(record: Record<string, unknown>, key: string, nestedKey: string): string | undefined {
+  const value = record[key];
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  return stringValue((value as Record<string, unknown>)[nestedKey]);
 }
 
 function booleanValue(value: unknown): boolean | undefined {

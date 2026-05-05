@@ -38,7 +38,8 @@ import {
   type PullRequestProviderMergeInput,
   type PullRequestProviderReviewInput,
   type PullRequestProviderReviewResult,
-  type PullRequestProviderRunner
+  type PullRequestProviderRunner,
+  updatePullRequestRuntime
 } from "./index.js";
 
 function createMigratedDatabase(): string {
@@ -89,6 +90,15 @@ function createReadyPrFixture(databasePath: string) {
   });
 
   return { ...ids, repoPath, workspacePath, repoWorkspacePath, artifactRoot };
+}
+
+function createReadyGitLabPrFixture(databasePath: string) {
+  const fixture = createReadyPrFixture(databasePath);
+  withDatabase(databasePath, (context) => {
+    context.db.prepare("UPDATE projects SET pr_provider_kind = ?, git_provider_kind = ?, git_provider_host = ? WHERE id = ?")
+      .run("gitlab", "gitlab", "gitlab.com", fixture.projectId);
+  });
+  return fixture;
 }
 
 describe("PR/MR provider runtime", () => {
@@ -177,6 +187,98 @@ describe("PR/MR provider runtime", () => {
     ]);
   });
 
+  it("CLI provider 使用窄命令 inspect-before-create 并创建 GitLab MR", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createReadyGitLabPrFixture(databasePath);
+    const calls: Array<{ command: string; args: string[]; cwd: string }> = [];
+    const runner: PullRequestProviderRunner = (command, args, options) => {
+      calls.push({ command, args, cwd: options.cwd });
+      if (args[0] === "mr" && args[1] === "list") {
+        return "[]";
+      }
+      return "Created merge request !7: https://gitlab.com/acme/repo/-/merge_requests/7\n";
+    };
+
+    const result = withDatabase(databasePath, (context) =>
+      createPullRequestRuntime(context, {
+        taskId: "task-pr",
+        title: "实现 MR",
+        bodyArtifact: "pr-body.md",
+        provider: new CliPullRequestProvider("gitlab", runner)
+      })
+    );
+
+    expect(calls[0]).toMatchObject({ command: "glab", cwd: fixture.workspacePath });
+    expect(calls[0].args).toEqual([
+      "mr",
+      "list",
+      "--source-branch",
+      "coordinator/task-pr/attempt-pr",
+      "--target-branch",
+      "main",
+      "--state",
+      "opened",
+      "-F",
+      "json"
+    ]);
+    expect(calls[1]).toMatchObject({ command: "glab", cwd: fixture.workspacePath });
+    expect(calls[1].args).toEqual([
+      "mr",
+      "create",
+      "--title",
+      "实现 MR",
+      "--description",
+      "# PR\n\nbody",
+      "--target-branch",
+      "main",
+      "--source-branch",
+      "coordinator/task-pr/attempt-pr",
+      "--squash-before-merge",
+      "--yes"
+    ]);
+    expect(result.pullRequest).toMatchObject({
+      providerKind: "gitlab",
+      externalId: "7",
+      url: "https://gitlab.com/acme/repo/-/merge_requests/7"
+    });
+  });
+
+  it("CLI provider inspect 到已有 GitLab MR 时复用 iid 并不继续 create", () => {
+    const databasePath = createMigratedDatabase();
+    createReadyGitLabPrFixture(databasePath);
+    const calls: Array<{ command: string; args: string[]; cwd: string }> = [];
+    const runner: PullRequestProviderRunner = (command, args, options) => {
+      calls.push({ command, args, cwd: options.cwd });
+      return JSON.stringify([
+        {
+          iid: 9,
+          web_url: "https://gitlab.com/acme/repo/-/merge_requests/9",
+          source_branch: "coordinator/task-pr/attempt-pr",
+          target_branch: "main",
+          sha: "gitlab-head-9"
+        }
+      ]);
+    };
+
+    const result = withDatabase(databasePath, (context) =>
+      createPullRequestRuntime(context, {
+        taskId: "task-pr",
+        title: "实现 MR",
+        bodyArtifact: "pr-body.md",
+        provider: new CliPullRequestProvider("gitlab", runner)
+      })
+    );
+
+    expect(calls).toHaveLength(1);
+    expect(result.reused).toBe(true);
+    expect(result.pullRequest).toMatchObject({
+      providerKind: "gitlab",
+      externalId: "9",
+      url: "https://gitlab.com/acme/repo/-/merge_requests/9",
+      headSha: "gitlab-head-9"
+    });
+  });
+
   it("缺少 workflow pr_ready handoff 时拒绝创建 PR/MR", () => {
     const databasePath = createMigratedDatabase();
     createReadyPrFixture(databasePath);
@@ -247,6 +349,23 @@ describe("PR/MR provider runtime", () => {
           title: "实现 PR",
           bodyArtifact: "pr-body.md",
           provider: new CliPullRequestProvider("github", runner)
+        })
+      )
+    ).toThrow(/无法解析/);
+  });
+
+  it("GitLab inspect 输出 malformed JSON 时阻断 create", () => {
+    const databasePath = createMigratedDatabase();
+    createReadyGitLabPrFixture(databasePath);
+    const runner: PullRequestProviderRunner = () => "not-json";
+
+    expect(() =>
+      withDatabase(databasePath, (context) =>
+        createPullRequestRuntime(context, {
+          taskId: "task-pr",
+          title: "实现 MR",
+          bodyArtifact: "pr-body.md",
+          provider: new CliPullRequestProvider("gitlab", runner)
         })
       )
     ).toThrow(/无法解析/);
@@ -733,6 +852,118 @@ describe("PR/MR provider runtime", () => {
     expect(state.result).toMatchObject({ decisionKind: "retry", reasonCode: "pr-provider-timeout" });
     expect(state.operation).toMatchObject({ status: "reconciled", failureCode: "timeout" });
     expect(state.operation?.lastObservedState).toMatchObject({ failureKind: "timeout" });
+  });
+
+  it("GitLab update、inspect review 和 merge 使用窄命令并归一化 snapshot", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createReadyGitLabPrFixture(databasePath);
+    const calls: Array<{ command: string; args: string[]; cwd: string }> = [];
+    const runner: PullRequestProviderRunner = (command, args, options) => {
+      calls.push({ command, args, cwd: options.cwd });
+      if (args[0] === "mr" && args[1] === "update") {
+        return JSON.stringify({
+          iid: 11,
+          web_url: "https://gitlab.com/acme/repo/-/merge_requests/11",
+          sha: "gitlab-head-11",
+          detailed_merge_status: "can_be_merged",
+          title: "updated"
+        });
+      }
+      if (args[0] === "mr" && args[1] === "view") {
+        return JSON.stringify({
+          iid: 11,
+          state: "opened",
+          web_url: "https://gitlab.com/acme/repo/-/merge_requests/11",
+          sha: "gitlab-head-11",
+          diff_refs: {
+            base_sha: "gitlab-base-11",
+            head_sha: "gitlab-head-11"
+          },
+          detailed_merge_status: "can_be_merged",
+          blocking_discussions_resolved: true,
+          head_pipeline: {
+            id: 1101
+          },
+          title: "ready"
+        });
+      }
+      if (args[0] === "mr" && args[1] === "merge") {
+        return "Merged merge request !11\n";
+      }
+      throw new Error(`unexpected command: ${command} ${args.join(" ")}`);
+    };
+
+    const state = withDatabase(databasePath, (context) => {
+      const pr = createPullRequest(context, {
+        id: "pr-gitlab-ready",
+        projectId: "project-pr",
+        taskId: "task-pr",
+        attemptId: "attempt-pr",
+        providerKind: "gitlab",
+        externalId: "11",
+        url: "https://gitlab.com/acme/repo/-/merge_requests/11",
+        status: "open",
+        headBranch: "coordinator/task-pr/attempt-pr",
+      baseBranch: "main",
+      headSha: "gitlab-head-10",
+      baseSha: undefined,
+      reviewStatus: "unknown"
+      });
+      const updated = updatePullRequestRuntime(context, {
+        taskId: "task-pr",
+        prId: pr.id,
+        title: "updated",
+        bodyArtifact: "pr-body.md",
+        provider: new CliPullRequestProvider("gitlab", runner)
+      });
+      const reviewed = inspectPullRequestReviewRuntime(context, {
+        taskId: "task-pr",
+        prId: pr.id,
+        provider: new CliPullRequestProvider("gitlab", runner)
+      });
+      const approval = requestMergeApprovalRuntime(context, {
+        taskId: "task-pr",
+        prId: reviewed.pullRequest.id,
+        bodyArtifact: "merge-approval.md"
+      });
+      approveMergeRuntime(context, {
+        taskId: "task-pr",
+        prId: reviewed.pullRequest.id,
+        humanRequestId: approval.humanRequest.id,
+        actor: "operator"
+      });
+      const merged = mergeAfterApprovalRuntime(context, {
+        taskId: "task-pr",
+        prId: reviewed.pullRequest.id,
+        provider: new CliPullRequestProvider("gitlab", runner)
+      });
+      return { updated: updated.pullRequest, reviewed: reviewed.pullRequest, merged: merged.pullRequest };
+    });
+
+    expect(calls[0]).toMatchObject({ command: "glab", cwd: fixture.repoPath });
+    expect(calls[0].args).toEqual([
+      "mr",
+      "update",
+      "11",
+      "--title",
+      "updated",
+      "--description",
+      "# PR\n\nbody",
+      "--yes"
+    ]);
+    expect(calls[1]).toMatchObject({ command: "glab", cwd: fixture.repoPath });
+    expect(calls[1].args).toEqual(["mr", "view", "11", "-F", "json"]);
+    expect(calls[2].args).toEqual(["mr", "view", "11", "-F", "json"]);
+    expect(calls[3]).toMatchObject({ command: "glab", cwd: fixture.repoPath });
+    expect(calls[3].args).toEqual(["mr", "merge", "11", "--squash", "--yes", "--sha", "gitlab-head-11"]);
+    expect(state.updated).toMatchObject({ title: "updated", headSha: "gitlab-head-11" });
+    expect(state.reviewed).toMatchObject({
+      reviewStatus: "approved",
+      headSha: "gitlab-head-11",
+      baseSha: "gitlab-base-11",
+      validationRunId: "1101"
+    });
+    expect(state.merged).toMatchObject({ status: "merged", mergeStrategy: "squash" });
   });
 });
 

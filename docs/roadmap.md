@@ -156,11 +156,11 @@ P2 只预留接口和规划，不进入 V1 完成标准：
 
 ### 当前进度
 
-- 当前阶段：`Iteration 12: P1 / P2 Hardening` 已完成第四个切片 `PR/MR and merge reconciliation`。
-- 当前 OpenSpec change：`harden-pr-mr-merge-reconciliation` 已完成实现、验证和独立 review；归档后位置为 `openspec/changes/archive/2026-05-05-harden-pr-mr-merge-reconciliation`。
-- 当前正式规格：归档时已同步到 `openspec/specs/pr-mr-merge-reconciliation/spec.md`、`openspec/specs/pr-mr-provider/spec.md`、`openspec/specs/daemon-recovery-matrix/spec.md`、`openspec/specs/coordinator-surface/spec.md`。
+- 当前阶段：`Iteration 12: P1 / P2 Hardening` 已完成第五个切片 `second real provider/platform`。
+- 当前 OpenSpec change：`add-gitlab-pr-mr-provider-contract` 已完成实现、验证和独立 review；归档后位置为 `openspec/changes/archive/2026-05-05-add-gitlab-pr-mr-provider-contract`。
+- 当前正式规格：归档时已同步到 `openspec/specs/pr-mr-provider/spec.md`。
 - 下一阶段：继续 `Iteration 12: P1 / P2 Hardening`。
-- 下一阶段重点：进入 `Slice 12.5: second real provider/platform`。PR/MR 与 merge recovery 已具备有限 external fact inspect、Core-owned PR/MR recovery decision、approval snapshot invalidation、merge race/conflict 分类、provider failure classification、`pr-merge` lock fencing recovery 和 surface visibility 收窄；后续应在不放宽 operation/idempotency、inspect-before-create、merge approval、artifact-first 和 provider boundary 的前提下补齐第二套真实 provider / platform。
+- 下一阶段重点：进入 `Slice 12.6: observability and operator diagnosis polish`。GitLab PR/MR CLI provider 已具备 contract tests、GitLab JSON external fact 归一化、inspect-before-create、update/view/merge 命令契约和 approval snapshot 字段刷新；后续应在不扩大 agent-facing surface 的前提下补齐 operator 视角 recovery 诊断能力。
 
 ### Iteration 12 后续切片顺序
 
@@ -233,6 +233,8 @@ harden-daemon-reconciliation-matrix
 - tests 覆盖 PR already exists matches intent、external conflicts intent、approval invalidated、merge race、merge conflict、provider timeout/rate-limit/auth_missing 分类。
 
 #### Slice 12.5: second real provider/platform
+
+状态：已完成，归档 change 为 `openspec/changes/archive/2026-05-05-add-gitlab-pr-mr-provider-contract`。
 
 目标：
 
@@ -364,6 +366,13 @@ harden-daemon-reconciliation-matrix
 - Coordinator Surface 已将 `blocked` workspace 纳入 active workspace 查询与 gate：workflow running / handoff / `create_pr` / `start_workflow_run` 等窗口都会先短路，不暴露内部 recovery tools，也不泄漏 lock token、leaseVersion、manifest 原文或完整 git output。
 - 本切片经过多轮独立 `gpt-5.5 high` subagent review。review 发现并已修复：workspace operator attention 只写 event 未阻止后续推进、malformed manifest 中断 tick、leaseVersion changed 误报 reconciled、blocked gate 位置过晚、workspace status CAS 未检查 changes；最终复审确认无 must-fix。
 - 本切片验证通过：targeted tests、`pnpm test`（193 passed）、`pnpm build`、`pnpm typecheck`、`openspec validate --all --strict`、`openspec validate --changes "harden-workspace-lock-fencing-reconciliation" --strict`、`git diff --check`。
+- 已补齐第二套真实 PR/MR provider/platform：GitLab `glab` CLI 路径现在有明确 OpenSpec contract、runner contract tests 和 GitLab JSON external fact 归一化。
+- `CliPullRequestProvider("gitlab")` 覆盖 inspect-before-create、create、update、inspect review、merge after approval 的窄命令形态；GitLab `mr list/create/update/view/merge` 均保持 provider adapter 边界，不新增 Core brand-specific 状态机。
+- GitLab review inspect 已兼容 `source_branch/target_branch/web_url/iid/id/sha/state/merge_status/detailed_merge_status/blocking_discussions_resolved/diff_refs/head_pipeline/pipeline` 等常见字段，并统一转换为有限 external fact；`diff_refs.head_sha/base_sha` 与 `head_pipeline.id` 会刷新 approval snapshot 所需 head/base/validation 字段。
+- GitLab create 输出会从 URL 或 `!iid` 抽取短 external id，便于后续 update/view/merge 稳定引用同一 MR；create 阶段 synthetic head/base 不能直接通过 merge readiness，后续 inspect review 必须刷新真实 snapshot 后才能 request approval。
+- GitLab malformed inspect output 会阻断 create，不会被当成 absent；provider raw JSON、`diff_refs`、`head_pipeline` 原始结构不会进入 Coordinator Agent surface/tools。
+- 本切片经过独立 `gpt-5.5 high` subagent review。首次 review 指出 GitLab approval snapshot 未解析真实 `diff_refs` 与 `head_pipeline`；已修复并复审，最终确认无 must-fix。
+- 本切片验证通过：`openspec validate add-gitlab-pr-mr-provider-contract --strict`、`openspec validate --all --strict`、`pnpm typecheck`、`pnpm test packages/core/src/pr-mr-provider.test.ts`、`pnpm test`（214 passed）、`pnpm build`、`git diff --check`。
 
 ## 6. 实现顺序
 
