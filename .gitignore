@@ -6,6 +6,7 @@
 # 本地 IDE / agent 安装与调试目录，不入版本控制
 .codex/
 .claude/
+.agents/
 
 # 本地依赖与通用产物
 node_modules/
