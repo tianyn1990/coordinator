@@ -65,6 +65,17 @@ Iteration 12.3 已继续补齐 workspace/lock/fencing recovery 子集：
 
 当前实现仍是 P1 hardening 子集，不代表 PR/MR merge、remote worker 的完整恢复矩阵已经完成。
 
+Iteration 12.4 已继续补齐 PR/MR 与 merge recovery 子集：
+
+- PR/MR provider 只返回有限 external fact，Core 负责解释 external state、approval invalidation、merge readiness 和 recovery decision。
+- create PR 继续 inspect-before-create；匹配当前 intent 的外部 PR/MR 可 reconcile，冲突 intent 不继续 create。
+- inspect review、merge 前 inspect 和 recovery inspect 会刷新 PR/MR snapshot，并在 head/base/validation/review/strategy 不匹配时失效旧 pending/approved approval。
+- provider failure 被分类为 timeout、rate_limited、auth_missing、conflict、malformed_output 或 unknown；auth_missing/conflict 等高风险失败进入 operator attention，不自动重试。
+- merge race 可通过 read-only inspect 观察到 already merged 后 reconcile；merge conflict 不自动绕过，进入 operator attention 或 future conflict-resolution path。
+- failed/unknown merge operation 写入 recovery decision 摘要，避免 daemon 在后续 tick 中无边界反复重放。
+- expired `pr-merge` lock 也通过 Core-owned lock recovery decision 处理，并使用 `lockToken + leaseVersion` 在同一 transaction 中释放和写 recovery event。
+- PR/MR recovery 不新增 Coordinator Agent recovery tool，不把 provider raw output、完整 operation、完整 approval object、lock token 或复杂 JSON 暴露到 agent-facing surface。
+
 ## 2. Daemon 职责
 
 daemon 负责：

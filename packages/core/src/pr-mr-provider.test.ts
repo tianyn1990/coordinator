@@ -10,8 +10,10 @@ import {
   createOperation,
   createTask,
   createWorkspace,
+  getHumanRequest,
   getLatestPullRequestByTask,
   getOperationByIdempotencyKey,
+  listTaskEvents,
   runMigrations,
   updateOperation,
   updatePullRequest,
@@ -26,6 +28,7 @@ import {
   createPullRequestRuntime,
   inspectPullRequestReviewRuntime,
   mergeAfterApprovalRuntime,
+  reconcilePullRequestRuntime,
   requestMergeApprovalRuntime,
   type PullRequestProvider,
   type PullRequestProviderCreateInput,
@@ -34,6 +37,7 @@ import {
   type PullRequestProviderInspectExistingResult,
   type PullRequestProviderMergeInput,
   type PullRequestProviderReviewInput,
+  type PullRequestProviderReviewResult,
   type PullRequestProviderRunner
 } from "./index.js";
 
@@ -282,6 +286,29 @@ describe("PR/MR provider runtime", () => {
     expect(operation).toMatchObject({ status: "reconciled" });
   });
 
+  it("create 前 inspect 到外部 PR/MR 与当前 intent 冲突时不继续 create", () => {
+    const databasePath = createMigratedDatabase();
+    createReadyPrFixture(databasePath);
+    const provider = new ConflictingExistingPrProvider();
+
+    expect(() =>
+      withDatabase(databasePath, (context) =>
+        createPullRequestRuntime(context, {
+          taskId: "task-pr",
+          title: "实现 PR",
+          bodyArtifact: "pr-body.md",
+          provider
+        })
+      )
+    ).toThrow(/conflicts/);
+
+    const operation = withDatabase(databasePath, (context) =>
+      getOperationByIdempotencyKey(context, "pr:create:attempt-pr:coordinator/task-pr/attempt-pr")
+    );
+    expect(provider.createCalls).toBe(0);
+    expect(operation).toMatchObject({ status: "unknown", failureCode: "pr_external_conflicts_intent" });
+  });
+
   it("inspect review 后 request approval，approval 有效后才能 merge", () => {
     const databasePath = createMigratedDatabase();
     createReadyPrFixture(databasePath);
@@ -317,6 +344,55 @@ describe("PR/MR provider runtime", () => {
     });
 
     expect(merged.pullRequest).toMatchObject({ status: "merged" });
+  });
+
+  it("provider 返回 GitHub APPROVED 时会归一化为 approved 并允许请求 approval", () => {
+    const databasePath = createMigratedDatabase();
+    createReadyPrFixture(databasePath);
+
+    const result = withDatabase(databasePath, (context) => {
+      const created = createPullRequestRuntime(context, {
+        taskId: "task-pr",
+        title: "实现 PR",
+        bodyArtifact: "pr-body.md",
+        provider: new FakePullRequestProvider()
+      });
+      const reviewed = inspectPullRequestReviewRuntime(context, {
+        taskId: "task-pr",
+        prId: created.pullRequest.id,
+        provider: new UppercaseApprovedProvider()
+      });
+      const approval = requestMergeApprovalRuntime(context, {
+        taskId: "task-pr",
+        prId: reviewed.pullRequest.id,
+        bodyArtifact: "merge-approval.md"
+      });
+      return { reviewed: reviewed.pullRequest, approval: approval.humanRequest };
+    });
+
+    expect(result.reviewed.reviewStatus).toBe("approved");
+    expect(result.approval.status).toBe("pending");
+  });
+
+  it("provider 返回 GitHub CHANGES_REQUESTED 时会归一化并失效旧 approval", () => {
+    const databasePath = createMigratedDatabase();
+    createReadyPrFixture(databasePath);
+    const state = withDatabase(databasePath, (context) => {
+      const pr = createReadyMergePr(context);
+      createApprovedMergeRequest(context, pr.id);
+      const updated = inspectPullRequestReviewRuntime(context, {
+        taskId: "task-pr",
+        prId: pr.id,
+        provider: new UppercaseChangesRequestedProvider()
+      });
+      return {
+        pr: updated.pullRequest,
+        approval: getHumanRequest(context, "approval-ready-merge")
+      };
+    });
+
+    expect(state.pr.reviewStatus).toBe("changes_requested");
+    expect(state.approval).toMatchObject({ status: "rejected", approvalValid: false });
   });
 
   it("approval snapshot 与 PR head 不匹配时拒绝 merge", () => {
@@ -478,6 +554,186 @@ describe("PR/MR provider runtime", () => {
     expect(state.lock).toBeUndefined();
     expect(state.operation).toMatchObject({ status: "unknown" });
   });
+
+  it("inspect review 发现 snapshot 变化时失效旧 approval", () => {
+    const databasePath = createMigratedDatabase();
+    createReadyPrFixture(databasePath);
+    const state = withDatabase(databasePath, (context) => {
+      const pr = createReadyMergePr(context);
+      createApprovedMergeRequest(context, pr.id);
+      const updated = inspectPullRequestReviewRuntime(context, {
+        taskId: "task-pr",
+        prId: pr.id,
+        provider: new ChangedHeadProvider()
+      });
+      return {
+        pr: updated.pullRequest,
+        approval: getHumanRequest(context, "approval-ready-merge"),
+        events: listTaskEvents(context, "task-pr")
+      };
+    });
+
+    expect(state.pr.headSha).toBe("head-2");
+    expect(state.approval).toMatchObject({ status: "rejected", approvalValid: false });
+    expect(state.events.map((event) => event.type)).toContain("pr.merge_approval_invalidated");
+  });
+
+  it("inspect review 发现 blocking review 时失效旧 approval", () => {
+    const databasePath = createMigratedDatabase();
+    createReadyPrFixture(databasePath);
+    const state = withDatabase(databasePath, (context) => {
+      const pr = createReadyMergePr(context);
+      createApprovedMergeRequest(context, pr.id);
+      const updated = inspectPullRequestReviewRuntime(context, {
+        taskId: "task-pr",
+        prId: pr.id,
+        provider: new BlockingReviewProvider()
+      });
+      return {
+        pr: updated.pullRequest,
+        approval: getHumanRequest(context, "approval-ready-merge")
+      };
+    });
+
+    expect(state.pr.reviewStatus).toBe("changes_requested");
+    expect(state.approval).toMatchObject({ status: "rejected", approvalValid: false });
+  });
+
+  it("reconcile 发现 closed/unmerged 时进入 operator attention，不自动 completed", () => {
+    const databasePath = createMigratedDatabase();
+    createReadyPrFixture(databasePath);
+    const state = withDatabase(databasePath, (context) => {
+      const pr = createReadyMergePr(context);
+      const result = reconcilePullRequestRuntime(context, {
+        taskId: "task-pr",
+        prId: pr.id,
+        provider: new ClosedUnmergedProvider()
+      });
+      return {
+        result,
+        task: context.db.prepare("SELECT status FROM tasks WHERE id = ?").get("task-pr") as { status: string },
+        operation: getOperationByIdempotencyKey(context, "pr:reconcile:pr-ready-merge:0")
+      };
+    });
+
+    expect(state.result).toMatchObject({ decisionKind: "operator_attention", reasonCode: "pr-closed-unmerged" });
+    expect(state.task.status).not.toBe("completed");
+    expect(state.operation).toMatchObject({ status: "unknown" });
+  });
+
+  it("reconcile 发现 already merged 时对账 completed", () => {
+    const databasePath = createMigratedDatabase();
+    createReadyPrFixture(databasePath);
+    const state = withDatabase(databasePath, (context) => {
+      const pr = createReadyMergePr(context);
+      const result = reconcilePullRequestRuntime(context, {
+        taskId: "task-pr",
+        prId: pr.id,
+        provider: new AlreadyMergedProvider()
+      });
+      return {
+        result,
+        task: context.db.prepare("SELECT status FROM tasks WHERE id = ?").get("task-pr") as { status: string },
+        pr: getLatestPullRequestByTask(context, "task-pr"),
+        operation: getOperationByIdempotencyKey(context, "pr:reconcile:pr-ready-merge:0")
+      };
+    });
+
+    expect(state.result).toMatchObject({ decisionKind: "reconciled", reasonCode: "pr-external-merged" });
+    expect(state.task.status).toBe("completed");
+    expect(state.pr).toMatchObject({ status: "merged" });
+    expect(state.operation).toMatchObject({ status: "reconciled" });
+  });
+
+  it("merge race 中 PR 已 merged 时对账成功而不是重复 merge", () => {
+    const databasePath = createMigratedDatabase();
+    createReadyPrFixture(databasePath);
+    const provider = new AlreadyMergedProvider();
+
+    const result = withDatabase(databasePath, (context) => {
+      const pr = createReadyMergePr(context);
+      createApprovedMergeRequest(context, pr.id);
+      return mergeAfterApprovalRuntime(context, {
+        taskId: "task-pr",
+        prId: pr.id,
+        provider
+      });
+    });
+
+    expect(result.pullRequest).toMatchObject({ status: "merged" });
+    expect(provider.mergeCalls).toBe(0);
+  });
+
+  it("merge conflict 分类为 conflict 并释放 lock", () => {
+    const databasePath = createMigratedDatabase();
+    createReadyPrFixture(databasePath);
+
+    expect(() =>
+      withDatabase(databasePath, (context) => {
+        const pr = createReadyMergePr(context);
+        createApprovedMergeRequest(context, pr.id);
+        mergeAfterApprovalRuntime(context, {
+          taskId: "task-pr",
+          prId: pr.id,
+          provider: new ConflictProvider()
+        });
+      })
+    ).toThrow(/conflict/);
+
+    const state = withDatabase(databasePath, (context) => ({
+      lock: getLockForTest(context, "pr-merge", "pr-ready-merge"),
+      operation: getOperationByIdempotencyKey(context, "merge:pr-ready-merge:head-1:base-1:validation-1")
+    }));
+    expect(state.lock).toBeUndefined();
+    expect(state.operation).toMatchObject({ status: "unknown" });
+    expect(state.operation?.lastObservedState).toMatchObject({ failureKind: "conflict" });
+  });
+
+  it("provider auth missing 不自动重试并写入窄 recovery event", () => {
+    const databasePath = createMigratedDatabase();
+    createReadyPrFixture(databasePath);
+    const state = withDatabase(databasePath, (context) => {
+      const pr = createReadyMergePr(context);
+      const result = reconcilePullRequestRuntime(context, {
+        taskId: "task-pr",
+        prId: pr.id,
+        provider: new AuthMissingProvider(),
+        retryAllowed: true
+      });
+      return {
+        result,
+        operation: getOperationByIdempotencyKey(context, "pr:reconcile:pr-ready-merge:0"),
+        events: listTaskEvents(context, "task-pr")
+      };
+    });
+
+    expect(state.result).toMatchObject({ decisionKind: "operator_attention", reasonCode: "pr-provider-auth-missing" });
+    expect(state.operation).toMatchObject({ status: "unknown", failureCode: "auth_missing" });
+    const event = state.events.find((item) => item.type === "pr.recovery_decision");
+    expect(JSON.stringify(event?.payload)).not.toContain("provider raw");
+  });
+
+  it("provider timeout 在 retryAllowed 时封口 operation 为 reconciled 以等待 retry 调度", () => {
+    const databasePath = createMigratedDatabase();
+    createReadyPrFixture(databasePath);
+    const state = withDatabase(databasePath, (context) => {
+      const pr = createReadyMergePr(context);
+      const result = reconcilePullRequestRuntime(context, {
+        taskId: "task-pr",
+        prId: pr.id,
+        provider: new TimeoutProvider(),
+        retryAllowed: true
+      });
+      return {
+        result,
+        operation: getOperationByIdempotencyKey(context, "pr:reconcile:pr-ready-merge:0")
+      };
+    });
+
+    expect(state.result).toMatchObject({ decisionKind: "retry", reasonCode: "pr-provider-timeout" });
+    expect(state.operation).toMatchObject({ status: "reconciled", failureCode: "timeout" });
+    expect(state.operation?.lastObservedState).toMatchObject({ failureKind: "timeout" });
+  });
 });
 
 function createReadyMergePr(context: DbContext) {
@@ -569,6 +825,22 @@ class ExistingPrProvider extends FakePullRequestProvider {
   }
 }
 
+class ConflictingExistingPrProvider extends ExistingPrProvider {
+  inspectExisting(input: PullRequestProviderInspectExistingInput): PullRequestProviderInspectExistingResult {
+    return {
+      state: "found",
+      pullRequest: {
+        externalId: "conflicting-pr-1",
+        url: "https://example.com/conflicting-pr-1",
+        headBranch: input.headBranch,
+        baseBranch: "release/other",
+        headSha: "conflicting-head",
+        baseSha: "conflicting-base"
+      }
+    };
+  }
+}
+
 class FailingInspectProvider extends FakePullRequestProvider {
   inspectExisting(_input: PullRequestProviderInspectExistingInput): PullRequestProviderInspectExistingResult {
     throw new Error("inspect failed");
@@ -589,6 +861,48 @@ class ChangedHeadProvider extends FakePullRequestProvider {
   }
 }
 
+class BlockingReviewProvider extends FakePullRequestProvider {
+  inspectReview(input: PullRequestProviderReviewInput) {
+    return {
+      reviewStatus: "changes_requested",
+      reviewSummary: "blocking review",
+      headSha: input.pr.headSha,
+      baseSha: input.pr.baseSha,
+      validationRunId: input.pr.validationRunId,
+      mergeable: false,
+      url: input.pr.url
+    };
+  }
+}
+
+class UppercaseApprovedProvider extends FakePullRequestProvider {
+  inspectReview(input: PullRequestProviderReviewInput) {
+    return {
+      reviewStatus: "APPROVED",
+      reviewSummary: "approved",
+      headSha: input.pr.headSha,
+      baseSha: input.pr.baseSha,
+      validationRunId: input.pr.validationRunId ?? "validation-uppercase",
+      mergeable: true,
+      url: input.pr.url
+    };
+  }
+}
+
+class UppercaseChangesRequestedProvider extends FakePullRequestProvider {
+  inspectReview(input: PullRequestProviderReviewInput) {
+    return {
+      reviewStatus: "CHANGES_REQUESTED",
+      reviewSummary: "changes requested",
+      headSha: input.pr.headSha,
+      baseSha: input.pr.baseSha,
+      validationRunId: input.pr.validationRunId,
+      mergeable: false,
+      url: input.pr.url
+    };
+  }
+}
+
 class ThrowingMergeProvider extends FakePullRequestProvider implements PullRequestProvider {
   inspectReview(input: PullRequestProviderReviewInput) {
     return {
@@ -604,5 +918,70 @@ class ThrowingMergeProvider extends FakePullRequestProvider implements PullReque
 
   merge(_input: PullRequestProviderMergeInput): ReturnType<FakePullRequestProvider["merge"]> {
     throw new Error("merge failed");
+  }
+}
+
+class ClosedUnmergedProvider extends FakePullRequestProvider {
+  inspectReview(input: PullRequestProviderReviewInput): PullRequestProviderReviewResult {
+    return {
+      reviewStatus: "closed",
+      reviewSummary: "closed without merge",
+      headSha: input.pr.headSha,
+      baseSha: input.pr.baseSha,
+      validationRunId: input.pr.validationRunId,
+      mergeable: false,
+      url: input.pr.url
+    };
+  }
+}
+
+class AlreadyMergedProvider extends FakePullRequestProvider {
+  mergeCalls = 0;
+
+  inspectReview(input: PullRequestProviderReviewInput): PullRequestProviderReviewResult {
+    return {
+      reviewStatus: "merged",
+      reviewSummary: "already merged",
+      headSha: input.pr.headSha,
+      baseSha: input.pr.baseSha,
+      validationRunId: input.pr.validationRunId,
+      mergeable: false,
+      url: input.pr.url
+    };
+  }
+
+  merge(input: PullRequestProviderMergeInput): ReturnType<FakePullRequestProvider["merge"]> {
+    this.mergeCalls += 1;
+    return super.merge(input);
+  }
+}
+
+class ConflictProvider extends FakePullRequestProvider {
+  inspectReview(input: PullRequestProviderReviewInput): PullRequestProviderReviewResult {
+    return {
+      reviewStatus: "clean",
+      reviewSummary: "ready",
+      headSha: input.pr.headSha,
+      baseSha: input.pr.baseSha,
+      validationRunId: input.pr.validationRunId,
+      mergeable: true,
+      url: input.pr.url
+    };
+  }
+
+  merge(_input: PullRequestProviderMergeInput): ReturnType<FakePullRequestProvider["merge"]> {
+    throw new Error("merge conflict");
+  }
+}
+
+class AuthMissingProvider extends FakePullRequestProvider {
+  inspectReview(_input: PullRequestProviderReviewInput): PullRequestProviderReviewResult {
+    throw new Error("auth missing");
+  }
+}
+
+class TimeoutProvider extends FakePullRequestProvider {
+  inspectReview(_input: PullRequestProviderReviewInput): PullRequestProviderReviewResult {
+    throw new Error("timeout");
   }
 }

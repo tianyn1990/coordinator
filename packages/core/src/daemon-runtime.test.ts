@@ -11,9 +11,11 @@ import {
   createHumanRequest,
   createOperation,
   createProject,
+  createPullRequest,
   createTask,
   createWorkspace,
   getLock,
+  getLatestPullRequestByTask,
   getOperationByIdempotencyKey,
   listTaskEvents,
   runMigrations,
@@ -24,10 +26,13 @@ import {
 } from "@coordinator/db";
 import {
   FakeAgentProvider,
+  FakePullRequestProvider,
   buildTaskSurfaceFromDb,
   parseAgentToolRequest,
   runDaemonTick,
   type AgentProviderRunInput,
+  type PullRequestProviderReviewInput,
+  type PullRequestProviderReviewResult,
   type WorkflowProtocolRunner
 } from "./index.js";
 import { persistRecoveryDecision, type RecoveryDecision } from "./recovery-decision.js";
@@ -1576,4 +1581,196 @@ describe("daemon runtime", () => {
     expect(surface.markdown).not.toContain("secret-lock-token");
     expect(JSON.stringify(surface.json)).not.toContain("secret-provider-output");
   });
+
+  it("daemon 通过 Core decision 对账 running merge operation，不自行判断 review 或 merge readiness", () => {
+    const databasePath = createMigratedDatabase();
+    withDatabase(databasePath, (context) => {
+      const project = createProject(context, {
+        id: "project-pr-recovery",
+        name: "pr recovery",
+        defaultBranch: "main",
+        prProviderKind: "github"
+      });
+      const task = createTask(context, {
+        id: "task-pr-recovery",
+        projectId: project.id,
+        title: "merge recovery"
+      });
+      const attempt = createAttempt(context, {
+        id: "attempt-pr-recovery",
+        projectId: project.id,
+        taskId: task.id
+      });
+      const pr = createPullRequest(context, {
+        id: "pr-daemon-recovery",
+        projectId: project.id,
+        taskId: task.id,
+        attemptId: attempt.id,
+        providerKind: "github",
+        status: "merging",
+        externalId: "1",
+        headBranch: "feature",
+        baseBranch: "main",
+        headSha: "head-1",
+        baseSha: "base-1",
+        reviewStatus: "clean",
+        validationRunId: "validation-1",
+        mergeStrategy: "squash"
+      });
+      const operation = createOperation(context, {
+        idempotencyKey: "merge:pr-daemon-recovery:head-1:base-1:validation-1",
+        kind: "merge",
+        projectId: project.id,
+        taskId: task.id,
+        attemptId: attempt.id,
+        prId: pr.id
+      });
+      updateOperation(context, {
+        operationId: operation.id,
+        status: "running",
+        lastObservedState: { phase: "merge", prId: pr.id }
+      });
+    });
+
+    const result = withDatabase(databasePath, (context) =>
+      runDaemonTick(context, {
+        pullRequestProvider: new DaemonMergedProvider()
+      })
+    );
+    const state = withDatabase(databasePath, (context) => ({
+      pr: getLatestPullRequestByTask(context, "task-pr-recovery"),
+      task: context.db.prepare("SELECT status FROM tasks WHERE id = ?").get("task-pr-recovery") as { status: string },
+      operation: getOperationByIdempotencyKey(context, "merge:pr-daemon-recovery:head-1:base-1:validation-1"),
+      events: listTaskEvents(context, "task-pr-recovery")
+    }));
+
+    expect(result.actions).toContainEqual(expect.objectContaining({ kind: "pr_reconciled", taskId: "task-pr-recovery" }));
+    expect(state.pr).toMatchObject({ status: "merged" });
+    expect(state.task.status).toBe("completed");
+    expect(state.operation).toMatchObject({ status: "reconciled" });
+    expect(JSON.stringify(state.events)).not.toContain("provider raw");
+  });
+
+  it("daemon 不会反复重放已经带 recovery decision 的 failed merge operation", () => {
+    const databasePath = createMigratedDatabase();
+    withDatabase(databasePath, (context) => {
+      const project = createProject(context, {
+        id: "project-pr-failed",
+        name: "pr failed",
+        defaultBranch: "main",
+        prProviderKind: "github"
+      });
+      const task = createTask(context, {
+        id: "task-pr-failed",
+        projectId: project.id,
+        title: "merge failed"
+      });
+      const attempt = createAttempt(context, {
+        id: "attempt-pr-failed",
+        projectId: project.id,
+        taskId: task.id
+      });
+      const pr = createPullRequest(context, {
+        id: "pr-daemon-failed",
+        projectId: project.id,
+        taskId: task.id,
+        attemptId: attempt.id,
+        providerKind: "github",
+        status: "open",
+        headSha: "head-1",
+        baseSha: "base-1",
+        reviewStatus: "clean",
+        validationRunId: "validation-1",
+        mergeStrategy: "squash"
+      });
+      const operation = createOperation(context, {
+        idempotencyKey: "merge:pr-daemon-failed:head-1:base-1:validation-1",
+        kind: "merge",
+        projectId: project.id,
+        taskId: task.id,
+        attemptId: attempt.id,
+        prId: pr.id
+      });
+      updateOperation(context, {
+        operationId: operation.id,
+        status: "unknown",
+        failureCode: "conflict",
+        lastObservedState: {
+          phase: "merge-failed",
+          failureKind: "conflict",
+          decision: "operator_attention",
+          reasonCode: "pr-merge-conflict"
+        }
+      });
+    });
+
+    const result = withDatabase(databasePath, (context) =>
+      runDaemonTick(context, {
+        pullRequestProvider: new DaemonMergedProvider()
+      })
+    );
+
+    expect(result.actions.some((action) => action.taskId === "task-pr-failed" && action.kind === "pr_reconciled")).toBe(false);
+  });
+
+  it("daemon 能释放 owner inactive 的过期 pr-merge lock", () => {
+    const databasePath = createMigratedDatabase();
+    withDatabase(databasePath, (context) => {
+      const project = createProject(context, {
+        id: "project-pr-lock",
+        name: "pr lock",
+        defaultBranch: "main",
+        prProviderKind: "github"
+      });
+      const task = createTask(context, {
+        id: "task-pr-lock",
+        projectId: project.id,
+        title: "merge lock"
+      });
+      const attempt = createAttempt(context, {
+        id: "attempt-pr-lock",
+        projectId: project.id,
+        taskId: task.id
+      });
+      createPullRequest(context, {
+        id: "pr-lock",
+        projectId: project.id,
+        taskId: task.id,
+        attemptId: attempt.id,
+        providerKind: "github",
+        status: "open"
+      });
+      acquireLock(context, {
+        resourceKind: "pr-merge",
+        resourceId: "pr-lock",
+        owner: "test",
+        ttlMs: 1,
+        now: new Date("2026-05-04T00:00:00.000Z")
+      });
+    });
+
+    const result = withDatabase(databasePath, (context) =>
+      runDaemonTick(context, {
+        now: new Date("2026-05-04T00:00:01.000Z")
+      })
+    );
+    const lock = withDatabase(databasePath, (context) => getLock(context, "pr-merge", "pr-lock"));
+
+    expect(result.actions).toContainEqual(expect.objectContaining({ kind: "lock_reconciled" }));
+    expect(lock).toBeUndefined();
+  });
 });
+
+class DaemonMergedProvider extends FakePullRequestProvider {
+  inspectReview(input: PullRequestProviderReviewInput): PullRequestProviderReviewResult {
+    return {
+      reviewStatus: "merged",
+      reviewSummary: "already merged",
+      headSha: input.pr.headSha,
+      baseSha: input.pr.baseSha,
+      validationRunId: input.pr.validationRunId,
+      mergeable: false,
+      url: input.pr.url
+    };
+  }
+}

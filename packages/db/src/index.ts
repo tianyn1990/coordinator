@@ -442,6 +442,7 @@ export type OperationRecord = {
   attemptId?: string;
   prId?: string;
   externalId?: string;
+  failureCode?: string;
   lastObservedState?: unknown;
 };
 
@@ -2229,6 +2230,7 @@ function mapOperationRow(row: unknown): OperationRecord {
     attempt_id?: string | null;
     pr_id?: string | null;
     external_id?: string | null;
+    failure_code?: string | null;
     last_observed_state?: string | null;
   };
   return {
@@ -2241,6 +2243,7 @@ function mapOperationRow(row: unknown): OperationRecord {
     attemptId: value.attempt_id ?? undefined,
     prId: value.pr_id ?? undefined,
     externalId: value.external_id ?? undefined,
+    failureCode: value.failure_code ?? undefined,
     lastObservedState: value.last_observed_state ? JSON.parse(value.last_observed_state) : undefined
   };
 }

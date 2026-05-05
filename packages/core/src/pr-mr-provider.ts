@@ -14,6 +14,7 @@ import {
   getAttempt,
   getHumanRequest,
   getLatestPullRequestByTask,
+  getOperationById,
   getProject,
   getTask,
   releaseLock,
@@ -29,6 +30,7 @@ import {
   type ProjectRecord,
   type TaskRecord
 } from "@coordinator/db";
+import { decidePullRequestRecovery } from "./recovery-decision.js";
 import { assertArtifactRelativePath } from "./workspace-manager.js";
 
 const DEFAULT_PR_TIMEOUT_MS = 120_000;
@@ -104,6 +106,16 @@ export type PullRequestProviderReviewResult = {
   validationRunId?: string;
   mergeable?: boolean;
   url?: string;
+};
+
+export type PullRequestExternalState = "open" | "closed_unmerged" | "merged" | "unknown" | "conflict";
+
+export type PullRequestProviderSnapshot = PullRequestProviderReviewResult & {
+  state: PullRequestExternalState;
+  externalId?: string;
+  headBranch?: string;
+  baseBranch?: string;
+  mergedAt?: string;
 };
 
 export type PullRequestProviderUpdateResult = {
@@ -376,6 +388,16 @@ export type InspectPullRequestReviewRuntimeInput = {
   providerRunner?: PullRequestProviderRunner;
 };
 
+export type ReconcilePullRequestRuntimeInput = {
+  taskId: string;
+  prId: string;
+  actor?: string;
+  operationId?: string;
+  provider?: PullRequestProvider;
+  providerRunner?: PullRequestProviderRunner;
+  retryAllowed?: boolean;
+};
+
 export type RequestMergeApprovalRuntimeInput = {
   taskId: string;
   prId: string;
@@ -447,6 +469,20 @@ export function createPullRequestRuntime(
       providerId: operation.id
     })
   );
+  if (inspected.state === "found" && pullRequestConflictsWithIntent(inspected.pullRequest, providerInput)) {
+    updateOperation(context, {
+      operationId: operation.id,
+      status: "unknown",
+      failureCode: "pr_external_conflicts_intent",
+      lastObservedState: {
+        phase: "pr-create-inspect-conflict",
+        observedExternalState: "conflicts-with-intent",
+        headBranch: inspected.pullRequest.headBranch,
+        baseBranch: inspected.pullRequest.baseBranch
+      }
+    });
+    throw new PullRequestProviderError("external PR/MR conflicts with current intent");
+  }
   if (inspected.state === "absent") {
     assertOperationCanRun(operation.status);
   }
@@ -589,22 +625,14 @@ export function inspectPullRequestReviewRuntime(
   const task = requireTaskForTask(context, input.taskId);
   const project = requireProjectForTask(context, task);
   const provider = input.provider ?? createPullRequestProvider(resolvePrProviderKind(project), input.providerRunner);
-  const review = provider.inspectReview({
-    project,
+  const review = provider.inspectReview({ project, pr, providerId: `inspect:${pr.id}` });
+  const updated = persistPullRequestSnapshot(context, {
     pr,
-    providerId: `inspect:${pr.id}`
+    snapshot: snapshotFromReview(pr, review),
+    actor: input.actor ?? "coordinator",
+    eventType: "pr.review_inspected",
+    eventSummary: `PR/MR review inspected: ${pr.id}`
   });
-  const updated = withTransaction(context, () =>
-    updatePullRequest(context, {
-      prId: pr.id,
-      expectedStateVersion: pr.stateVersion,
-      reviewStatus: review.reviewStatus,
-      reviewSummary: review.reviewSummary,
-      headSha: review.headSha,
-      baseSha: review.baseSha,
-      validationRunId: review.validationRunId
-    })
-  );
   withTransaction(context, () => {
     appendEvent(context, {
       type: "pr.review_inspected",
@@ -613,10 +641,84 @@ export function inspectPullRequestReviewRuntime(
       taskId: task.id,
       attemptId: pr.attemptId,
       prId: pr.id,
-      payload: review
+      payload: sanitizedSnapshotPayload(snapshotFromReview(updated, review))
     });
   });
   return { pullRequest: updated, review };
+}
+
+export function reconcilePullRequestRuntime(
+  context: DbContext,
+  input: ReconcilePullRequestRuntimeInput
+): { pullRequest: PullRequestRecord; decisionKind: string; reasonCode: string } {
+  const pr = requirePullRequestForTask(context, input.taskId, input.prId);
+  const task = requireTaskForTask(context, input.taskId);
+  const project = requireProjectForTask(context, task);
+  const provider = input.provider ?? createPullRequestProvider(resolvePrProviderKind(project), input.providerRunner);
+  const operation = input.operationId
+    ? getOperationRef(context, input.operationId)
+    : createOperation(context, {
+        idempotencyKey: `pr:reconcile:${pr.id}:${pr.stateVersion}`,
+        kind: "pr:reconcile",
+        projectId: project.id,
+        taskId: task.id,
+        attemptId: pr.attemptId,
+        prId: pr.id
+      });
+  if (operation.status !== "running") {
+    updateOperation(context, {
+      operationId: operation.id,
+      status: "running",
+      lastObservedState: { phase: "pr-reconcile", prId: pr.id }
+    });
+  }
+  try {
+    const snapshot = inspectPullRequestSnapshot(provider, project, pr, `reconcile:${operation.id}`);
+    const result = persistPrRecoveryObservation(context, {
+      pr,
+      snapshot,
+      operationId: operation.id,
+      actor: input.actor ?? "daemon",
+      retryAllowed: input.retryAllowed
+    });
+    return { pullRequest: result.pullRequest, decisionKind: result.decision.kind, reasonCode: result.decision.reasonCode };
+  } catch (error) {
+    const failureKind = classifyProviderFailure(error);
+    const decision = decidePullRequestRecovery({
+      pullRequest: pr,
+      operationId: operation.id,
+      externalState: "unknown",
+      observedSummary: `PR/MR provider failure: ${failureKind}`,
+      failureKind,
+      retryAllowed: input.retryAllowed
+    });
+    withTransaction(context, () => {
+      updateOperation(context, {
+        operationId: operation.id,
+        status: decision.kind === "retry" ? "reconciled" : "unknown",
+        failureCode: failureKind,
+        lastObservedState: {
+          failureKind,
+          decision: decision.kind,
+          reasonCode: decision.reasonCode,
+          observedSummary: decision.observedSummary,
+          nextAction: decision.nextAction
+        }
+      });
+      appendEvent(context, {
+        type: "pr.recovery_decision",
+        summary: `${decision.reasonCode}: ${pr.id}`,
+        projectId: project.id,
+        taskId: task.id,
+        attemptId: pr.attemptId,
+        prId: pr.id,
+        operationId: operation.id,
+        severity: decision.operatorAttentionRequired ? "warn" : "debug",
+        payload: narrowPrRecoveryPayload(decision.kind, decision.reasonCode, decision.observedSummary, decision.nextAction)
+      });
+    });
+    return { pullRequest: pr, decisionKind: decision.kind, reasonCode: decision.reasonCode };
+  }
 }
 
 export function requestMergeApprovalRuntime(
@@ -794,25 +896,30 @@ export function mergeAfterApprovalRuntime(
     lastObservedState: { phase: "merge", prId: pr.id }
   });
   try {
-    const freshReview = runProviderSideEffect(context, operation.id, "failed", () =>
-      provider.inspectReview({
+    const freshSnapshot = runProviderSideEffect(context, operation.id, "failed", () =>
+      inspectPullRequestSnapshot(provider, project, pr, `merge-inspect:${operation.id}`)
+    );
+    if (freshSnapshot.state === "merged") {
+      const reconciled = reconcileMergedPullRequest(context, {
+        task,
         project,
         pr,
-        providerId: `merge-inspect:${operation.id}`
-      })
-    );
-    const refreshed = withTransaction(context, () =>
-      updatePullRequest(context, {
-        prId: pr.id,
-        expectedStateVersion: pr.stateVersion,
-        reviewStatus: freshReview.reviewStatus,
-        reviewSummary: freshReview.reviewSummary,
-        headSha: freshReview.headSha,
-        baseSha: freshReview.baseSha,
-        validationRunId: freshReview.validationRunId,
-        url: freshReview.url
-      })
-    );
+        operationId: operation.id,
+        mergedAt: freshSnapshot.mergedAt
+      });
+      releasePrMergeLock(context, lock);
+      return { pullRequest: reconciled, mergedAt: reconciled.mergedAt ?? new Date().toISOString(), operationId: operation.id };
+    }
+    if (freshSnapshot.state === "conflict") {
+      throw new PullRequestProviderError("merge conflict");
+    }
+    const refreshed = persistPullRequestSnapshot(context, {
+      pr,
+      snapshot: freshSnapshot,
+      actor: input.actor ?? "merge",
+      eventType: "pr.merge_snapshot_inspected",
+      eventSummary: `PR/MR merge snapshot inspected: ${pr.id}`
+    });
     assertMergeReadiness(refreshed);
     assertApprovalValid(refreshed, approval);
     const merged = runProviderSideEffect(context, operation.id, "unknown", () =>
@@ -853,6 +960,7 @@ export function mergeAfterApprovalRuntime(
     });
     return { pullRequest: updated, mergedAt: merged.mergedAt ?? new Date().toISOString(), operationId: operation.id };
   } catch (error) {
+    const failureKind = classifyProviderFailure(error);
     withTransaction(context, () => {
       try {
         releasePrMergeLock(context, lock);
@@ -860,11 +968,26 @@ export function mergeAfterApprovalRuntime(
         // lock 已过期或已释放时无需覆盖原始错误；operation failure 才是恢复依据。
       }
       if (operationStatus(context, operation.id) === "running") {
+        const decision = decidePullRequestRecovery({
+          pullRequest: pr,
+          operationId: operation.id,
+          externalState: failureKind === "conflict" ? "conflict" : "unknown",
+          observedSummary: `PR/MR merge failed: ${failureKind}`,
+          failureKind,
+          retryAllowed: false
+        });
         updateOperation(context, {
           operationId: operation.id,
           status: "unknown",
-          failureCode: error instanceof Error ? error.name : "merge_failure",
-          lastObservedState: { phase: "merge-failed", message: error instanceof Error ? error.message : String(error) }
+          failureCode: failureKind,
+          lastObservedState: {
+            phase: "merge-failed",
+            failureKind,
+            decision: decision.kind,
+            reasonCode: decision.reasonCode,
+            observedSummary: decision.observedSummary,
+            nextAction: decision.nextAction
+          }
         });
       }
     });
@@ -875,7 +998,7 @@ export function mergeAfterApprovalRuntime(
       taskId: task.id,
       attemptId: pr.attemptId,
       prId: pr.id,
-      payload: { message: error instanceof Error ? error.message : String(error) },
+      payload: { failureKind },
       severity: "warn"
     });
     throw error;
@@ -884,6 +1007,287 @@ export function mergeAfterApprovalRuntime(
 
 function releasePrMergeLock(context: DbContext, lock: LockRecord): void {
   releaseLock(context, lock.resourceKind, lock.resourceId, lock.lockToken);
+}
+
+function inspectPullRequestSnapshot(
+  provider: PullRequestProvider,
+  project: ProjectRecord,
+  pr: PullRequestRecord,
+  providerId: string
+): PullRequestProviderSnapshot {
+  const review = provider.inspectReview({ project, pr, providerId });
+  return snapshotFromReview(pr, review);
+}
+
+function snapshotFromReview(pr: PullRequestRecord, review: PullRequestProviderReviewResult): PullRequestProviderSnapshot {
+  const state = externalStateFromReview(review);
+  return {
+    ...review,
+    reviewStatus: normalizeReviewStatus(review.reviewStatus),
+    state,
+    externalId: pr.externalId,
+    headBranch: pr.headBranch,
+    baseBranch: pr.baseBranch
+  };
+}
+
+function externalStateFromReview(review: PullRequestProviderReviewResult): PullRequestExternalState {
+  const status = `${normalizeReviewStatus(review.reviewStatus)} ${review.reviewSummary}`.toLowerCase();
+  if (status.includes("merged")) {
+    return "merged";
+  }
+  if (status.includes("closed") || status.includes("close")) {
+    return "closed_unmerged";
+  }
+  if (status.includes("conflict")) {
+    return "conflict";
+  }
+  if (status.includes("unknown")) {
+    return "unknown";
+  }
+  return "open";
+}
+
+function persistPullRequestSnapshot(
+  context: DbContext,
+  input: {
+    pr: PullRequestRecord;
+    snapshot: PullRequestProviderSnapshot;
+    actor: string;
+    eventType: string;
+    eventSummary: string;
+  }
+): PullRequestRecord {
+  return withTransaction(context, () => {
+    const status = statusFromExternalSnapshot(input.pr, input.snapshot);
+    const updated = updatePullRequest(context, {
+      prId: input.pr.id,
+      expectedStateVersion: input.pr.stateVersion,
+      status,
+      externalId: input.snapshot.externalId,
+      url: input.snapshot.url,
+      headBranch: input.snapshot.headBranch,
+      baseBranch: input.snapshot.baseBranch,
+      headSha: input.snapshot.headSha,
+      baseSha: input.snapshot.baseSha,
+      reviewStatus: input.snapshot.reviewStatus,
+      reviewSummary: input.snapshot.reviewSummary,
+      validationRunId: input.snapshot.validationRunId,
+      mergedAt: input.snapshot.mergedAt
+    });
+    invalidateStaleMergeApproval(context, updated, input.actor);
+    return updated;
+  });
+}
+
+function persistPrRecoveryObservation(
+  context: DbContext,
+  input: {
+    pr: PullRequestRecord;
+    snapshot: PullRequestProviderSnapshot;
+    operationId: string;
+    actor: string;
+    retryAllowed?: boolean;
+  }
+) {
+  const beforeApproval = getPendingOrApprovedMergeApproval(context, input.pr.id);
+  const updated = input.snapshot.state === "merged"
+    ? reconcileMergedPullRequest(context, {
+        task: requireTaskForTask(context, input.pr.taskId),
+        project: requireProjectForTask(context, requireTaskForTask(context, input.pr.taskId)),
+        pr: input.pr,
+        operationId: input.operationId,
+        mergedAt: input.snapshot.mergedAt
+      })
+    : persistPullRequestSnapshot(context, {
+        pr: input.pr,
+        snapshot: input.snapshot,
+        actor: input.actor,
+        eventType: "pr.reconciled",
+        eventSummary: `PR/MR reconciled: ${input.pr.id}`
+      });
+  const afterApproval = getPendingOrApprovedMergeApproval(context, input.pr.id);
+  const approvalInvalidated = Boolean(beforeApproval && (!afterApproval || beforeApproval.id !== afterApproval.id || !afterApproval.approvalValid));
+  const decision = decidePullRequestRecovery({
+    pullRequest: updated,
+    operationId: input.operationId,
+    externalState: input.snapshot.state,
+    observedSummary: `PR/MR ${input.pr.id} observed ${input.snapshot.state}`,
+    approvalInvalidated,
+    retryAllowed: input.retryAllowed
+  });
+  withTransaction(context, () => {
+      updateOperation(context, {
+        operationId: input.operationId,
+        status: decision.kind === "unknown" || decision.kind === "operator_attention" ? "unknown" : "reconciled",
+        failureCode: input.snapshot.state === "conflict" ? "conflict" : undefined,
+        lastObservedState: {
+          decision: decision.kind,
+          reasonCode: decision.reasonCode,
+        observedSummary: decision.observedSummary,
+        nextAction: decision.nextAction,
+        externalState: input.snapshot.state
+      }
+    });
+    appendEvent(context, {
+      type: "pr.recovery_decision",
+      summary: `${decision.reasonCode}: ${input.pr.id}`,
+      projectId: updated.projectId,
+      taskId: updated.taskId,
+      attemptId: updated.attemptId,
+      prId: updated.id,
+      operationId: input.operationId,
+      severity: decision.operatorAttentionRequired ? "warn" : "debug",
+      payload: narrowPrRecoveryPayload(decision.kind, decision.reasonCode, decision.observedSummary, decision.nextAction)
+    });
+  });
+  return { pullRequest: updated, decision };
+}
+
+function statusFromExternalSnapshot(pr: PullRequestRecord, snapshot: PullRequestProviderSnapshot): string {
+  if (snapshot.state === "merged") {
+    return "merged";
+  }
+  if (snapshot.state === "closed_unmerged") {
+    return "closed";
+  }
+  return pr.status;
+}
+
+function reconcileMergedPullRequest(
+  context: DbContext,
+  input: { task: TaskRecord; project: ProjectRecord; pr: PullRequestRecord; operationId: string; mergedAt?: string }
+): PullRequestRecord {
+  return withTransaction(context, () => {
+    const latest = requirePullRequestForTask(context, input.task.id, input.pr.id);
+    const persisted = latest.status === "merged"
+      ? latest
+      : updatePullRequest(context, {
+          prId: latest.id,
+          expectedStateVersion: latest.stateVersion,
+          status: "merged",
+          mergedAt: input.mergedAt ?? new Date().toISOString(),
+          mergeStrategy: "squash"
+        });
+    updateOperation(context, {
+      operationId: input.operationId,
+      status: "reconciled",
+      externalId: persisted.externalId,
+      lastObservedState: { externalState: "merged", prId: persisted.id }
+    });
+    if (input.task.status !== "completed") {
+      updateTaskStatus(context, input.task.id, input.task.stateVersion, "completed");
+    }
+    appendEvent(context, {
+      type: "pr.merge_reconciled",
+      summary: `PR/MR merge reconciled: ${persisted.id}`,
+      projectId: input.project.id,
+      taskId: input.task.id,
+      attemptId: persisted.attemptId,
+      prId: persisted.id,
+      operationId: input.operationId,
+      payload: { externalState: "merged" }
+    });
+    return persisted;
+  });
+}
+
+function invalidateStaleMergeApproval(context: DbContext, pr: PullRequestRecord, actor: string): void {
+  const existing = getPendingOrApprovedMergeApproval(context, pr.id);
+  if (!existing || isSameMergeApprovalSnapshot(pr, existing)) {
+    return;
+  }
+  // snapshot 一旦变化，旧 approval 不能被复用；这里由 Core 统一失效，避免 merge tool 看到过期许可。
+  updateHumanRequest(context, {
+    humanRequestId: existing.id,
+    expectedStateVersion: existing.stateVersion,
+    status: "rejected",
+    approvedBy: actor,
+    approvedAt: new Date().toISOString(),
+    approvalSnapshot: {
+      headSha: existing.approvalPrHeadSha,
+      baseSha: existing.approvalPrBaseSha,
+      validationRunId: existing.approvalValidationRunId,
+      mergeStrategy: existing.approvalMergeStrategy,
+      valid: false
+    }
+  });
+  appendEvent(context, {
+    type: "pr.merge_approval_invalidated",
+    summary: `merge approval invalidated: ${existing.id}`,
+    projectId: pr.projectId,
+    taskId: pr.taskId,
+    attemptId: pr.attemptId,
+    prId: pr.id,
+    humanRequestId: existing.id,
+    severity: "info",
+    payload: {
+      reason: "pr-snapshot-changed",
+      headSha: pr.headSha,
+      baseSha: pr.baseSha,
+      validationRunId: pr.validationRunId,
+      mergeStrategy: pr.mergeStrategy ?? "squash"
+    }
+  });
+}
+
+function pullRequestConflictsWithIntent(
+  pullRequest: PullRequestProviderCreateResult,
+  intent: { headBranch: string; baseBranch: string }
+): boolean {
+  return Boolean(
+    (pullRequest.headBranch && pullRequest.headBranch !== intent.headBranch) ||
+      (pullRequest.baseBranch && pullRequest.baseBranch !== intent.baseBranch)
+  );
+}
+
+function getOperationRef(context: DbContext, operationId: string) {
+  const operation = getOperationById(context, operationId);
+  if (!operation) {
+    throw new PullRequestProviderError(`operation not found: ${operationId}`);
+  }
+  return operation;
+}
+
+function classifyProviderFailure(error: unknown): string {
+  const message = error instanceof Error ? `${error.name} ${error.message}`.toLowerCase() : String(error).toLowerCase();
+  if (message.includes("auth") || message.includes("permission") || message.includes("credential")) {
+    return "auth_missing";
+  }
+  if (message.includes("rate limit") || message.includes("rate_limited") || message.includes("too many requests")) {
+    return "rate_limited";
+  }
+  if (message.includes("timeout") || message.includes("timed out")) {
+    return "timeout";
+  }
+  if (message.includes("conflict")) {
+    return "conflict";
+  }
+  if (message.includes("parse") || message.includes("malformed") || message.includes("无法解析")) {
+    return "malformed_output";
+  }
+  return "unknown";
+}
+
+function sanitizedSnapshotPayload(snapshot: PullRequestProviderSnapshot): Record<string, unknown> {
+  return {
+    state: snapshot.state,
+    reviewStatus: snapshot.reviewStatus,
+    headSha: snapshot.headSha,
+    baseSha: snapshot.baseSha,
+    validationRunId: snapshot.validationRunId,
+    mergeable: snapshot.mergeable,
+    url: snapshot.url
+  };
+}
+
+function narrowPrRecoveryPayload(
+  decision: string,
+  reasonCode: string,
+  observedSummary: string,
+  nextAction: string
+): Record<string, unknown> {
+  return { decision, reasonCode, observedSummary, nextAction };
 }
 
 function requireTaskForTask(context: DbContext, taskId: string): TaskRecord {
@@ -974,6 +1378,7 @@ function isSameMergeApprovalSnapshot(
 ): boolean {
   return Boolean(
     approval.approvalValid &&
+      (pr.reviewStatus === "clean" || pr.reviewStatus === "approved") &&
       approval.approvalPrHeadSha &&
       approval.approvalPrBaseSha &&
       approval.approvalValidationRunId &&
@@ -1075,13 +1480,14 @@ function runProviderSideEffect<T>(
   try {
     return fn();
   } catch (error) {
+    const failureKind = classifyProviderFailure(error);
     updateOperation(context, {
       operationId,
       status: failureStatus,
-      failureCode: error instanceof Error ? error.name : "provider_failure",
+      failureCode: failureKind,
       lastObservedState: {
         phase: "provider-side-effect-failed",
-        message: error instanceof Error ? error.message : String(error)
+        failureKind
       }
     });
     throw error;
@@ -1231,7 +1637,7 @@ function parseReviewOutput(output: string, pr: PullRequestRecord): PullRequestPr
       "unknown";
     const summary = stringValue(value.summary) ?? stringValue(value.title) ?? stringValue(value.description) ?? "review inspected";
     return {
-      reviewStatus,
+      reviewStatus: normalizeReviewStatus(reviewStatus),
       reviewSummary: summary,
       headSha: stringValue(value.headRefOid) ?? stringValue(value.sha) ?? pr.headSha,
       baseSha: stringValue(value.baseRefOid) ?? pr.baseSha,
@@ -1259,6 +1665,29 @@ function stringValue(value: unknown): string | undefined {
 
 function booleanValue(value: unknown): boolean | undefined {
   return typeof value === "boolean" ? value : undefined;
+}
+
+function normalizeReviewStatus(status: string | undefined): string {
+  const value = (status ?? "unknown").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if (value === "approved" || value === "clean" || value === "mergeable" || value === "can_be_merged") {
+    return "approved";
+  }
+  if (value === "changes_requested" || value === "blocked" || value === "blocking" || value === "cannot_be_merged") {
+    return "changes_requested";
+  }
+  if (value === "review_required" || value === "required" || value === "pending" || value === "requested") {
+    return "review_required";
+  }
+  if (value === "merged") {
+    return "merged";
+  }
+  if (value === "closed") {
+    return "closed";
+  }
+  if (value === "conflict" || value === "dirty" || value === "has_conflicts") {
+    return "conflict";
+  }
+  return value || "unknown";
 }
 
 function runCommand(command: string, args: string[], options: { cwd: string; input?: string; timeoutMs: number }): string {

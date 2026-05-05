@@ -9,6 +9,7 @@ import {
   type DbContext,
   type LockRecord,
   type OperationRecord,
+  type PullRequestRecord,
   type TaskRecord,
   type WorkspaceRecord,
   type WorkflowRunRecord
@@ -16,7 +17,7 @@ import {
 import type { WorkspaceRecoveryObservation } from "./workspace-manager.js";
 import type { WorkflowStatus } from "./workflow-protocol-adapter.js";
 
-export type RecoveryResourceKind = "operation" | "workflow_run" | "agent_session" | "task_gate" | "workspace" | "lock";
+export type RecoveryResourceKind = "operation" | "workflow_run" | "agent_session" | "task_gate" | "workspace" | "lock" | "pull_request";
 
 export type ObservedExternalState = "absent" | "matches-intent" | "conflicts-with-intent" | "unclear";
 
@@ -100,6 +101,16 @@ export type LockRecoveryObservation = {
   now: Date;
 };
 
+export type PullRequestRecoveryObservation = {
+  pullRequest: PullRequestRecord;
+  operationId?: string;
+  externalState: "open" | "closed_unmerged" | "merged" | "unknown" | "conflict";
+  observedSummary: string;
+  approvalInvalidated?: boolean;
+  retryAllowed?: boolean;
+  failureKind?: string;
+};
+
 export function decideOperationRecovery(input: OperationRecoveryObservation): RecoveryDecision {
   const operation = input.operation;
   const base = decisionBase("operation", operation.id, operation, input.observedSummary);
@@ -176,7 +187,7 @@ export function decideWorkflowRecovery(input: WorkflowRecoveryObservation): Reco
     projectId: run.projectId,
     taskId: run.taskId,
     attemptId: run.attemptId
-  }, input.error ? sanitizedWorkflowErrorSummary(input.error) : input.status?.summary ?? `workflow status observed: ${run.id}`);
+  }, input.error ? sanitizedWorkflowErrorSummary(input.error) : sanitizedWorkflowStatusSummary(input.status?.summary, run.id));
 
   if (input.error) {
     if (input.error.message.includes("runId mismatch")) {
@@ -345,11 +356,21 @@ export function decideLockRecovery(input: LockRecoveryObservation): RecoveryDeci
       artifactRefs: workspaceObservation?.artifactRefs ?? []
     };
   }
-  if (lock.resourceKind !== "workspace" || !workspaceObservation || !workspaceObservation.safeToReleaseLock) {
+  if (lock.resourceKind === "workspace" && (!workspaceObservation || !workspaceObservation.safeToReleaseLock)) {
     return {
       ...base,
       kind: "operator_attention",
       reasonCode: "expired-lock-resource-unsafe",
+      nextAction: "operator_review",
+      operatorAttentionRequired: true,
+      artifactRefs: workspaceObservation?.artifactRefs ?? []
+    };
+  }
+  if (lock.resourceKind !== "workspace" && lock.resourceKind !== "pr-merge") {
+    return {
+      ...base,
+      kind: "operator_attention",
+      reasonCode: "expired-lock-resource-unsupported",
       nextAction: "operator_review",
       operatorAttentionRequired: true,
       artifactRefs: workspaceObservation?.artifactRefs ?? []
@@ -361,8 +382,68 @@ export function decideLockRecovery(input: LockRecoveryObservation): RecoveryDeci
     kind: "reconciled",
     reasonCode: "expired-lock-safe-to-release",
     nextAction: "release_expired_lock",
-    artifactRefs: workspaceObservation.artifactRefs
+    artifactRefs: workspaceObservation?.artifactRefs ?? []
   };
+}
+
+export function decidePullRequestRecovery(input: PullRequestRecoveryObservation): RecoveryDecision {
+  const pr = input.pullRequest;
+  const base = decisionBase("pull_request", pr.id, {
+    id: input.operationId,
+    projectId: pr.projectId,
+    taskId: pr.taskId,
+    attemptId: pr.attemptId
+  }, input.observedSummary);
+
+  if (input.failureKind === "auth_missing") {
+    return {
+      ...base,
+      kind: "operator_attention",
+      reasonCode: "pr-provider-auth-missing",
+      nextAction: "operator_review",
+      operatorAttentionRequired: true
+    };
+  }
+  if ((input.failureKind === "timeout" || input.failureKind === "rate_limited") && input.retryAllowed) {
+    return { ...base, kind: "retry", reasonCode: `pr-provider-${input.failureKind}`, nextAction: "retry_later" };
+  }
+  if (input.failureKind) {
+    return {
+      ...base,
+      kind: "operator_attention",
+      reasonCode: `pr-provider-${input.failureKind}`,
+      nextAction: "operator_review",
+      operatorAttentionRequired: true
+    };
+  }
+  if (input.externalState === "merged") {
+    return { ...base, kind: "reconciled", reasonCode: "pr-external-merged", nextAction: "mark_reconciled" };
+  }
+  if (input.externalState === "closed_unmerged") {
+    return {
+      ...base,
+      kind: "operator_attention",
+      reasonCode: "pr-closed-unmerged",
+      nextAction: "operator_review",
+      operatorAttentionRequired: true
+    };
+  }
+  if (input.externalState === "conflict") {
+    return {
+      ...base,
+      kind: "operator_attention",
+      reasonCode: "pr-merge-conflict",
+      nextAction: "operator_review",
+      operatorAttentionRequired: true
+    };
+  }
+  if (input.externalState === "unknown") {
+    return { ...base, kind: "unknown", reasonCode: "pr-external-unknown", nextAction: "inspect_again" };
+  }
+  if (input.approvalInvalidated) {
+    return { ...base, kind: "reconciled", reasonCode: "pr-approval-invalidated", nextAction: "mark_reconciled" };
+  }
+  return { ...base, kind: "no_op", reasonCode: "pr-external-open-consistent", nextAction: "none" };
 }
 
 export function persistRecoveryDecision(
@@ -422,6 +503,7 @@ export function persistRecoveryDecision(
       workspaceId: decision.resourceKind === "workspace" ? decision.resourceId : undefined,
       workflowRunId: decision.resourceKind === "workflow_run" ? decision.resourceId : undefined,
       agentSessionId: decision.resourceKind === "agent_session" ? decision.resourceId : undefined,
+      prId: decision.resourceKind === "pull_request" ? decision.resourceId : undefined,
       severity: options.severity ?? (decision.operatorAttentionRequired ? "warn" : "info"),
       payload: recoveryEventPayload(decision, options.tickId)
     });
@@ -467,10 +549,10 @@ function recoveryEventPayload(decision: RecoveryDecision, tickId: string): Recor
     decision: decision.kind,
     reasonCode: decision.reasonCode,
     observedSummary: decision.observedSummary,
-    nextAction: decision.nextAction,
-    retryDueAt: decision.retryDueAt,
-    operatorAttentionRequired: decision.operatorAttentionRequired === true,
-    artifactRefs: decision.artifactRefs ?? []
+      nextAction: decision.nextAction,
+      retryDueAt: decision.retryDueAt,
+      operatorAttentionRequired: decision.operatorAttentionRequired === true,
+      artifactRefs: decision.artifactRefs ?? []
   };
 }
 
@@ -487,4 +569,12 @@ function sanitizedWorkflowErrorSummary(error: Error): string {
 function sanitizedErrorSummary(error: Error, fallback: string): string {
   const name = error.name && error.name !== "Error" ? error.name : undefined;
   return name ? `${fallback}: ${name}` : fallback;
+}
+
+function sanitizedWorkflowStatusSummary(summary: string | undefined, runId: string): string {
+  if (!summary) {
+    return `workflow status observed: ${runId}`;
+  }
+  // workflow/provider 的 summary 可能来自外部输出；event 只记录短摘要，避免 raw stdout/stderr 进入恢复事件。
+  return summary.length > 160 ? `${summary.slice(0, 157)}...` : summary;
 }

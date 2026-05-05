@@ -156,11 +156,11 @@ P2 只预留接口和规划，不进入 V1 完成标准：
 
 ### 当前进度
 
-- 当前阶段：`Iteration 12: P1 / P2 Hardening` 已完成第三个切片 `workspace/lock/fencing reconciliation`。
-- 当前 OpenSpec change：`harden-workspace-lock-fencing-reconciliation` 已完成实现、验证和独立 review；归档后位置为 `openspec/changes/archive/2026-05-05-harden-workspace-lock-fencing-reconciliation`。
-- 当前正式规格：归档时已同步到 `openspec/specs/workspace-lock-fencing-reconciliation/spec.md`、`openspec/specs/workspace-manager/spec.md`、`openspec/specs/daemon-recovery-matrix/spec.md`、`openspec/specs/daemon-runtime/spec.md`、`openspec/specs/core-data-model/spec.md`、`openspec/specs/coordinator-surface/spec.md`。
+- 当前阶段：`Iteration 12: P1 / P2 Hardening` 已完成第四个切片 `PR/MR and merge reconciliation`。
+- 当前 OpenSpec change：`harden-pr-mr-merge-reconciliation` 已完成实现、验证和独立 review；归档后位置为 `openspec/changes/archive/2026-05-05-harden-pr-mr-merge-reconciliation`。
+- 当前正式规格：归档时已同步到 `openspec/specs/pr-mr-merge-reconciliation/spec.md`、`openspec/specs/pr-mr-provider/spec.md`、`openspec/specs/daemon-recovery-matrix/spec.md`、`openspec/specs/coordinator-surface/spec.md`。
 - 下一阶段：继续 `Iteration 12: P1 / P2 Hardening`。
-- 下一阶段重点：进入 `Slice 12.4: PR/MR and merge reconciliation`。workspace/lock/fencing recovery 已具备有限 inspect-before-release 与 blocked workspace gate，后续应继续保持 `Coordinator Core` 作为唯一状态机和恢复策略入口，重点补 PR/MR inspect/create/update/merge、approval snapshot invalidation、merge race/conflict 的恢复矩阵。
+- 下一阶段重点：进入 `Slice 12.5: second real provider/platform`。PR/MR 与 merge recovery 已具备有限 external fact inspect、Core-owned PR/MR recovery decision、approval snapshot invalidation、merge race/conflict 分类、provider failure classification、`pr-merge` lock fencing recovery 和 surface visibility 收窄；后续应在不放宽 operation/idempotency、inspect-before-create、merge approval、artifact-first 和 provider boundary 的前提下补齐第二套真实 provider / platform。
 
 ### Iteration 12 后续切片顺序
 

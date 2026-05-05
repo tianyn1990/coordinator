@@ -54,6 +54,7 @@ export {
   createPullRequestRuntime,
   inspectPullRequestReviewRuntime,
   mergeAfterApprovalRuntime,
+  reconcilePullRequestRuntime,
   rejectMergeRuntime,
   requestMergeApprovalRuntime,
   updatePullRequestRuntime
@@ -126,11 +127,13 @@ export type {
   PullRequestProviderKind,
   PullRequestProviderMergeInput,
   PullRequestProviderMergeResult,
+  PullRequestProviderSnapshot,
   PullRequestProviderReviewInput,
   PullRequestProviderReviewResult,
   PullRequestProviderRunner,
   PullRequestProviderUpdateInput,
   PullRequestProviderUpdateResult,
+  ReconcilePullRequestRuntimeInput,
   RequestMergeApprovalRuntimeInput,
   UpdatePullRequestRuntimeInput
 } from "./pr-mr-provider.js";

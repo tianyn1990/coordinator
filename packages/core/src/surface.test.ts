@@ -160,6 +160,29 @@ describe("Coordinator Surface", () => {
     expect(surface.json.available_tools.map((tool) => tool.name)).toEqual(["inspect_review", "update_pr", "ask_human"]);
   });
 
+  it("PR/MR review approved surface 暴露 request_merge_approval", () => {
+    const surface = buildCoordinatorSurface(
+      baseSnapshot({
+        surfaceKind: "review",
+        pullRequest: {
+          id: "pr-1",
+          providerKind: "github",
+          status: "open",
+          headBranch: "feature",
+          baseBranch: "main",
+          reviewStatus: "approved"
+        }
+      })
+    );
+
+    expect(surface.json.available_tools.map((tool) => tool.name)).toEqual([
+      "inspect_review",
+      "update_pr",
+      "request_merge_approval",
+      "ask_human"
+    ]);
+  });
+
   it("merge_waiting surface 未审批时暴露 request approval 而不暴露 merge", () => {
     const surface = buildCoordinatorSurface(
       baseSnapshot({
@@ -317,6 +340,27 @@ describe("Coordinator Surface", () => {
     expect(surface.json.available_tools.map((tool) => tool.name)).not.toContain("create_pr");
     expect(surface.json.available_tools.map((tool) => tool.name)).not.toContain("start_workflow_run");
     expect(surface.json.denied_actions).toContain("workspace recovery 已进入 operator review；不要启动 workflow 或继续执行 workspace 副作用。");
+  });
+
+  it("PR/MR recovery 不新增 agent-facing recovery tool，也不暴露 provider raw output", () => {
+    const surface = buildCoordinatorSurface(
+      baseSnapshot({
+        surfaceKind: "review",
+        pullRequest: {
+          id: "pr-1",
+          providerKind: "github",
+          status: "open",
+          headBranch: "feature",
+          baseBranch: "main",
+          reviewSummary: "provider raw output should stay out"
+        }
+      })
+    );
+
+    expect(surface.json.available_tools.map((tool) => tool.name)).not.toEqual(
+      expect.arrayContaining(["recover_pr", "reconcile_merge", "force_merge"])
+    );
+    expect(surface.markdown).not.toContain("provider raw output");
   });
 
 

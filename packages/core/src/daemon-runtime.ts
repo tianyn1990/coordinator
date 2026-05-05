@@ -7,6 +7,7 @@ import {
   createArtifact,
   createOperation,
   getActiveAgentSessionByTask,
+  getLatestPullRequestByTask,
   getActiveWorkflowRunByAttempt,
   getHumanRequest,
   getLock,
@@ -63,6 +64,7 @@ import {
   type RecoveryDecision
 } from "./recovery-decision.js";
 import { inspectWorkspaceRecovery, type WorkspaceGitRunner } from "./workspace-manager.js";
+import { reconcilePullRequestRuntime, type PullRequestProvider } from "./pr-mr-provider.js";
 
 const DEFAULT_DAEMON_CANDIDATE_LIMIT = 10;
 const DEFAULT_RETRY_BUDGET = 3;
@@ -79,6 +81,7 @@ export type DaemonRuntimeInput = {
   providerId?: string;
   workflowInspectRunner?: WorkflowProtocolRunner;
   workspaceGitRunner?: WorkspaceGitRunner;
+  pullRequestProvider?: PullRequestProvider;
 };
 
 export type DaemonTickResult = {
@@ -96,6 +99,7 @@ export type DaemonActionResult = {
     | "agent_tool_skipped"
     | "workspace_inspected"
     | "lock_reconciled"
+    | "pr_reconciled"
     | "retry_blocked"
     | "reconcile_failed";
   taskId?: string;
@@ -327,6 +331,7 @@ export function runDaemonTick(context: DbContext, input: DaemonRuntimeInput = {}
   actions.push(...reconcileActiveOperations(context, tickId, now, input, touchedWorkflowRunIds));
   actions.push(...reconcileWorkspaces(context, tickId, input, touchedTaskIds));
   actions.push(...reconcileExpiredLocks(context, tickId, now, input));
+  actions.push(...reconcilePullRequestOperations(context, tickId, input, touchedTaskIds));
   actions.push(...watchActiveAgentSessions(context, tickId, owner, now));
   actions.push(...reconcileWorkflowRuns(context, tickId, owner, input, touchedWorkflowRunIds, touchedTaskIds));
   actions.push(...wakeAnsweredHumanRequests(context, tickId, owner, now, input, touchedTaskIds));
@@ -391,7 +396,7 @@ function reconcileWorkspaces(
 
 function reconcileExpiredLocks(context: DbContext, tickId: string, now: Date, input: DaemonRuntimeInput): DaemonActionResult[] {
   const locks = listExpiredLocks(context, now, input.candidateLimit ?? 5)
-    .filter((lock) => lock.resourceKind === "workspace" && !isTerminalLockResource(lock.resourceKind, lock.resourceId));
+    .filter((lock) => (lock.resourceKind === "workspace" || lock.resourceKind === "pr-merge") && !isTerminalLockResource(lock.resourceKind, lock.resourceId));
   const actions: DaemonActionResult[] = [];
   for (const lock of locks) {
     const workspaceRecord = lock.resourceKind === "workspace" ? getWorkspace(context, lock.resourceId) : undefined;
@@ -430,9 +435,9 @@ function reconcileExpiredLocks(context: DbContext, tickId: string, now: Date, in
         payload: {
           tickId,
           resourceKind: "lock",
-          resourceId: `${lock.resourceKind}:${lock.resourceId}`,
-          decision: "retry_blocked",
-          reasonCode: currentLock && currentLock.leaseVersion !== lock.leaseVersion ? "lock-lease-changed" : "lock-release-skipped",
+        resourceId: `${lock.resourceKind}:${lock.resourceId}`,
+        decision: "retry_blocked",
+        reasonCode: currentLock && currentLock.leaseVersion !== lock.leaseVersion ? "lock-lease-changed" : "lock-release-skipped",
           observedSummary: errorSummaryFrom(error),
           nextAction: "none",
           operatorAttentionRequired: false,
@@ -452,8 +457,67 @@ function reconcileExpiredLocks(context: DbContext, tickId: string, now: Date, in
   return actions;
 }
 
+function reconcilePullRequestOperations(
+  context: DbContext,
+  tickId: string,
+  input: DaemonRuntimeInput,
+  touchedTaskIds: Set<string>
+): DaemonActionResult[] {
+  if (!input.pullRequestProvider) {
+    return [];
+  }
+  const operations = listOperationsByStatusAndKindPrefix(context, ["running", "failed", "unknown"], "merge", input.candidateLimit ?? 5)
+    .filter((operation) => operation.kind === "merge" && operation.prId && !hasPersistedRecoveryDecision(operation.lastObservedState));
+  const actions: DaemonActionResult[] = [];
+  for (const operation of operations) {
+    const pr = operation.taskId ? getLatestPullRequestByTask(context, operation.taskId) : undefined;
+    if (!pr || pr.id !== operation.prId || !operation.taskId) {
+      continue;
+    }
+    try {
+      const result = reconcilePullRequestRuntime(context, {
+        taskId: operation.taskId,
+        prId: pr.id,
+        operationId: operation.id,
+        actor: "daemon",
+        provider: input.pullRequestProvider,
+        retryAllowed: countTaskRetryEvents(context, operation.taskId) < DEFAULT_RETRY_BACKOFF_MS.length
+      });
+      touchedTaskIds.add(operation.taskId);
+      actions.push({
+        kind: result.decisionKind === "reconciled" ? "pr_reconciled" : "retry_blocked",
+        taskId: operation.taskId,
+        status: result.decisionKind === "operator_attention" ? "failed" : "skipped",
+        summary: `${result.reasonCode}: ${pr.id}`
+      });
+    } catch (error) {
+      appendEvent(context, {
+        type: "daemon.pr_reconcile_failed",
+        summary: `daemon failed to reconcile PR/MR: ${pr.id}`,
+        projectId: pr.projectId,
+        taskId: pr.taskId,
+        attemptId: pr.attemptId,
+        prId: pr.id,
+        operationId: operation.id,
+        severity: "warn",
+        payload: { tickId, error: errorSummaryFrom(error) }
+      });
+      actions.push({
+        kind: "reconcile_failed",
+        taskId: operation.taskId,
+        status: "failed",
+        summary: `PR/MR ${pr.id} reconcile failed`
+      });
+    }
+  }
+  return actions;
+}
+
 function isLockOwnerActive(context: DbContext, resourceKind: string, resourceId: string): boolean {
   if (resourceKind !== "workspace") {
+    if (resourceKind === "pr-merge") {
+      return hasActiveOperationForPullRequest(context, resourceId);
+    }
     return false;
   }
   const workspace = listWorkspacesByStatus(context, ["planned", "creating", "ready", "dirty"], 500).find((item) => item.id === resourceId);
@@ -465,6 +529,17 @@ function isLockOwnerActive(context: DbContext, resourceKind: string, resourceId:
     getActiveWorkflowRunByAttempt(context, workspace.attemptId) ||
     hasActiveOperationForWorkspace(context, workspace.taskId, workspace.attemptId)
   );
+}
+
+function hasActiveOperationForPullRequest(context: DbContext, prId: string): boolean {
+  const row = context.db
+    .prepare(
+      `SELECT 1 FROM operations
+       WHERE pr_id = ? AND status IN ('planned', 'running')
+       LIMIT 1`
+    )
+    .get(prId);
+  return Boolean(row);
 }
 
 function hasActiveOperationForWorkspace(context: DbContext, taskId: string, attemptId: string): boolean {

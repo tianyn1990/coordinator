@@ -659,7 +659,8 @@ function deriveVisibleTools(snapshot: SurfaceSnapshot): SurfaceToolJson[] {
   }
 
   if (hasOpenPullRequest(snapshot)) {
-    if (snapshot.pullRequest?.reviewStatus === "clean" || snapshot.pullRequest?.reviewStatus === "APPROVED") {
+    const reviewStatus = normalizeReviewStatus(snapshot.pullRequest?.reviewStatus);
+    if (reviewStatus === "clean" || reviewStatus === "approved") {
       return [
         inspectTool("inspect_review", "检查 PR/MR review 状态。"),
         tool("update_pr", "更新 PR/MR 标题或正文。"),
@@ -1203,6 +1204,7 @@ function isMergeApprovalSnapshotMatching(
         head_sha: string | null;
         base_sha: string | null;
         validation_run_id: string | null;
+        review_status?: string | null;
       }
     | undefined,
   approval: {
@@ -1212,6 +1214,7 @@ function isMergeApprovalSnapshotMatching(
   }
 ): boolean {
   if (!pr) return false;
+  if (normalizeReviewStatus(pr.review_status) !== "clean" && normalizeReviewStatus(pr.review_status) !== "approved") return false;
   return (
     Boolean(approval.approval_pr_head_sha && pr.head_sha) &&
     Boolean(approval.approval_pr_base_sha && pr.base_sha) &&
@@ -1219,6 +1222,14 @@ function isMergeApprovalSnapshotMatching(
     (!approval.approval_pr_base_sha || !pr.base_sha || approval.approval_pr_base_sha === pr.base_sha) &&
     (!approval.approval_validation_run_id || !pr.validation_run_id || approval.approval_validation_run_id === pr.validation_run_id)
   );
+}
+
+function normalizeReviewStatus(status: string | null | undefined): string {
+  const value = (status ?? "unknown").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if (value === "approved" || value === "clean" || value === "mergeable" || value === "can_be_merged") {
+    return "approved";
+  }
+  return value;
 }
 
 function resolveTaskLocalArtifactRoot(project: ProjectRecord, task: TaskRecord): string {
