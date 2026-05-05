@@ -163,6 +163,17 @@ heartbeat_at
 
 merge 本身是单飞操作。即使 approval 已存在，也必须先 claim PR merge lock，再执行 merge，再 reconcile。两个并发 tick 不能同时通过同一 approval 进入 merge。
 
+### 7.1 当前已落地的 Workspace Lock / Fencing 子集
+
+Iteration 12.3 已落地本地 workspace lock 的 recovery hardening：
+
+- expired workspace lock 只能通过 daemon/Core recovery path 释放，且必须先 inspect owner/resource。
+- Core 只在 owner inactive 且 workspace observation 安全时返回 `release_expired_lock`。
+- release 使用 `lockToken + leaseVersion`，并与 recovery event 同 transaction 提交。
+- leaseVersion 已变化、owner active、resource unsafe、非 workspace lock 或缺少 workspace observation 时，不释放 lock，进入 operator attention 或 no-op。
+- stale token 执行 workspace 更新会被 DB fencing 拒绝。
+- recovery event payload 保持窄字段，不包含 lock token、完整 operation 对象、ownership manifest 原文或完整 git output。
+
 ## 8. Reconciliation Invariant Matrix
 
 每类资源应有对账矩阵。
@@ -175,6 +186,14 @@ merge 本身是单飞操作。即使 approval 已存在，也必须先 claim PR 
 | ready | branch mismatch | block and request operator review |
 | creating | path exists valid | mark ready |
 | creating | path exists invalid | fail operation and block |
+
+当前已落地子集：
+
+- active workspace recovery inspect 覆盖 workspace path、repo path、coordinator path、artifact root、git worktree、branch、dirty、ownership manifest、checkpoint artifact。
+- path/realpath/artifact root 风险 fail-fast，避免在不可信路径上继续执行 git 或读取 manifest/checkpoint。
+- `safe` observation 保持 no-op；`missing`、`branch_mismatch`、`dirty_unknown`、`manifest_mismatch`、`path_escape` 等风险进入 operator attention。
+- operator attention 会把 workspace 标记为 `blocked`，并通过 surface gate 阻止 workflow running/handoff、`create_pr`、`start_workflow_run` 等后续副作用窗口。
+- malformed ownership manifest 只产生 `manifest_mismatch` observation，不应中断 tick。
 
 ### 8.2 Workflow Run
 

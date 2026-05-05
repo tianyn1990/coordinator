@@ -7,12 +7,17 @@ import {
   createArtifact,
   createOperation,
   getActiveAgentSessionByTask,
+  getActiveWorkflowRunByAttempt,
   getHumanRequest,
+  getLock,
   getOperationByIdempotencyKey,
   getTask,
+  getWorkspace,
+  listExpiredLocks,
   listOperationsByStatusAndKindPrefix,
   listHumanRequestsByStatus,
   listTasks,
+  listWorkspacesByStatus,
   listWorkflowRunsByStatus,
   updateHumanRequest,
   updateAgentSession,
@@ -47,14 +52,17 @@ import {
 import { inspectAgentSession } from "./agent-provider-runtime.js";
 import {
   decideAgentSessionRecovery,
+  decideLockRecovery,
   decideOperationInspectFailure,
   decideOperationRecovery,
   decideTaskGateRecovery,
+  decideWorkspaceRecovery,
   decideWorkflowRecovery,
   persistRecoveryDecision,
   type ObservedExternalState,
   type RecoveryDecision
 } from "./recovery-decision.js";
+import { inspectWorkspaceRecovery, type WorkspaceGitRunner } from "./workspace-manager.js";
 
 const DEFAULT_DAEMON_CANDIDATE_LIMIT = 10;
 const DEFAULT_RETRY_BUDGET = 3;
@@ -70,6 +78,7 @@ export type DaemonRuntimeInput = {
   provider?: AgentProvider;
   providerId?: string;
   workflowInspectRunner?: WorkflowProtocolRunner;
+  workspaceGitRunner?: WorkspaceGitRunner;
 };
 
 export type DaemonTickResult = {
@@ -85,10 +94,13 @@ export type DaemonActionResult = {
     | "agent_session_started"
     | "agent_tool_executed"
     | "agent_tool_skipped"
+    | "workspace_inspected"
+    | "lock_reconciled"
     | "retry_blocked"
     | "reconcile_failed";
   taskId?: string;
   workflowRunId?: string;
+  workspaceId?: string;
   humanRequestId?: string;
   agentSessionId?: string;
   toolName?: string;
@@ -313,8 +325,10 @@ export function runDaemonTick(context: DbContext, input: DaemonRuntimeInput = {}
   });
 
   actions.push(...reconcileActiveOperations(context, tickId, now, input, touchedWorkflowRunIds));
+  actions.push(...reconcileWorkspaces(context, tickId, input, touchedTaskIds));
+  actions.push(...reconcileExpiredLocks(context, tickId, now, input));
   actions.push(...watchActiveAgentSessions(context, tickId, owner, now));
-  actions.push(...reconcileWorkflowRuns(context, tickId, owner, input, touchedWorkflowRunIds));
+  actions.push(...reconcileWorkflowRuns(context, tickId, owner, input, touchedWorkflowRunIds, touchedTaskIds));
   actions.push(...wakeAnsweredHumanRequests(context, tickId, owner, now, input, touchedTaskIds));
   actions.push(...advanceCandidateTasks(context, tickId, owner, now, input, touchedTaskIds));
 
@@ -339,6 +353,134 @@ export function runDaemonTick(context: DbContext, input: DaemonRuntimeInput = {}
     status: actions.length === 0 ? "idle" : actions.some((action) => action.status === "failed") ? "failed" : "acted",
     actions
   };
+}
+
+function reconcileWorkspaces(
+  context: DbContext,
+  tickId: string,
+  input: DaemonRuntimeInput,
+  touchedTaskIds: Set<string>
+): DaemonActionResult[] {
+  const workspaces = listWorkspacesByStatus(context, ["creating", "ready", "dirty"], input.candidateLimit ?? 5);
+  const actions: DaemonActionResult[] = [];
+  for (const workspace of workspaces) {
+    const observation = inspectWorkspaceRecovery(context, {
+      workspaceId: workspace.id,
+      gitRunner: input.workspaceGitRunner
+    });
+    const decision = decideWorkspaceRecovery({ workspace, observation });
+    if (decision.kind === "no_op") {
+      continue;
+    }
+    persistRecoveryDecision(context, decision, {
+      tickId,
+      severity: decision.operatorAttentionRequired ? "warn" : "debug",
+      workspaceStatus: decision.operatorAttentionRequired ? { workspace, status: "blocked" } : undefined
+    });
+    touchedTaskIds.add(workspace.taskId);
+    actions.push({
+      kind: "workspace_inspected",
+      taskId: workspace.taskId,
+      workspaceId: workspace.id,
+      status: "skipped",
+      summary: decision.observedSummary
+    });
+  }
+  return actions;
+}
+
+function reconcileExpiredLocks(context: DbContext, tickId: string, now: Date, input: DaemonRuntimeInput): DaemonActionResult[] {
+  const locks = listExpiredLocks(context, now, input.candidateLimit ?? 5)
+    .filter((lock) => lock.resourceKind === "workspace" && !isTerminalLockResource(lock.resourceKind, lock.resourceId));
+  const actions: DaemonActionResult[] = [];
+  for (const lock of locks) {
+    const workspaceRecord = lock.resourceKind === "workspace" ? getWorkspace(context, lock.resourceId) : undefined;
+    const workspaceObservation = workspaceRecord
+      ? inspectWorkspaceRecovery(context, { workspaceId: workspaceRecord.id, gitRunner: input.workspaceGitRunner })
+      : undefined;
+    const decision = decideLockRecovery({
+      lock,
+      workspaceObservation,
+      ownerActive: isLockOwnerActive(context, lock.resourceKind, lock.resourceId),
+      now
+    });
+    let releaseSkipped = false;
+    try {
+      persistRecoveryDecision(context, decision, {
+        tickId,
+        severity: decision.operatorAttentionRequired ? "warn" : "debug",
+        lockRelease: decision.nextAction === "release_expired_lock"
+          ? {
+              resourceKind: lock.resourceKind,
+              resourceId: lock.resourceId,
+              lockToken: lock.lockToken,
+              leaseVersion: lock.leaseVersion
+            }
+          : undefined
+      });
+    } catch (error) {
+      const currentLock = getLock(context, lock.resourceKind, lock.resourceId);
+      appendEvent(context, {
+        type: "daemon.recovery_decision",
+        summary: `expired lock release skipped: ${lock.resourceKind}:${lock.resourceId}`,
+        projectId: workspaceObservation?.projectId,
+        taskId: workspaceObservation?.taskId,
+        attemptId: workspaceObservation?.attemptId,
+        severity: "debug",
+        payload: {
+          tickId,
+          resourceKind: "lock",
+          resourceId: `${lock.resourceKind}:${lock.resourceId}`,
+          decision: "retry_blocked",
+          reasonCode: currentLock && currentLock.leaseVersion !== lock.leaseVersion ? "lock-lease-changed" : "lock-release-skipped",
+          observedSummary: errorSummaryFrom(error),
+          nextAction: "none",
+          operatorAttentionRequired: false,
+          artifactRefs: workspaceObservation?.artifactRefs ?? []
+        }
+      });
+      releaseSkipped = true;
+    }
+    actions.push({
+      kind: decision.nextAction === "release_expired_lock" && !releaseSkipped ? "lock_reconciled" : "retry_blocked",
+      taskId: workspaceObservation?.taskId,
+      workspaceId: lock.resourceKind === "workspace" ? lock.resourceId : undefined,
+      status: "skipped",
+      summary: decision.observedSummary
+    });
+  }
+  return actions;
+}
+
+function isLockOwnerActive(context: DbContext, resourceKind: string, resourceId: string): boolean {
+  if (resourceKind !== "workspace") {
+    return false;
+  }
+  const workspace = listWorkspacesByStatus(context, ["planned", "creating", "ready", "dirty"], 500).find((item) => item.id === resourceId);
+  if (!workspace) {
+    return false;
+  }
+  return Boolean(
+    getActiveAgentSessionByTask(context, workspace.taskId, "outer") ||
+    getActiveWorkflowRunByAttempt(context, workspace.attemptId) ||
+    hasActiveOperationForWorkspace(context, workspace.taskId, workspace.attemptId)
+  );
+}
+
+function hasActiveOperationForWorkspace(context: DbContext, taskId: string, attemptId: string): boolean {
+  const row = context.db
+    .prepare(
+      `SELECT 1 FROM operations
+       WHERE status IN ('planned', 'running', 'unknown')
+         AND (task_id = ? OR attempt_id = ?)
+       LIMIT 1`
+    )
+    .get(taskId, attemptId);
+  return Boolean(row);
+}
+
+function isTerminalLockResource(resourceKind: string, resourceId: string): boolean {
+  return resourceKind.length === 0 || resourceId.length === 0;
 }
 
 export function parseAgentToolRequest(finalResponse: string): ParsedAgentToolRequest | undefined {
@@ -387,7 +529,8 @@ function reconcileWorkflowRuns(
   tickId: string,
   owner: string,
   input: DaemonRuntimeInput,
-  skippedWorkflowRunIds: Set<string>
+  skippedWorkflowRunIds: Set<string>,
+  touchedTaskIds: Set<string>
 ): DaemonActionResult[] {
   const runs = listWorkflowRunsByStatus(context, ["starting", "running", "blocked", "unknown"], input.candidateLimit ?? 5);
   const actions: DaemonActionResult[] = [];
@@ -396,7 +539,11 @@ function reconcileWorkflowRuns(
       // operation replay 已在本 tick 触达该 workflow run，避免重复 inspect 和重复事件。
       continue;
     }
-    actions.push(reconcileWorkflowRun(context, run, tickId, owner, input.workflowInspectRunner));
+    const action = reconcileWorkflowRun(context, run, tickId, owner, input.workflowInspectRunner);
+    if (action.status === "failed") {
+      touchedTaskIds.add(run.taskId);
+    }
+    actions.push(action);
   }
   return actions;
 }

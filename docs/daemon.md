@@ -52,7 +52,18 @@ Iteration 12.2 已补齐 daemon/Core recovery matrix 的第一层实现：
 - paused/canceled/waiting task 只允许 safe inspect 和 recovery event，不启动 Coordinator Agent 或外部 mutation。
 - recovery decision 以窄 payload 写入 append-only event，供 operator timeline 和审计排查使用。
 
-当前实现仍是 P1 hardening 子集，不代表 workspace/lock/fencing、PR/MR merge、remote worker 的完整恢复矩阵已经完成。
+Iteration 12.3 已继续补齐 workspace/lock/fencing recovery 子集：
+
+- daemon 扫描 active workspace 时只做 read-only inspect，并将 workspace observation 交给 Core recovery service。
+- workspace path、repo path、coordinator path、artifact root 风险继续 fail-fast；path 风险后不继续 git、ownership manifest 或 checkpoint 检查。
+- branch mismatch、dirty unknown、manifest mismatch、path escape、workspace missing 等风险由 Core 判定为 operator attention，daemon 只负责写 recovery event 和执行 Core 允许的 workspace status 更新。
+- malformed ownership manifest 收敛为 `manifest_mismatch`，不能中断整个 daemon tick。
+- expired lock 释放必须先 inspect owner/resource，再由 Core 决定是否 `release_expired_lock`；daemon 不静默接管 lock。
+- workspace lock release 必须同时校验 lock token 和 leaseVersion，避免 stale owner 在 lease 已变化后继续写入或误报 recovery 成功。
+- owner active 判断至少包含 active outer agent session、active workflow run 和 active workspace operation；任一仍活跃时进入 operator attention。
+- workspace recovery 进入 operator attention 后会把 workspace 标记为 `blocked`，并阻止同一 tick 继续唤醒 Coordinator Agent 或执行后续副作用。
+
+当前实现仍是 P1 hardening 子集，不代表 PR/MR merge、remote worker 的完整恢复矩阵已经完成。
 
 ## 2. Daemon 职责
 

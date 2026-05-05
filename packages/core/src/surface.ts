@@ -697,6 +697,13 @@ function deriveVisibleTools(snapshot: SurfaceSnapshot): SurfaceToolJson[] {
     ];
   }
 
+  if (snapshot.workspace.status === "blocked") {
+    return [
+      inspectTool("inspect_workflow_run", "查看 workflow run 状态。"),
+      tool("ask_human", "workspace 需要 operator review 时向人类提问。")
+    ];
+  }
+
   if (snapshot.workflowRuns.some((run) => run.status === "running" || run.status === "blocked" || run.status === "planned")) {
     return [
       tool("inspect_workflow_run", "查看 workflow run 状态。"),
@@ -758,6 +765,9 @@ function deriveDeniedActions(snapshot: SurfaceSnapshot): string[] {
   if (snapshot.task.status === "canceled") {
     denied.push("任务已被 operator cancel；不要继续推进 task、workspace、workflow 或 PR/MR。");
   }
+  if (snapshot.workspace?.status === "blocked") {
+    denied.push("workspace recovery 已进入 operator review；不要启动 workflow 或继续执行 workspace 副作用。");
+  }
   if (!snapshot.pullRequest || snapshot.pullRequest.status !== "open") {
     denied.push("不要在没有有效 PR/MR 时执行 merge。");
   }
@@ -782,6 +792,9 @@ function deriveRecommendedNextStep(snapshot: SurfaceSnapshot): string {
   }
   if (!snapshot.workspace) {
     return "先创建 attempt 和 workspace，确保执行环境明确。";
+  }
+  if (snapshot.workspace.status === "blocked") {
+    return "workspace recovery 已阻塞；等待 operator review 或通过 human request 明确处理方式。";
   }
   if (snapshot.workflowRuns.some((run) => run.status === "running" || run.status === "blocked")) {
     return "检查 workflow run，并根据 handoff 或 blocked 原因继续。";
@@ -1006,7 +1019,7 @@ function findActiveWorkspaceForAttempt(
   return context.db
     .prepare(
       `SELECT id, status, workspace_path, branch, base_branch FROM workspaces
-       WHERE attempt_id = ? AND status IN ('planned', 'creating', 'ready', 'dirty')
+       WHERE attempt_id = ? AND status IN ('planned', 'creating', 'ready', 'dirty', 'blocked')
        ORDER BY created_at ASC, id ASC
        LIMIT 1`
     )

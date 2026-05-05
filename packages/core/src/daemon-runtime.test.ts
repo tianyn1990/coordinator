@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   appendEvent,
+  acquireLock,
   createAgentSession,
   createAttempt,
   createExecutionPlan,
@@ -12,6 +13,7 @@ import {
   createProject,
   createTask,
   createWorkspace,
+  getLock,
   getOperationByIdempotencyKey,
   listTaskEvents,
   runMigrations,
@@ -28,6 +30,117 @@ import {
   type AgentProviderRunInput,
   type WorkflowProtocolRunner
 } from "./index.js";
+import { persistRecoveryDecision, type RecoveryDecision } from "./recovery-decision.js";
+
+function createReadyWorkspaceFixture(databasePath: string, suffix: string, options: { dirty?: boolean; currentBranch?: string } = {}) {
+  const workspaceRoot = mkdtempSync(join(tmpdir(), `coordinator-daemon-workspaces-${suffix}-`));
+  return withDatabase(databasePath, (context) => {
+    const project = createProject(context, {
+      id: `project-${suffix}`,
+      name: "daemon",
+      workspaceRoot,
+      defaultBranch: "main",
+      workflowLauncher: "workflow",
+      outerAgentDefaultProvider: "fake"
+    });
+    const task = createTask(context, {
+      id: `task-${suffix}`,
+      projectId: project.id,
+      title: "daemon task"
+    });
+    const attempt = createAttempt(context, { id: `attempt-${suffix}`, projectId: project.id, taskId: task.id });
+    const workspacePath = join(workspaceRoot, project.id, task.id, attempt.id);
+    const repoPath = join(workspacePath, "repo");
+    const coordinatorPath = join(workspacePath, "coordinator");
+    const artifactRoot = join(coordinatorPath, "artifacts");
+    mkdirSync(join(repoPath, ".git"), { recursive: true });
+    mkdirSync(artifactRoot, { recursive: true });
+    const branch = `coordinator/${task.id}/${attempt.id}`;
+    const workspace = createWorkspace(context, {
+      id: `workspace-${suffix}`,
+      projectId: project.id,
+      taskId: task.id,
+      attemptId: attempt.id,
+      status: "ready",
+      workspacePath,
+      repoPath,
+      branch,
+      baseBranch: "main"
+    });
+    writeFileSync(join(coordinatorPath, "ownership.json"), JSON.stringify({
+      projectId: project.id,
+      taskId: task.id,
+      attemptId: attempt.id,
+      workspaceId: workspace.id,
+      branch,
+      baseBranch: "main",
+      owner: "test",
+      lockToken: "redacted-token",
+      createdAt: "2026-05-03T00:00:00.000Z"
+    }));
+    writeFileSync(join(artifactRoot, "checkpoint.md"), "# checkpoint\n");
+    const workspaceGitRunner = (args: string[]) => {
+      if (args[0] === "rev-parse" && args[1] === "--is-inside-work-tree") return "true\n";
+      if (args[0] === "branch") return `${options.currentBranch ?? branch}\n`;
+      if (args[0] === "status") return options.dirty ? " M file.ts\n" : "";
+      return "";
+    };
+    return { projectId: project.id, taskId: task.id, attemptId: attempt.id, workspaceId: workspace.id, workspaceGitRunner };
+  });
+}
+
+function createWorkflowWorkspaceFixture(
+  context: DbContext,
+  fixture: { projectId: string; taskId: string; workspaceRoot: string },
+  workflowRunId: string
+) {
+  const workspacePath = join(fixture.workspaceRoot, fixture.projectId, fixture.taskId, workflowRunId);
+  const repoPath = join(workspacePath, "repo");
+  const coordinatorPath = join(workspacePath, "coordinator");
+  const artifactRoot = join(coordinatorPath, "artifacts");
+  mkdirSync(join(repoPath, ".git"), { recursive: true });
+  mkdirSync(artifactRoot, { recursive: true });
+  createExecutionPlan(context, {
+    projectId: fixture.projectId,
+    taskId: fixture.taskId,
+    status: "active",
+    artifactPath: "execution-plan.md"
+  });
+  const attempt = createAttempt(context, { projectId: fixture.projectId, taskId: fixture.taskId });
+  const branch = `coordinator/${fixture.taskId}/${attempt.id}`;
+  const workspace = createWorkspace(context, {
+    projectId: fixture.projectId,
+    taskId: fixture.taskId,
+    attemptId: attempt.id,
+    status: "ready",
+    workspacePath,
+    repoPath,
+    branch,
+    baseBranch: "main"
+  });
+  writeFileSync(join(coordinatorPath, "ownership.json"), JSON.stringify({
+    projectId: fixture.projectId,
+    taskId: fixture.taskId,
+    attemptId: attempt.id,
+    workspaceId: workspace.id,
+    branch,
+    baseBranch: "main",
+    owner: "test",
+    lockToken: "redacted-token",
+    createdAt: "2026-05-03T00:00:00.000Z"
+  }));
+  writeFileSync(join(artifactRoot, "checkpoint.md"), "# checkpoint\n");
+  return { attempt, workspace, branch };
+}
+
+function createWorkflowWorkspaceGitRunner(expectedBranch: string) {
+  return (args: string[]) => {
+    if (args[0] === "rev-parse" && args[1] === "--is-inside-work-tree") return "true\n";
+    if (args[0] === "branch") return `${expectedBranch}\n`;
+    if (args[0] === "status") return "";
+    return "";
+  };
+}
 
 function createMigratedDatabase(): string {
   const databasePath = join(mkdtempSync(join(tmpdir(), "coordinator-daemon-db-")), "daemon.sqlite");
@@ -288,6 +401,263 @@ describe("daemon runtime", () => {
     expect(JSON.stringify(recovery?.payload)).not.toContain("must-not-leak");
   });
 
+  it("daemon 对安全的 expired workspace lock 先 inspect 再按 leaseVersion 释放", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createReadyWorkspaceFixture(databasePath, "lock-release");
+    const now = new Date("2026-05-03T00:00:02.000Z");
+    let lockToken = "";
+
+    withDatabase(databasePath, (context) => {
+      const lock = acquireLock(context, {
+        resourceKind: "workspace",
+        resourceId: fixture.workspaceId,
+        owner: "old-owner",
+        ttlMs: 1000,
+        now: new Date("2026-05-03T00:00:00.000Z")
+      });
+      lockToken = lock.lockToken;
+    });
+
+    const result = withDatabase(databasePath, (context) => runDaemonTick(context, {
+      now,
+      provider: new FakeAgentProvider("no-op"),
+      workspaceGitRunner: fixture.workspaceGitRunner
+    }));
+
+    expect(result.actions).toContainEqual(expect.objectContaining({ kind: "lock_reconciled", workspaceId: fixture.workspaceId }));
+    const state = withDatabase(databasePath, (context) => ({
+      lock: getLock(context, "workspace", fixture.workspaceId),
+      events: listTaskEvents(context, fixture.taskId)
+    }));
+    expect(state.lock).toBeUndefined();
+    const payloadText = JSON.stringify(state.events);
+    expect(payloadText).toContain("expired-lock-safe-to-release");
+    expect(payloadText).not.toContain(lockToken);
+    expect(payloadText).not.toContain("redacted-token");
+  });
+
+  it("daemon 对 owner active 的 expired workspace lock 不释放", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createReadyWorkspaceFixture(databasePath, "lock-owner-active");
+    const now = new Date("2026-05-03T00:00:02.000Z");
+
+    withDatabase(databasePath, (context) => {
+      acquireLock(context, {
+        resourceKind: "workspace",
+        resourceId: fixture.workspaceId,
+        owner: "old-owner",
+        ttlMs: 1000,
+        now: new Date("2026-05-03T00:00:00.000Z")
+      });
+      createAgentSession(context, {
+        projectId: fixture.projectId,
+        taskId: fixture.taskId,
+        attemptId: fixture.attemptId,
+        providerKind: "fake",
+        role: "outer",
+        status: "running"
+      });
+    });
+
+    withDatabase(databasePath, (context) => runDaemonTick(context, {
+      now,
+      provider: new FakeAgentProvider("no-op"),
+      workspaceGitRunner: fixture.workspaceGitRunner
+    }));
+
+    const state = withDatabase(databasePath, (context) => ({
+      lock: getLock(context, "workspace", fixture.workspaceId),
+      events: listTaskEvents(context, fixture.taskId)
+    }));
+    expect(state.lock).toBeDefined();
+    expect(state.events.find((event) => event.type === "daemon.recovery_decision")?.payload).toMatchObject({
+      reasonCode: "expired-lock-owner-active",
+      operatorAttentionRequired: true
+    });
+  });
+
+  it("daemon 对存在 active operation 的 expired workspace lock 不释放", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createReadyWorkspaceFixture(databasePath, "lock-operation-active");
+    const now = new Date("2026-05-03T00:00:02.000Z");
+
+    withDatabase(databasePath, (context) => {
+      acquireLock(context, {
+        resourceKind: "workspace",
+        resourceId: fixture.workspaceId,
+        owner: "old-owner",
+        ttlMs: 1000,
+        now: new Date("2026-05-03T00:00:00.000Z")
+      });
+      const operation = createOperation(context, {
+        idempotencyKey: "workspace:create:attempt-lock-operation-active",
+        kind: "workspace:create",
+        projectId: fixture.projectId,
+        taskId: fixture.taskId,
+        attemptId: fixture.attemptId
+      });
+      updateOperation(context, { operationId: operation.id, status: "running" });
+    });
+
+    withDatabase(databasePath, (context) => runDaemonTick(context, {
+      now,
+      provider: new FakeAgentProvider("no-op"),
+      workspaceGitRunner: fixture.workspaceGitRunner
+    }));
+
+    const state = withDatabase(databasePath, (context) => ({
+      lock: getLock(context, "workspace", fixture.workspaceId),
+      events: listTaskEvents(context, fixture.taskId)
+    }));
+    expect(state.lock).toBeDefined();
+    expect(state.events.find((event) => event.type === "daemon.recovery_decision")?.payload).toMatchObject({
+      reasonCode: "expired-lock-owner-active",
+      operatorAttentionRequired: true
+    });
+  });
+
+
+  it("Core recovery release 前 leaseVersion 变化时不释放当前 lock", () => {
+    const databasePath = createMigratedDatabase();
+    const now = new Date("2026-05-03T00:00:02.000Z");
+
+    withDatabase(databasePath, (context) => {
+      const first = acquireLock(context, {
+        resourceKind: "workspace",
+        resourceId: "workspace-lease-changed",
+        owner: "old-owner",
+        ttlMs: 1000,
+        now: new Date("2026-05-03T00:00:00.000Z")
+      });
+      const second = acquireLock(context, {
+        resourceKind: "workspace",
+        resourceId: "workspace-lease-changed",
+        owner: "new-owner",
+        ttlMs: 1000,
+        now
+      });
+      const decision: RecoveryDecision = {
+        kind: "reconciled",
+        resourceKind: "lock",
+        resourceId: "workspace:workspace-lease-changed",
+        reasonCode: "expired-lock-safe-to-release",
+        observedSummary: "lock expired; workspace safe",
+        nextAction: "release_expired_lock"
+      };
+
+      expect(() =>
+        persistRecoveryDecision(context, decision, {
+          tickId: "tick-lease-changed",
+          now,
+          lockRelease: {
+            resourceKind: "workspace",
+            resourceId: "workspace-lease-changed",
+            lockToken: first.lockToken,
+            leaseVersion: first.leaseVersion
+          }
+        })
+      ).toThrow(/lock lease changed/);
+      expect(getLock(context, "workspace", "workspace-lease-changed")).toMatchObject({
+        owner: "new-owner",
+        lockToken: second.lockToken,
+        leaseVersion: second.leaseVersion
+      });
+    });
+  });
+
+  it("Coordinator Surface 不新增 workspace/lock recovery agent tool", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createTaskFixture(databasePath);
+
+    withDatabase(databasePath, (context) => {
+      appendEvent(context, {
+        type: "daemon.recovery_decision",
+        summary: "workspace recovery observed",
+        projectId: fixture.projectId,
+        taskId: fixture.taskId,
+        payload: {
+          reasonCode: "workspace-branch_mismatch",
+          observedSummary: "workspace branch mismatch",
+          lockToken: "must-not-enter-surface",
+          leaseVersion: 99,
+          fullManifest: { lockToken: "manifest-token" }
+        }
+      });
+    });
+
+    const surface = withDatabase(databasePath, (context) => buildTaskSurfaceFromDb(context, fixture.taskId));
+    const text = JSON.stringify(surface.json.available_tools) + surface.markdown;
+    expect(surface.json.available_tools.map((tool) => tool.name)).not.toContain("release_lock");
+    expect(surface.json.available_tools.map((tool) => tool.name)).not.toContain("recover_workspace");
+    expect(text).not.toContain("must-not-enter-surface");
+    expect(text).not.toContain("manifest-token");
+    expect(text).not.toContain("leaseVersion");
+  });
+
+  it("daemon 对 dirty unknown workspace 的 expired lock 不释放", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createReadyWorkspaceFixture(databasePath, "lock-dirty", { dirty: true });
+    const now = new Date("2026-05-03T00:00:02.000Z");
+
+    withDatabase(databasePath, (context) => {
+      acquireLock(context, {
+        resourceKind: "workspace",
+        resourceId: fixture.workspaceId,
+        owner: "old-owner",
+        ttlMs: 1000,
+        now: new Date("2026-05-03T00:00:00.000Z")
+      });
+    });
+
+    withDatabase(databasePath, (context) => runDaemonTick(context, {
+      now,
+      provider: new FakeAgentProvider("no-op"),
+      workspaceGitRunner: fixture.workspaceGitRunner
+    }));
+
+    const state = withDatabase(databasePath, (context) => ({
+      lock: getLock(context, "workspace", fixture.workspaceId),
+      events: listTaskEvents(context, fixture.taskId)
+    }));
+    expect(state.lock).toBeDefined();
+    expect(state.events.find((event) => event.type === "daemon.recovery_decision")?.payload).toMatchObject({
+      reasonCode: "workspace-dirty_unknown"
+    });
+    expect(JSON.stringify(state.events)).toContain("expired-lock-resource-unsafe");
+  });
+
+  it("workspace recovery operator attention 会阻止同 tick 启动 agent 和 workflow 工具", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createReadyWorkspaceFixture(databasePath, "workspace-block", { currentBranch: "wrong-branch" });
+    const provider = new FakeAgentProvider("```coordinator-tool\ntool: start_workflow_run\nprofile: feature\n```");
+
+    const result = withDatabase(databasePath, (context) => runDaemonTick(context, {
+      provider,
+      workspaceGitRunner: fixture.workspaceGitRunner
+    }));
+
+    expect(result.actions).toContainEqual(expect.objectContaining({
+      kind: "workspace_inspected",
+      taskId: fixture.taskId,
+      workspaceId: fixture.workspaceId
+    }));
+    expect(result.actions.some((action) => action.kind === "agent_session_started")).toBe(false);
+    expect(result.actions.some((action) => action.kind === "agent_tool_executed")).toBe(false);
+
+    const state = withDatabase(databasePath, (context) => ({
+      workspace: context.db.prepare("SELECT status FROM workspaces WHERE id = ?").get(fixture.workspaceId) as { status: string },
+      surface: buildTaskSurfaceFromDb(context, fixture.taskId),
+      events: listTaskEvents(context, fixture.taskId)
+    }));
+    expect(state.workspace.status).toBe("blocked");
+    expect(state.surface.json.available_tools.map((tool) => tool.name)).not.toContain("start_workflow_run");
+    expect(state.surface.markdown).toContain("workspace recovery");
+    expect(state.events.find((event) => event.type === "daemon.recovery_decision")?.payload).toMatchObject({
+      reasonCode: "workspace-branch_mismatch",
+      operatorAttentionRequired: true
+    });
+  });
+
   it("daemon operation replay 冲突时进入 unknown/operator attention，不覆盖外部状态", () => {
     const databasePath = createMigratedDatabase();
     const fixture = createTaskFixture(databasePath);
@@ -514,23 +884,7 @@ describe("daemon runtime", () => {
     };
 
     withDatabase(databasePath, (context) => {
-      createExecutionPlan(context, {
-        projectId: fixture.projectId,
-        taskId: fixture.taskId,
-        status: "active",
-        artifactPath: "execution-plan.md"
-      });
-      const attempt = createAttempt(context, { projectId: fixture.projectId, taskId: fixture.taskId });
-      createWorkspace(context, {
-        projectId: fixture.projectId,
-        taskId: fixture.taskId,
-        attemptId: attempt.id,
-        status: "ready",
-        workspacePath,
-        repoPath,
-        branch: `coordinator/${fixture.taskId}/${attempt.id}`,
-        baseBranch: "main"
-      });
+      const { attempt, branch } = createWorkflowWorkspaceFixture(context, fixture, "workflow-run-daemon");
       context.db
         .prepare(
           `INSERT INTO workflow_runs (id, project_id, task_id, attempt_id, profile_id, status, external_id)
@@ -734,40 +1088,26 @@ describe("daemon runtime", () => {
   it("workflow reconcile 只通过 workflow protocol，不因外部不可用而推进 completed", () => {
     const databasePath = createMigratedDatabase();
     const fixture = createTaskFixture(databasePath);
-    const workspacePath = mkdtempSync(join(tmpdir(), "coordinator-daemon-workspace-"));
-    const repoPath = join(workspacePath, "repo");
-    mkdirSync(join(repoPath, ".git"), { recursive: true });
     const runner: WorkflowProtocolRunner = () => {
       throw new Error("workflow unavailable secret-provider-output lockToken completeOperationJson");
     };
+    let branch = "";
 
     withDatabase(databasePath, (context) => {
-      createExecutionPlan(context, {
-        projectId: fixture.projectId,
-        taskId: fixture.taskId,
-        status: "active",
-        artifactPath: "execution-plan.md"
-      });
-      const attempt = createAttempt(context, { projectId: fixture.projectId, taskId: fixture.taskId });
-      createWorkspace(context, {
-        projectId: fixture.projectId,
-        taskId: fixture.taskId,
-        attemptId: attempt.id,
-        status: "ready",
-        workspacePath,
-        repoPath,
-        branch: `coordinator/${fixture.taskId}/${attempt.id}`,
-        baseBranch: "main"
-      });
+      const fixtureWorkspace = createWorkflowWorkspaceFixture(context, fixture, "workflow-run-daemon");
+      branch = fixtureWorkspace.branch;
       context.db
         .prepare(
           `INSERT INTO workflow_runs (id, project_id, task_id, attempt_id, profile_id, status, external_id)
            VALUES (?, ?, ?, ?, ?, ?, ?)`
         )
-        .run("workflow-run-daemon", fixture.projectId, fixture.taskId, attempt.id, "feature", "running", "inner-run");
+        .run("workflow-run-daemon", fixture.projectId, fixture.taskId, fixtureWorkspace.attempt.id, "feature", "running", "inner-run");
     });
 
-    const result = withDatabase(databasePath, (context) => runDaemonTick(context, { workflowInspectRunner: runner }));
+    const result = withDatabase(databasePath, (context) => runDaemonTick(context, {
+      workflowInspectRunner: runner,
+      workspaceGitRunner: createWorkflowWorkspaceGitRunner(branch)
+    }));
     expect(result.actions).toContainEqual(
       expect.objectContaining({
         kind: "reconcile_failed",
@@ -781,7 +1121,11 @@ describe("daemon runtime", () => {
     const operation = withDatabase(databasePath, (context) =>
       context.db.prepare("SELECT last_observed_state FROM operations WHERE kind = ?").get("daemon:workflow:inspect")
     ) as { last_observed_state: string };
-    const recovery = events.find((event) => event.type === "daemon.recovery_decision");
+    const recovery = events.find(
+      (event) =>
+        event.type === "daemon.recovery_decision" &&
+        (event.payload as { reasonCode?: string } | undefined)?.reasonCode === "workflow-protocol-unavailable"
+    );
     expect(recovery?.payload).toMatchObject({
       reasonCode: "workflow-protocol-unavailable",
       decision: "unknown"
@@ -798,9 +1142,7 @@ describe("daemon runtime", () => {
   it("workflow runId mismatch 进入 recovery decision，不推进 completed 或 pr_ready", () => {
     const databasePath = createMigratedDatabase();
     const fixture = createTaskFixture(databasePath);
-    const workspacePath = mkdtempSync(join(tmpdir(), "coordinator-daemon-workspace-"));
-    const repoPath = join(workspacePath, "repo");
-    mkdirSync(join(repoPath, ".git"), { recursive: true });
+    let branch = "";
     const runner: WorkflowProtocolRunner = () =>
       JSON.stringify({
         runId: "wrong-inner-run",
@@ -811,37 +1153,29 @@ describe("daemon runtime", () => {
       });
 
     withDatabase(databasePath, (context) => {
-      createExecutionPlan(context, {
-        projectId: fixture.projectId,
-        taskId: fixture.taskId,
-        status: "active",
-        artifactPath: "execution-plan.md"
-      });
-      const attempt = createAttempt(context, { projectId: fixture.projectId, taskId: fixture.taskId });
-      createWorkspace(context, {
-        projectId: fixture.projectId,
-        taskId: fixture.taskId,
-        attemptId: attempt.id,
-        status: "ready",
-        workspacePath,
-        repoPath,
-        branch: `coordinator/${fixture.taskId}/${attempt.id}`,
-        baseBranch: "main"
-      });
+      const fixtureWorkspace = createWorkflowWorkspaceFixture(context, fixture, "workflow-run-mismatch");
+      branch = fixtureWorkspace.branch;
       context.db
         .prepare(
           `INSERT INTO workflow_runs (id, project_id, task_id, attempt_id, profile_id, status, external_id)
            VALUES (?, ?, ?, ?, ?, ?, ?)`
         )
-        .run("workflow-run-mismatch", fixture.projectId, fixture.taskId, attempt.id, "feature", "running", "inner-run");
+        .run("workflow-run-mismatch", fixture.projectId, fixture.taskId, fixtureWorkspace.attempt.id, "feature", "running", "inner-run");
     });
 
-    withDatabase(databasePath, (context) => runDaemonTick(context, { workflowInspectRunner: runner }));
+    withDatabase(databasePath, (context) => runDaemonTick(context, {
+      workflowInspectRunner: runner,
+      workspaceGitRunner: createWorkflowWorkspaceGitRunner(branch)
+    }));
 
     const surface = withDatabase(databasePath, (context) => buildTaskSurfaceFromDb(context, fixture.taskId));
     expect(surface.json.workflow_runs[0]).toMatchObject({ id: "workflow-run-mismatch", status: "running" });
     const events = withDatabase(databasePath, (context) => listTaskEvents(context, fixture.taskId));
-    const recovery = events.find((event) => event.type === "daemon.recovery_decision");
+    const recovery = events.find(
+      (event) =>
+        event.type === "daemon.recovery_decision" &&
+        (event.payload as { reasonCode?: string } | undefined)?.reasonCode === "workflow-run-id-mismatch"
+    );
     expect(recovery?.payload).toMatchObject({
       reasonCode: "workflow-run-id-mismatch",
       decision: "operator_attention",
@@ -852,9 +1186,7 @@ describe("daemon runtime", () => {
   it("workflow profile mismatch 进入 recovery decision，不推进 completed 或 pr_ready", () => {
     const databasePath = createMigratedDatabase();
     const fixture = createTaskFixture(databasePath);
-    const workspacePath = mkdtempSync(join(tmpdir(), "coordinator-daemon-workspace-"));
-    const repoPath = join(workspacePath, "repo");
-    mkdirSync(join(repoPath, ".git"), { recursive: true });
+    let branch = "";
     const runner: WorkflowProtocolRunner = () =>
       JSON.stringify({
         runId: "inner-run",
@@ -865,37 +1197,29 @@ describe("daemon runtime", () => {
       });
 
     withDatabase(databasePath, (context) => {
-      createExecutionPlan(context, {
-        projectId: fixture.projectId,
-        taskId: fixture.taskId,
-        status: "active",
-        artifactPath: "execution-plan.md"
-      });
-      const attempt = createAttempt(context, { projectId: fixture.projectId, taskId: fixture.taskId });
-      createWorkspace(context, {
-        projectId: fixture.projectId,
-        taskId: fixture.taskId,
-        attemptId: attempt.id,
-        status: "ready",
-        workspacePath,
-        repoPath,
-        branch: `coordinator/${fixture.taskId}/${attempt.id}`,
-        baseBranch: "main"
-      });
+      const fixtureWorkspace = createWorkflowWorkspaceFixture(context, fixture, "workflow-run-profile-mismatch");
+      branch = fixtureWorkspace.branch;
       context.db
         .prepare(
           `INSERT INTO workflow_runs (id, project_id, task_id, attempt_id, profile_id, status, external_id)
            VALUES (?, ?, ?, ?, ?, ?, ?)`
         )
-        .run("workflow-run-profile-mismatch", fixture.projectId, fixture.taskId, attempt.id, "feature", "running", "inner-run");
+        .run("workflow-run-profile-mismatch", fixture.projectId, fixture.taskId, fixtureWorkspace.attempt.id, "feature", "running", "inner-run");
     });
 
-    withDatabase(databasePath, (context) => runDaemonTick(context, { workflowInspectRunner: runner }));
+    withDatabase(databasePath, (context) => runDaemonTick(context, {
+      workflowInspectRunner: runner,
+      workspaceGitRunner: createWorkflowWorkspaceGitRunner(branch)
+    }));
 
     const surface = withDatabase(databasePath, (context) => buildTaskSurfaceFromDb(context, fixture.taskId));
     expect(surface.json.workflow_runs[0]).toMatchObject({ id: "workflow-run-profile-mismatch", status: "running" });
     const events = withDatabase(databasePath, (context) => listTaskEvents(context, fixture.taskId));
-    const recovery = events.find((event) => event.type === "daemon.recovery_decision");
+    const recovery = events.find(
+      (event) =>
+        event.type === "daemon.recovery_decision" &&
+        (event.payload as { reasonCode?: string } | undefined)?.reasonCode === "workflow-profile-mismatch"
+    );
     expect(recovery?.payload).toMatchObject({
       reasonCode: "workflow-profile-mismatch",
       decision: "operator_attention",

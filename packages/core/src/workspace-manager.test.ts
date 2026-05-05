@@ -7,6 +7,7 @@ import {
   acquireLock,
   createWorkspace,
   createAttempt,
+  updateWorkspace,
   getOperationByIdempotencyKey,
   createProject,
   createTask,
@@ -20,6 +21,7 @@ import {
   assertArtifactRelativePath,
   buildWorkspaceBranch,
   createAttemptWorkspace,
+  inspectWorkspaceRecovery,
   resumeWorkspacePreflight,
   type WorkspaceGitRunner
 } from "./index.js";
@@ -540,6 +542,137 @@ describe("workspace manager", () => {
     expect(result.preflight.checks[0].name).toBe("workspace-path");
     expect(result.calls).toHaveLength(0);
     expect(existsSync(missingWorkspacePath)).toBe(false);
+  });
+
+  it("recovery inspect 将 workspace path missing 分类为 missing，且不执行 git", () => {
+    const databasePath = createMigratedDatabase();
+    const repoPath = createRepoFixture();
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "coordinator-workspaces-"));
+    const missingWorkspacePath = join(workspaceRoot, "project-recovery", "task-recovery", "attempt-recovery");
+
+    const result = withDatabase(databasePath, (context) => {
+      const project = createProject(context, {
+        id: "project-recovery",
+        name: "coordinator",
+        repoPath,
+        defaultBranch: "main",
+        workspaceRoot
+      });
+      const task = createTask(context, { id: "task-recovery", projectId: project.id, title: "workspace" });
+      const attempt = createAttempt(context, { id: "attempt-recovery", projectId: project.id, taskId: task.id });
+      const workspace = createWorkspace(context, {
+        projectId: project.id,
+        taskId: task.id,
+        attemptId: attempt.id,
+        status: "ready",
+        workspacePath: missingWorkspacePath,
+        repoPath: join(missingWorkspacePath, "repo"),
+        branch: "coordinator/task-recovery/attempt-recovery",
+        baseBranch: "main"
+      });
+      const git = createFakeGitRunner();
+      return { observation: inspectWorkspaceRecovery(context, { workspaceId: workspace.id, gitRunner: git.runner }), calls: git.calls };
+    });
+
+    expect(result.observation).toMatchObject({
+      kind: "missing",
+      safeToReleaseLock: false
+    });
+    expect(result.calls).toHaveLength(0);
+    expect(existsSync(missingWorkspacePath)).toBe(false);
+  });
+
+  it("recovery inspect 识别 branch mismatch、dirty unknown 和 manifest mismatch", () => {
+    const databasePath = createMigratedDatabase();
+    const repoPath = createRepoFixture();
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "coordinator-workspaces-"));
+
+    const result = withDatabase(databasePath, (context) => {
+      const project = createProject(context, {
+        id: "project-recovery-kinds",
+        name: "coordinator",
+        repoPath,
+        defaultBranch: "main",
+        workspaceRoot
+      });
+      const task = createTask(context, { id: "task-recovery-kinds", projectId: project.id, title: "workspace" });
+      const attempt = createAttempt(context, { id: "attempt-recovery-kinds", projectId: project.id, taskId: task.id });
+      const created = createAttemptWorkspace(context, {
+        attemptId: attempt.id,
+        owner: "worker-1",
+        gitRunner: createFakeGitRunner({ currentBranch: "coordinator/task-recovery-kinds/attempt-recovery-kinds" }).runner
+      });
+      const branch = inspectWorkspaceRecovery(context, {
+        workspaceId: created.workspace.id,
+        gitRunner: createFakeGitRunner({ currentBranch: "other-branch" }).runner
+      });
+      const dirty = inspectWorkspaceRecovery(context, {
+        workspaceId: created.workspace.id,
+        gitRunner: createFakeGitRunner({ currentBranch: "coordinator/task-recovery-kinds/attempt-recovery-kinds", dirty: true }).runner
+      });
+      writeFileSync(join(created.workspace.workspacePath ?? "", "coordinator", "ownership.json"), "{}\n");
+      const manifest = inspectWorkspaceRecovery(context, {
+        workspaceId: created.workspace.id,
+        gitRunner: createFakeGitRunner({ currentBranch: "coordinator/task-recovery-kinds/attempt-recovery-kinds" }).runner
+      });
+      writeFileSync(join(created.workspace.workspacePath ?? "", "coordinator", "ownership.json"), "{not-json\n");
+      const malformedManifest = inspectWorkspaceRecovery(context, {
+        workspaceId: created.workspace.id,
+        gitRunner: createFakeGitRunner({ currentBranch: "coordinator/task-recovery-kinds/attempt-recovery-kinds" }).runner
+      });
+      return { branch, dirty, manifest, malformedManifest };
+    });
+
+    expect(result.branch.kind).toBe("branch_mismatch");
+    expect(result.dirty.kind).toBe("dirty_unknown");
+    expect(result.manifest.kind).toBe("manifest_mismatch");
+    expect(result.malformedManifest.kind).toBe("manifest_mismatch");
+  });
+
+  it("stale workspace lock token 更新 workspace 会被 fencing 拒绝", () => {
+    const databasePath = createMigratedDatabase();
+    const baseTime = new Date("2026-05-03T00:00:00.000Z");
+
+    withDatabase(databasePath, (context) => {
+      const project = createProject(context, { id: "project-stale-token", name: "coordinator" });
+      const task = createTask(context, { id: "task-stale-token", projectId: project.id, title: "workspace" });
+      const attempt = createAttempt(context, { id: "attempt-stale-token", projectId: project.id, taskId: task.id });
+      const workspace = createWorkspace(context, {
+        id: "workspace-stale-token",
+        projectId: project.id,
+        taskId: task.id,
+        attemptId: attempt.id,
+        status: "creating"
+      });
+      const oldLock = acquireLock(context, {
+        resourceKind: "workspace",
+        resourceId: workspace.id,
+        owner: "owner-1",
+        ttlMs: 1000,
+        now: baseTime
+      });
+      acquireLock(context, {
+        resourceKind: "workspace",
+        resourceId: workspace.id,
+        owner: "owner-2",
+        ttlMs: 1000,
+        now: new Date("2026-05-03T00:00:02.000Z")
+      });
+
+      expect(() =>
+        updateWorkspace(context, {
+          workspaceId: workspace.id,
+          expectedStateVersion: workspace.stateVersion,
+          status: "ready",
+          lock: {
+            resourceKind: "workspace",
+            resourceId: workspace.id,
+            lockToken: oldLock.lockToken,
+            now: new Date("2026-05-03T00:00:02.100Z")
+          }
+        })
+      ).toThrow(ActiveResourceConflictError);
+    });
   });
 
   it("resume preflight 拒绝 coordinator symlink escape", () => {

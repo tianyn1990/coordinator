@@ -169,6 +169,14 @@ daemon 可释放过期 lock。
 
 带副作用操作必须携带当前 lock token。lock token 不匹配时拒绝执行，避免 stale owner 写入。
 
+当前已落地的 workspace/lock/fencing recovery 子集：
+
+- daemon 释放过期 workspace lock 前必须先 inspect owner/resource 状态，不能只因为 `expires_at` 到期就静默释放。
+- release 必须同时匹配 lock token 和 leaseVersion；leaseVersion 已变化时视为 fencing 生效，不能把本次 tick 误记为成功释放。
+- owner 仍有 active outer agent session、active workflow run 或 active workspace operation 时，过期 lock 进入 operator review。
+- workspace observation 不安全时，包括 path missing、branch mismatch、dirty unknown、manifest mismatch、path escape 等，不释放 lock，转 operator attention。
+- lock token、leaseVersion、ownership manifest 原文和完整 git output 不进入 Coordinator Agent surface 或 agent tool result。
+
 ## 9. Agent Provider
 
 第一版支持：
@@ -364,3 +372,16 @@ preflight 失败时，不继续执行副作用操作，应进入 human request�
 - git status dirty 且非预期：进入 handoff。
 - workflow status unknown：重新 inspect，必要时 retry。
 - smoke-check 失败：进入 human request 或 handoff。
+
+### 18.1 当前已落地的 Recovery Inspect 子集
+
+`resumeWorkspacePreflight` 仍用于恢复前 operator/daemon 的只读 preflight；Iteration 12.3 另补了更窄的 `inspectWorkspaceRecovery`，专门服务 daemon/Core recovery matrix。
+
+已落地规则：
+
+- 检查 workspace path、repo path、coordinator path、artifact root 时都做 realpath containment。
+- path 风险 fail-fast；一旦 workspace/repo/coordinator/artifact root 不安全，不继续执行 git、manifest 或 checkpoint 读取。
+- git observation 只收敛为 branch 是否匹配、dirty 是否未知等窄分类，不把完整 git output 作为 agent-facing 内容。
+- ownership manifest 只是恢复证据，不是真相源；缺失、字段不匹配或 malformed 都只能生成 observation，不能绕过 DB 状态。
+- checkpoint artifact 只作为恢复参考和 artifact ref，不驱动外层业务状态迁移。
+- recovery 发现高风险时将 workspace 转为 `blocked`，由 Core/daemon gate 阻止后续 workflow/PR/MR 副作用。

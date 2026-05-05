@@ -297,6 +297,29 @@ describe("Coordinator Surface", () => {
     expect(surface.json.available_tools.map((tool) => tool.name)).toEqual(["ask_human"]);
   });
 
+  it("blocked workspace 即使 workflow handoff pr_ready 也不暴露 create_pr", () => {
+    const surface = buildCoordinatorSurface(
+      baseSnapshot({
+        surfaceKind: "execution",
+        executionPlan: { id: "plan-1", status: "active", artifactPath: "execution-plan.md" },
+        attempt: { id: "attempt-1", status: "running" },
+        workspace: { id: "workspace-1", status: "blocked" },
+        workflowRuns: [
+          {
+            id: "run-1",
+            status: "handoff",
+            handoffKind: "pr_ready"
+          }
+        ]
+      })
+    );
+
+    expect(surface.json.available_tools.map((tool) => tool.name)).not.toContain("create_pr");
+    expect(surface.json.available_tools.map((tool) => tool.name)).not.toContain("start_workflow_run");
+    expect(surface.json.denied_actions).toContain("workspace recovery 已进入 operator review；不要启动 workflow 或继续执行 workspace 副作用。");
+  });
+
+
   it("completed_no_pr surface 即使 no-PR policy 有效也不提前暴露 mark_done", () => {
     const surface = buildCoordinatorSurface(
       baseSnapshot({

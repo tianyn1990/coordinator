@@ -24,6 +24,7 @@ import {
   getProject,
   getWorkspace,
   releaseLock,
+  assertLockHeld,
   updateWorkspace,
   updateOperation,
   withTransaction,
@@ -73,6 +74,38 @@ export type ResumeWorkspacePreflightResult = {
   status: PreflightStatus;
   checks: Array<{ name: string; status: PreflightStatus; summary: string }>;
   markdown: string;
+};
+
+export type WorkspaceRecoveryObservationKind =
+  | "safe"
+  | "record_missing"
+  | "record_incomplete"
+  | "missing"
+  | "repo_missing"
+  | "coordinator_missing"
+  | "artifact_root_missing"
+  | "path_escape"
+  | "not_worktree"
+  | "branch_mismatch"
+  | "dirty_unknown"
+  | "manifest_missing"
+  | "manifest_mismatch"
+  | "checkpoint_missing";
+
+export type WorkspaceRecoveryObservation = {
+  workspaceId?: string;
+  projectId?: string;
+  taskId?: string;
+  attemptId?: string;
+  kind: WorkspaceRecoveryObservationKind;
+  safeToReleaseLock: boolean;
+  observedSummary: string;
+  artifactRefs: string[];
+};
+
+export type InspectWorkspaceRecoveryInput = {
+  workspaceId: string;
+  gitRunner?: WorkspaceGitRunner;
 };
 
 export class WorkspaceManagerError extends Error {
@@ -421,6 +454,121 @@ export function resumeWorkspacePreflight(
   return renderAndRecordPreflight(context, workspace, checks);
 }
 
+export function inspectWorkspaceRecovery(
+  context: DbContext,
+  input: InspectWorkspaceRecoveryInput
+): WorkspaceRecoveryObservation {
+  const workspace = getWorkspace(context, input.workspaceId);
+  if (!workspace) {
+    return {
+      workspaceId: input.workspaceId,
+      kind: "record_missing",
+      safeToReleaseLock: false,
+      observedSummary: "workspace record missing",
+      artifactRefs: []
+    };
+  }
+  const project = requireProjectRecord(context, workspace.projectId);
+  const workspaceRoot = resolveWorkspaceRoot(project);
+  const gitRunner = input.gitRunner ?? runGit;
+  const refs: string[] = [];
+
+  const base = {
+    workspaceId: workspace.id,
+    projectId: workspace.projectId,
+    taskId: workspace.taskId,
+    attemptId: workspace.attemptId,
+    artifactRefs: refs
+  };
+  const fail = (kind: WorkspaceRecoveryObservationKind, observedSummary: string): WorkspaceRecoveryObservation => ({
+    ...base,
+    kind,
+    safeToReleaseLock: false,
+    observedSummary
+  });
+
+  const workspacePath = workspace.workspacePath;
+  const repoPath = workspace.repoPath;
+  if (!workspacePath || !repoPath || !workspace.branch || !workspace.baseBranch) {
+    return fail("record_incomplete", "workspace record missing path or branch fields");
+  }
+
+  const workspacePathCheck = classifyPath(workspaceRoot, workspacePath, "workspace path");
+  if (workspacePathCheck) {
+    return fail(workspacePathCheck.kind, workspacePathCheck.summary);
+  }
+  const repoPathCheck = classifyPath(workspacePath, repoPath, "repo path");
+  if (repoPathCheck) {
+    return fail(repoPathCheck.kind === "missing" ? "repo_missing" : repoPathCheck.kind, repoPathCheck.summary);
+  }
+  const coordinatorPath = join(workspacePath, "coordinator");
+  const coordinatorPathCheck = classifyPath(workspacePath, coordinatorPath, "coordinator path");
+  if (coordinatorPathCheck) {
+    return fail(coordinatorPathCheck.kind === "missing" ? "coordinator_missing" : coordinatorPathCheck.kind, coordinatorPathCheck.summary);
+  }
+  const artifactRoot = join(coordinatorPath, "artifacts");
+  const artifactRootCheck = classifyPath(coordinatorPath, artifactRoot, "artifact root");
+  if (artifactRootCheck) {
+    return fail(artifactRootCheck.kind === "missing" ? "artifact_root_missing" : artifactRootCheck.kind, artifactRootCheck.summary);
+  }
+
+  const worktreeCheck = classifyGit(() => gitRunner(["rev-parse", "--is-inside-work-tree"], { cwd: repoPath }).trim());
+  if (worktreeCheck !== "true") {
+    return fail("not_worktree", "repo is not a git worktree");
+  }
+  const currentBranch = classifyGit(() => gitRunner(["branch", "--show-current"], { cwd: repoPath }).trim());
+  if (currentBranch !== workspace.branch) {
+    return fail("branch_mismatch", "workspace branch mismatch");
+  }
+  const status = classifyGit(() => gitRunner(["status", "--porcelain"], { cwd: repoPath }).trim());
+  if (status.length > 0) {
+    return fail("dirty_unknown", "workspace dirty with unknown source");
+  }
+
+  const manifestPath = join(coordinatorPath, "ownership.json");
+  const manifestPathCheck = classifyPath(coordinatorPath, manifestPath, "ownership manifest");
+  if (manifestPathCheck) {
+    return fail(manifestPathCheck.kind === "missing" ? "manifest_missing" : manifestPathCheck.kind, manifestPathCheck.summary);
+  }
+  const manifest = readOwnershipManifestSafely(manifestPath);
+  if (!manifest) {
+    return fail("manifest_mismatch", "ownership manifest is malformed");
+  }
+  if (
+    manifest.projectId !== workspace.projectId ||
+    manifest.taskId !== workspace.taskId ||
+    manifest.attemptId !== workspace.attemptId ||
+    manifest.workspaceId !== workspace.id ||
+    manifest.branch !== workspace.branch ||
+    manifest.baseBranch !== workspace.baseBranch
+  ) {
+    return fail("manifest_mismatch", "ownership manifest does not match workspace record");
+  }
+
+  const checkpointPath = join(artifactRoot, "checkpoint.md");
+  const checkpointPathCheck = classifyPath(artifactRoot, checkpointPath, "checkpoint artifact");
+  if (checkpointPathCheck) {
+    return fail(checkpointPathCheck.kind === "missing" ? "checkpoint_missing" : checkpointPathCheck.kind, checkpointPathCheck.summary);
+  }
+  refs.push("checkpoint.md");
+
+  return {
+    ...base,
+    kind: "safe",
+    safeToReleaseLock: true,
+    observedSummary: "workspace recovery observation safe"
+  };
+}
+
+export function assertWorkspaceLockHeldForUpdate(
+  context: DbContext,
+  workspaceId: string,
+  lockToken: string,
+  now = new Date()
+): void {
+  assertLockHeld(context, "workspace", workspaceId, lockToken, now);
+}
+
 export function buildWorkspaceBranch(taskId: string, attemptId: string): string {
   return `coordinator/${sanitizeBranchPart(taskId)}/${sanitizeBranchPart(attemptId)}`;
 }
@@ -589,6 +737,28 @@ function assertExistingPathInsideResolvedRoot(rootReal: string, targetPath: stri
   }
 }
 
+function classifyPath(
+  rootPath: string,
+  targetPath: string,
+  label: string
+): { kind: "missing" | "path_escape"; summary: string } | undefined {
+  try {
+    assertExistingPathInsideRoot(rootPath, targetPath);
+    return undefined;
+  } catch (error) {
+    const summary = error instanceof Error ? error.message : String(error);
+    return { kind: summary.includes("不存在") ? "missing" : "path_escape", summary: `${label}: ${summary}` };
+  }
+}
+
+function classifyGit(fn: () => string): string {
+  try {
+    return fn();
+  } catch {
+    return "";
+  }
+}
+
 function ensureExistingDirectoryRealpath(path: string): string {
   if (!existsSync(path)) {
     mkdirSync(path, { recursive: true });
@@ -653,6 +823,14 @@ function writeOwnershipManifest(path: string, manifest: OwnershipManifest): void
 
 function readOwnershipManifest(path: string): OwnershipManifest {
   return JSON.parse(readFileSync(path, "utf8")) as OwnershipManifest;
+}
+
+function readOwnershipManifestSafely(path: string): OwnershipManifest | undefined {
+  try {
+    return readOwnershipManifest(path);
+  } catch {
+    return undefined;
+  }
 }
 
 function writeCheckpointArtifact(artifactRoot: string, workspace: WorkspaceRecord, now: Date): string {

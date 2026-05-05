@@ -18,8 +18,10 @@ import {
   getActiveAgentSessionByTask,
   getActiveWorkspaceByAttempt,
   getAgentSession,
+  getLock,
   listTaskEvents,
   releaseLock,
+  releaseLockIfVersion,
   runMigrations,
   updateAgentSession,
   updateOperation,
@@ -498,6 +500,46 @@ describe("core data model", () => {
       expect(() =>
         assertLockHeld(context, "workspace", "workspace-1", lock.lockToken, new Date("2026-05-03T00:00:02.000Z"))
       ).toThrow(ActiveResourceConflictError);
+    });
+  });
+
+  it("releaseLockIfVersion 使用 lock token 和 leaseVersion 做 fencing", () => {
+    const databasePath = createMigratedDatabase();
+    const baseTime = new Date("2026-05-03T00:00:00.000Z");
+
+    withDatabase(databasePath, (context) => {
+      const first = acquireLock(context, {
+        resourceKind: "workspace",
+        resourceId: "workspace-fencing",
+        owner: "owner-1",
+        ttlMs: 1000,
+        now: baseTime
+      });
+      const second = acquireLock(context, {
+        resourceKind: "workspace",
+        resourceId: "workspace-fencing",
+        owner: "owner-2",
+        ttlMs: 1000,
+        now: new Date("2026-05-03T00:00:02.000Z")
+      });
+
+      expect(releaseLockIfVersion(context, {
+        resourceKind: "workspace",
+        resourceId: "workspace-fencing",
+        lockToken: first.lockToken,
+        leaseVersion: first.leaseVersion
+      })).toBe(false);
+      expect(getLock(context, "workspace", "workspace-fencing")).toMatchObject({
+        owner: "owner-2",
+        leaseVersion: second.leaseVersion
+      });
+      expect(releaseLockIfVersion(context, {
+        resourceKind: "workspace",
+        resourceId: "workspace-fencing",
+        lockToken: second.lockToken,
+        leaseVersion: second.leaseVersion
+      })).toBe(true);
+      expect(getLock(context, "workspace", "workspace-fencing")).toBeUndefined();
     });
   });
 });

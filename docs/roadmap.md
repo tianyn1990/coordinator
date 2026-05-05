@@ -156,11 +156,11 @@ P2 只预留接口和规划，不进入 V1 完成标准：
 
 ### 当前进度
 
-- 当前阶段：`Iteration 12: P1 / P2 Hardening` 已完成第二个切片 `daemon/Core recovery matrix`。
-- 当前 OpenSpec change：`harden-daemon-reconciliation-matrix` 已完成实现、验证和独立 review；归档后位置为 `openspec/changes/archive/2026-05-04-harden-daemon-reconciliation-matrix`。
-- 当前正式规格：归档时已同步到 `openspec/specs/daemon-recovery-matrix/spec.md`、`openspec/specs/daemon-runtime/spec.md`、`openspec/specs/core-data-model/spec.md`、`openspec/specs/coordinator-surface/spec.md`。
+- 当前阶段：`Iteration 12: P1 / P2 Hardening` 已完成第三个切片 `workspace/lock/fencing reconciliation`。
+- 当前 OpenSpec change：`harden-workspace-lock-fencing-reconciliation` 已完成实现、验证和独立 review；归档后位置为 `openspec/changes/archive/2026-05-05-harden-workspace-lock-fencing-reconciliation`。
+- 当前正式规格：归档时已同步到 `openspec/specs/workspace-lock-fencing-reconciliation/spec.md`、`openspec/specs/workspace-manager/spec.md`、`openspec/specs/daemon-recovery-matrix/spec.md`、`openspec/specs/daemon-runtime/spec.md`、`openspec/specs/core-data-model/spec.md`、`openspec/specs/coordinator-surface/spec.md`。
 - 下一阶段：继续 `Iteration 12: P1 / P2 Hardening`。
-- 下一阶段重点：进入 `Slice 12.3: workspace/lock/fencing reconciliation`。daemon/Core recovery 底座已具备有限 recovery decision 与 operation replay 能力，后续应继续保持 `Coordinator Core` 作为唯一状态机和恢复策略入口，重点补 workspace、lock、lease、fencing 的恢复矩阵。
+- 下一阶段重点：进入 `Slice 12.4: PR/MR and merge reconciliation`。workspace/lock/fencing recovery 已具备有限 inspect-before-release 与 blocked workspace gate，后续应继续保持 `Coordinator Core` 作为唯一状态机和恢复策略入口，重点补 PR/MR inspect/create/update/merge、approval snapshot invalidation、merge race/conflict 的恢复矩阵。
 
 ### Iteration 12 后续切片顺序
 
@@ -355,6 +355,15 @@ harden-daemon-reconciliation-matrix
 - 本切片经过多轮独立 `gpt-5.5 high` subagent review。review 发现并已修复：workflow mismatch error 泄漏、agent tool failureMessage 泄漏、workflow reconcile 成功/失败路径事务一致性、同 tick 重复 workflow inspect、operation replay 候选饥饿问题；最终复审确认无 must-fix。
 - 本切片验证通过：targeted tests、`pnpm typecheck`、`openspec validate --all --strict`、`pnpm test`（182 passed）、`pnpm build`。
 - 已知后续收敛项：same task stateVersion no-progress 的判断当前仍在 daemon advance path 中做短路，行为已受控且不扩大 surface；后续可在独立 change 中进一步改为显式 Core recovery observation/decision。
+- 已实现 workspace/lock/fencing recovery：新增 workspace/lock resource kind 与 Core-owned `RecoveryDecision`，daemon 只做 active workspace read-only inspect、expired lock inspect-before-release 和 Core action 执行，不直接成为 workspace/lock 状态机。
+- Workspace recovery inspect 已覆盖 workspace path、repo path、coordinator path、artifact root、git worktree、branch、dirty、ownership manifest、checkpoint artifact 等窄 observation；path/realpath/artifact root 风险继续 fail-fast，path 失败后不继续 git、manifest 或 checkpoint 检查。
+- Workspace recovery 对 `missing`、`branch_mismatch`、`dirty_unknown`、`manifest_mismatch`、`path_escape` 等风险进入 `operator_attention`；malformed `ownership.json` 也收敛为 `manifest_mismatch`，不会中断 daemon tick。
+- Expired workspace lock release 已改为 inspect-before-release：只有 owner 无 active outer agent session、无 active workflow run、无 active workspace operation，且 workspace observation `safeToReleaseLock=true` 时，Core 才允许 `release_expired_lock`。
+- Lock release 使用 `lockToken + leaseVersion` 做 fencing，并在同一 transaction 内释放 lock 和写入 `daemon.recovery_decision` event；如果 leaseVersion 已变化，daemon 不误报 `lock_reconciled`。
+- Workspace 被 recovery 判定需要 operator attention 时会被标记为 `blocked` 并加入本 tick `touchedTaskIds`，阻止同一 tick 继续启动 Coordinator Agent 或执行后续副作用。
+- Coordinator Surface 已将 `blocked` workspace 纳入 active workspace 查询与 gate：workflow running / handoff / `create_pr` / `start_workflow_run` 等窗口都会先短路，不暴露内部 recovery tools，也不泄漏 lock token、leaseVersion、manifest 原文或完整 git output。
+- 本切片经过多轮独立 `gpt-5.5 high` subagent review。review 发现并已修复：workspace operator attention 只写 event 未阻止后续推进、malformed manifest 中断 tick、leaseVersion changed 误报 reconciled、blocked gate 位置过晚、workspace status CAS 未检查 changes；最终复审确认无 must-fix。
+- 本切片验证通过：targeted tests、`pnpm test`（193 passed）、`pnpm build`、`pnpm typecheck`、`openspec validate --all --strict`、`openspec validate --changes "harden-workspace-lock-fencing-reconciliation" --strict`、`git diff --check`。
 
 ## 6. 实现顺序
 

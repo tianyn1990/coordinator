@@ -1,18 +1,22 @@
 import {
   appendEvent,
+  releaseLockIfVersion,
   updateOperation,
   updateTaskStatus,
   updateWorkflowRun,
   withTransaction,
   type AgentSessionRecord,
   type DbContext,
+  type LockRecord,
   type OperationRecord,
   type TaskRecord,
+  type WorkspaceRecord,
   type WorkflowRunRecord
 } from "@coordinator/db";
+import type { WorkspaceRecoveryObservation } from "./workspace-manager.js";
 import type { WorkflowStatus } from "./workflow-protocol-adapter.js";
 
-export type RecoveryResourceKind = "operation" | "workflow_run" | "agent_session" | "task_gate";
+export type RecoveryResourceKind = "operation" | "workflow_run" | "agent_session" | "task_gate" | "workspace" | "lock";
 
 export type ObservedExternalState = "absent" | "matches-intent" | "conflicts-with-intent" | "unclear";
 
@@ -32,6 +36,7 @@ export type RecoveryNextAction =
   | "mark_reconciled"
   | "mark_unknown"
   | "stop_session"
+  | "release_expired_lock"
   | "operator_review";
 
 export type RecoveryDecision = {
@@ -81,6 +86,18 @@ export type TaskGateRecoveryObservation = {
   attemptId?: string;
   reasonCode: string;
   observedSummary: string;
+};
+
+export type WorkspaceRecoveryDecisionObservation = {
+  workspace: WorkspaceRecord;
+  observation: WorkspaceRecoveryObservation;
+};
+
+export type LockRecoveryObservation = {
+  lock: LockRecord;
+  workspaceObservation?: WorkspaceRecoveryObservation;
+  ownerActive: boolean;
+  now: Date;
 };
 
 export function decideOperationRecovery(input: OperationRecoveryObservation): RecoveryDecision {
@@ -270,6 +287,84 @@ export function decideTaskGateRecovery(input: TaskGateRecoveryObservation): Reco
   };
 }
 
+export function decideWorkspaceRecovery(input: WorkspaceRecoveryDecisionObservation): RecoveryDecision {
+  const workspace = input.workspace;
+  const observation = input.observation;
+  const base = decisionBase("workspace", workspace.id, {
+    projectId: workspace.projectId,
+    taskId: workspace.taskId,
+    attemptId: workspace.attemptId
+  }, observation.observedSummary);
+
+  if (observation.kind === "safe") {
+    return {
+      ...base,
+      kind: "no_op",
+      reasonCode: "workspace-observation-safe",
+      nextAction: "none",
+      artifactRefs: observation.artifactRefs
+    };
+  }
+
+  return {
+    ...base,
+    kind: "operator_attention",
+    reasonCode: `workspace-${observation.kind}`,
+    nextAction: "operator_review",
+    operatorAttentionRequired: true,
+    artifactRefs: observation.artifactRefs
+  };
+}
+
+export function decideLockRecovery(input: LockRecoveryObservation): RecoveryDecision {
+  const lock = input.lock;
+  const expired = Date.parse(lock.expiresAt) <= input.now.getTime();
+  const workspaceObservation = input.workspaceObservation;
+  const observedSummary = [
+    `lock ${lock.resourceKind}:${lock.resourceId} ${expired ? "expired" : "active"}`,
+    input.ownerActive ? "owner active" : "owner inactive",
+    workspaceObservation ? `workspace ${workspaceObservation.kind}` : undefined
+  ].filter(Boolean).join("; ");
+
+  const base = decisionBase("lock", `${lock.resourceKind}:${lock.resourceId}`, {
+    projectId: workspaceObservation?.projectId,
+    taskId: workspaceObservation?.taskId,
+    attemptId: workspaceObservation?.attemptId
+  }, observedSummary);
+
+  if (!expired) {
+    return { ...base, kind: "no_op", reasonCode: "lock-not-expired", nextAction: "none" };
+  }
+  if (input.ownerActive) {
+    return {
+      ...base,
+      kind: "operator_attention",
+      reasonCode: "expired-lock-owner-active",
+      nextAction: "operator_review",
+      operatorAttentionRequired: true,
+      artifactRefs: workspaceObservation?.artifactRefs ?? []
+    };
+  }
+  if (lock.resourceKind !== "workspace" || !workspaceObservation || !workspaceObservation.safeToReleaseLock) {
+    return {
+      ...base,
+      kind: "operator_attention",
+      reasonCode: "expired-lock-resource-unsafe",
+      nextAction: "operator_review",
+      operatorAttentionRequired: true,
+      artifactRefs: workspaceObservation?.artifactRefs ?? []
+    };
+  }
+
+  return {
+    ...base,
+    kind: "reconciled",
+    reasonCode: "expired-lock-safe-to-release",
+    nextAction: "release_expired_lock",
+    artifactRefs: workspaceObservation.artifactRefs
+  };
+}
+
 export function persistRecoveryDecision(
   context: DbContext,
   decision: RecoveryDecision,
@@ -278,11 +373,19 @@ export function persistRecoveryDecision(
     now?: Date;
     operationStatus?: "succeeded" | "failed" | "unknown" | "reconciled" | "canceled";
     workflowRunStatus?: { workflowRun: WorkflowRunRecord; status: string };
+    workspaceStatus?: { workspace: WorkspaceRecord; status: string };
     taskStatus?: { task: TaskRecord; status: string };
     severity?: "debug" | "info" | "warn" | "error";
+    lockRelease?: { resourceKind: string; resourceId: string; lockToken: string; leaseVersion: number };
   }
 ): void {
   withTransaction(context, () => {
+    if (options.lockRelease) {
+      const released = releaseLockIfVersion(context, options.lockRelease);
+      if (!released) {
+        throw new Error(`lock lease changed: ${options.lockRelease.resourceKind}:${options.lockRelease.resourceId}`);
+      }
+    }
     if (decision.operationId && options.operationStatus) {
       updateOperation(context, {
         operationId: decision.operationId,
@@ -297,6 +400,9 @@ export function persistRecoveryDecision(
         expectedStateVersion: options.workflowRunStatus.workflowRun.stateVersion,
         status: options.workflowRunStatus.status
       });
+    }
+    if (options.workspaceStatus) {
+      updateWorkspaceRecoveryStatus(context, options.workspaceStatus.workspace, options.workspaceStatus.status);
     }
     if (options.taskStatus) {
       updateTaskStatus(
@@ -313,12 +419,26 @@ export function persistRecoveryDecision(
       taskId: decision.taskId,
       attemptId: decision.attemptId,
       operationId: decision.operationId,
+      workspaceId: decision.resourceKind === "workspace" ? decision.resourceId : undefined,
       workflowRunId: decision.resourceKind === "workflow_run" ? decision.resourceId : undefined,
       agentSessionId: decision.resourceKind === "agent_session" ? decision.resourceId : undefined,
       severity: options.severity ?? (decision.operatorAttentionRequired ? "warn" : "info"),
       payload: recoveryEventPayload(decision, options.tickId)
     });
   });
+}
+
+function updateWorkspaceRecoveryStatus(context: DbContext, workspace: WorkspaceRecord, status: string): void {
+  const result = context.db
+    .prepare(
+      `UPDATE workspaces
+       SET status = ?, state_version = state_version + 1, updated_at = CURRENT_TIMESTAMP
+       WHERE id = ? AND state_version = ?`
+    )
+    .run(status, workspace.id, workspace.stateVersion);
+  if (result.changes === 0) {
+    throw new Error(`workspace ${workspace.id} state_version mismatch`);
+  }
 }
 
 function decisionBase(

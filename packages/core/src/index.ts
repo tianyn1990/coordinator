@@ -32,6 +32,7 @@ export {
   assertArtifactRelativePath,
   buildWorkspaceBranch,
   createAttemptWorkspace,
+  inspectWorkspaceRecovery,
   removeWorkspaceForTest,
   resumeWorkspacePreflight
 } from "./workspace-manager.js";
@@ -91,6 +92,7 @@ export type {
   ResumeWorkspacePreflightInput,
   ResumeWorkspacePreflightResult,
   WorkspaceGitRunner,
+  WorkspaceRecoveryObservation,
   WorkspaceManagerResult
 } from "./workspace-manager.js";
 export type {

@@ -472,6 +472,13 @@ export type LockRecord = {
   expiresAt: string;
 };
 
+export type ReleaseLockIfVersionInput = {
+  resourceKind: string;
+  resourceId: string;
+  lockToken: string;
+  leaseVersion: number;
+};
+
 export class CasConflictError extends Error {
   constructor(message = "CAS conflict") {
     super(message);
@@ -740,6 +747,22 @@ export function getActiveWorkspaceByAttempt(context: DbContext, attemptId: strin
     )
     .get(attemptId);
   return row ? mapWorkspaceRow(row) : undefined;
+}
+
+export function listWorkspacesByStatus(context: DbContext, statuses: string[], limit = 50): WorkspaceRecord[] {
+  if (statuses.length === 0) {
+    return [];
+  }
+  const placeholders = statuses.map(() => "?").join(", ");
+  return context.db
+    .prepare(
+      `SELECT * FROM workspaces
+       WHERE status IN (${placeholders})
+       ORDER BY updated_at ASC, created_at ASC, id ASC
+       LIMIT ?`
+    )
+    .all(...statuses, limit)
+    .map(mapWorkspaceRow);
 }
 
 export function createWorkflowRun(context: DbContext, input: CreateWorkflowRunInput): WorkflowRunRecord {
@@ -1345,6 +1368,34 @@ export function releaseLock(context: DbContext, resourceKind: string, resourceId
       .run(resourceKind, resourceId, lockToken);
     return result.changes === 1;
   });
+}
+
+export function releaseLockIfVersion(context: DbContext, input: ReleaseLockIfVersionInput): boolean {
+  return withTransaction(context, () => {
+    const result = context.db
+      .prepare(
+        `DELETE FROM locks
+         WHERE resource_kind = ? AND resource_id = ? AND lock_token = ? AND lease_version = ?`
+      )
+      .run(input.resourceKind, input.resourceId, input.lockToken, input.leaseVersion);
+    return result.changes === 1;
+  });
+}
+
+export function getLock(context: DbContext, resourceKind: string, resourceId: string): LockRecord | undefined {
+  return findLock(context, resourceKind, resourceId);
+}
+
+export function listExpiredLocks(context: DbContext, now = new Date(), limit = 50): LockRecord[] {
+  return context.db
+    .prepare(
+      `SELECT * FROM locks
+       WHERE expires_at <= ?
+       ORDER BY expires_at ASC, updated_at ASC, id ASC
+       LIMIT ?`
+    )
+    .all(now.toISOString(), limit)
+    .map(mapLockRow);
 }
 
 export function assertLockHeld(
