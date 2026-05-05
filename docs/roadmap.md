@@ -156,11 +156,11 @@ P2 只预留接口和规划，不进入 V1 完成标准：
 
 ### 当前进度
 
-- 当前阶段：`Iteration 12: P1 / P2 Hardening` 已完成第五个切片 `second real provider/platform`。
-- 当前 OpenSpec change：`add-gitlab-pr-mr-provider-contract` 已完成实现、验证和独立 review；归档后位置为 `openspec/changes/archive/2026-05-05-add-gitlab-pr-mr-provider-contract`。
-- 当前正式规格：归档时已同步到 `openspec/specs/pr-mr-provider/spec.md`。
+- 当前阶段：`Iteration 12: P1 / P2 Hardening` 已完成第六个切片 `observability and operator diagnosis polish`。
+- 当前 OpenSpec change：`harden-observability-operator-diagnosis` 已完成实现、验证和独立 `gpt-5.5 high` review；归档后位置应为 `openspec/changes/archive/2026-05-05-harden-observability-operator-diagnosis`。
+- 当前正式规格：归档时应同步到 `openspec/specs/coordinator-surface/spec.md`、`openspec/specs/core-data-model/spec.md`、`openspec/specs/web-human-review-surface/spec.md`。
 - 下一阶段：继续 `Iteration 12: P1 / P2 Hardening`。
-- 下一阶段重点：进入 `Slice 12.6: observability and operator diagnosis polish`。GitLab PR/MR CLI provider 已具备 contract tests、GitLab JSON external fact 归一化、inspect-before-create、update/view/merge 命令契约和 approval snapshot 字段刷新；后续应在不扩大 agent-facing surface 的前提下补齐 operator 视角 recovery 诊断能力。
+- 下一阶段重点：根据后续优先级进入下一批 P1/P2 hardening 切片。Slice 12.6 已补齐 operator-only diagnosis，后续如继续增强 observability，应保持只读派生、operator-only 展示和 agent-facing surface 不扩大的边界。
 
 ### Iteration 12 后续切片顺序
 
@@ -252,6 +252,8 @@ harden-daemon-reconciliation-matrix
 - 新 provider/platform 至少有 contract tests、fake/failure tests 和真实路径最小 smoke 验证。
 
 #### Slice 12.6: observability and operator diagnosis polish
+
+状态：已完成，待归档 change 为 `harden-observability-operator-diagnosis`。
 
 目标：
 
@@ -373,6 +375,14 @@ harden-daemon-reconciliation-matrix
 - GitLab malformed inspect output 会阻断 create，不会被当成 absent；provider raw JSON、`diff_refs`、`head_pipeline` 原始结构不会进入 Coordinator Agent surface/tools。
 - 本切片经过独立 `gpt-5.5 high` subagent review。首次 review 指出 GitLab approval snapshot 未解析真实 `diff_refs` 与 `head_pipeline`；已修复并复审，最终确认无 must-fix。
 - 本切片验证通过：`openspec validate add-gitlab-pr-mr-provider-contract --strict`、`openspec validate --all --strict`、`pnpm typecheck`、`pnpm test packages/core/src/pr-mr-provider.test.ts`、`pnpm test`（214 passed）、`pnpm build`、`git diff --check`。
+- 已实现 operator-only diagnosis summary：`GET /tasks/:taskId` 和 Web task detail 现在展示 current blocker、operator attention、retry budget、operation ledger、recovery timeline、provider/protocol inspect 摘要。
+- Diagnosis 仍由 Core 从已持久化 events、operations 和实体状态只读派生，不新增状态表、不新增状态机、不触发 provider/workflow 实时 inspect，不改变 daemon/recovery/PR/workflow 协议。
+- Diagnosis 输出已做 payload 白名单和长度限制：不返回 provider raw output、lock token、完整 operation JSON、完整 recovery matrix 或复杂内部对象；Web 只渲染 Core summary，不直接展示完整 event payload。
+- 当前/历史语义已收紧：历史 workflow/PR/agent session 和历史 recovery decision 可以保留在 recovery timeline 中供 operator 排查，但不会驱动当前 `operatorAttention.required`；当前 attention 只看 latest attempt/current entity，blocked workspace 会进入 operator detail current blocker 和 attention reason。
+- Operator detail 使用 operator-only workspace 查询纳入 `blocked` workspace；执行路径继续使用原有 active workspace 查询，避免把 operator 诊断语义污染到 workflow/PR/agent side-effect runtime。
+- Coordinator Surface 未新增 recovery/operator/internal tools，agent-facing Markdown 和 `available_tools` 未因 diagnosis 扩大；operator-only diagnosis 不自动进入 Coordinator Agent 当前世界。
+- 本切片经过多轮独立 `gpt-5.5 high` subagent review。review 发现并已修复：历史 `daemon.recovery_decision` attention 污染当前 diagnosis、blocked workspace 未进入 operator detail；最终复审确认无 must-fix。
+- 本切片验证通过：`pnpm test -- packages/core/src/operator-surface.test.ts apps/api/src/server.test.ts`（Vitest 实际全量 218 passed）、`pnpm typecheck`、`openspec validate harden-observability-operator-diagnosis --strict`、`git diff --check`。
 
 ## 6. 实现顺序
 

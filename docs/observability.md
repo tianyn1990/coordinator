@@ -149,6 +149,24 @@ payload 可以是 JSON，但不作为 agent 主输入。给 agent 看时应通�
 
 关键状态变更的 before/after 不应默认塞完整快照进每条 event；更推荐 changed fields diff 或 snapshot artifact ref。
 
+## 4.1 Operator Diagnosis Summary
+
+Iteration 12.6 已落地 operator-only diagnosis summary，用于让 Web/API operator surface 更快回答“当前卡在哪里、为什么需要人看、最近 recovery 判定是什么、retry 是否被阻止、哪些 provider/protocol inspect 已发生”。
+
+diagnosis 是只读派生结果，不是新的真相源：
+
+- 只从已持久化 task、attempt、workspace、workflow run、PR/MR、agent session、human request、events 和 operations 派生。
+- 打开 task detail 不触发 provider、workflow protocol 或 git 的实时 inspect。
+- recovery timeline 可以展示历史 recovery decision，服务排查和审计。
+- 当前 `operatorAttention` 只能由 latest attempt/current entity 的事实驱动；历史 attempt 的 recovery event 不得污染当前 attention。
+- blocked workspace 作为 operator 诊断事实可进入 task detail，但不得因此放宽 workflow/PR/agent side-effect runtime 的 workspace gate。
+
+diagnosis 输出必须保持白名单摘要：
+
+- 可以展示 current blocker、operator attention reason、retry budget summary、operation kind/status/failure code、recovery reason/next action、provider/protocol inspect 摘要和 artifact refs。
+- 不得展示 provider raw output、secret、lock token、完整 operation JSON、完整 recovery matrix、完整 workflow status JSON 或复杂内部对象。
+- Web 可以展示 diagnosis，但这些信息不自动进入 Coordinator Agent Markdown surface，也不得新增 agent-facing recovery/operator/internal tools。
+
 ## 5. Artifact
 
 artifact 用于保存非结构化或半结构化信息。

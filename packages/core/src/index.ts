@@ -82,8 +82,12 @@ export type {
   ControlTaskResult,
   CreateManualTaskInput,
   OperatorTaskControlAction,
+  OperatorTaskDiagnosis,
   OperatorTaskDetail,
   OperatorTaskListItem,
+  OperatorRecoverySummary,
+  OperatorOperationSummary,
+  OperatorInspectionSummary,
   RecordHumanAnswerInput,
   RecordHumanAnswerResult
 } from "./operator-surface.js";

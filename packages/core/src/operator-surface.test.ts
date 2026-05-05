@@ -6,12 +6,14 @@ import {
   ActiveResourceConflictError,
   createAttempt,
   createHumanRequest,
+  createOperation,
   createProject,
   createPullRequest,
   createTask,
   createWorkspace,
   listTaskEvents,
   runMigrations,
+  updateOperation,
   withDatabase
 } from "@coordinator/db";
 import {
@@ -105,6 +107,230 @@ describe("operator surface", () => {
     });
     expect(detail.surface.json.task.id).toBe("task-detail");
     expect(detail.surface.json.available_tools.map((tool) => tool.name)).not.toContain("record_human_answer");
+  });
+
+  it("task detail diagnosis 聚合 recovery、retry、operation 和 inspect 摘要且不泄漏内部字段", () => {
+    const databasePath = createMigratedDatabase();
+    const detail = withDatabase(databasePath, (context) => {
+      const project = createProject(context, { id: "project-diagnosis", name: "diagnosis" });
+      const task = createTask(context, { id: "task-diagnosis", projectId: project.id, title: "diagnosis" });
+      const attempt = createAttempt(context, { id: "attempt-diagnosis", projectId: project.id, taskId: task.id });
+      context.db
+        .prepare(
+          `INSERT INTO workflow_runs (id, project_id, task_id, attempt_id, profile_id, status, external_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run("run-1", project.id, task.id, attempt.id, "feature", "unknown", "inner-run-1");
+      const operation = createOperation(context, {
+        id: "operation-diagnosis",
+        idempotencyKey: "daemon:diagnosis",
+        kind: "daemon:workflow:inspect",
+        projectId: project.id,
+        taskId: task.id,
+        attemptId: attempt.id
+      });
+      updateOperation(context, {
+        operationId: operation.id,
+        status: "unknown",
+        failureCode: "auth_missing",
+        lastObservedState: {
+          decision: "operator_attention",
+          reasonCode: "workflow-run-id-mismatch",
+          observedSummary: "protocol mismatch with raw secret token should be truncated",
+          lockToken: "must-not-leak",
+          raw: { stdout: "provider raw output" }
+        }
+      });
+      context.db
+        .prepare(
+          `INSERT INTO events (type, summary, project_id, task_id, attempt_id, workflow_run_id, operation_id, severity, payload_json, artifact_refs_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          "daemon.recovery_decision",
+          "workflow-run-id-mismatch: workflow_run:run-1",
+          project.id,
+          task.id,
+          attempt.id,
+          "run-1",
+          operation.id,
+          "warn",
+          JSON.stringify({
+            tickId: "tick-1",
+            resourceKind: "workflow_run",
+            resourceId: "run-1",
+            operationId: operation.id,
+            decision: "operator_attention",
+            reasonCode: "workflow-run-id-mismatch",
+            observedSummary: "workflow protocol runId mismatch",
+            nextAction: "operator_review",
+            operatorAttentionRequired: true,
+            lockToken: "must-not-leak",
+            raw: { stdout: "provider raw output" },
+            artifactRefs: ["diagnostics/workflow.md"]
+          }),
+          JSON.stringify(["diagnostics/workflow.md"])
+        );
+      context.db
+        .prepare(
+          `INSERT INTO events (type, summary, project_id, task_id, attempt_id, operation_id, severity, payload_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          "daemon.retry_scheduled",
+          "retry later",
+          project.id,
+          task.id,
+          attempt.id,
+          operation.id,
+          "info",
+          JSON.stringify({ dueAt: "2026-05-05T01:00:00.000Z", reason: "transient" })
+        );
+      context.db
+        .prepare(
+          `INSERT INTO events (type, summary, project_id, task_id, attempt_id, workflow_run_id, operation_id, severity)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run("workflow.status_inspected", "workflow status inspected", project.id, task.id, attempt.id, "run-1", operation.id, "debug");
+      return getOperatorTaskDetail(context, task.id);
+    });
+
+    expect(detail.diagnosis.operatorAttention).toMatchObject({
+      required: true,
+      reasons: expect.arrayContaining(["workflow-run-id-mismatch"])
+    });
+    expect(detail.diagnosis.retryBudget).toMatchObject({
+      scheduledCount: 1,
+      latestDueAt: "2026-05-05T01:00:00.000Z"
+    });
+    expect(detail.diagnosis.recoveryTimeline[0]).toMatchObject({
+      decision: "operator_attention",
+      reasonCode: "workflow-run-id-mismatch",
+      artifactRefs: ["diagnostics/workflow.md"]
+    });
+    expect(detail.diagnosis.operationLedger[0]).toMatchObject({
+      id: "operation-diagnosis",
+      status: "unknown",
+      failureCode: "auth_missing",
+      lastDecision: "operator_attention",
+      lastReasonCode: "workflow-run-id-mismatch"
+    });
+    expect(detail.diagnosis.providerProtocolInspections.map((item) => item.type)).toEqual(
+      expect.arrayContaining(["daemon.recovery_decision", "workflow.status_inspected"])
+    );
+    expect(detail.diagnosis.providerProtocolInspections.map((item) => item.type)).not.toContain("pr.merged");
+    expect(JSON.stringify(detail.diagnosis)).not.toContain("must-not-leak");
+    expect(JSON.stringify(detail.diagnosis)).not.toContain("provider raw output");
+    expect(detail.surface.json.available_tools.map((tool) => tool.name)).not.toEqual(
+      expect.arrayContaining(["recover_task", "replay_operation", "release_lock", "daemon_tick"])
+    );
+  });
+
+  it("diagnosis 当前 attention 只看当前实体，历史 workflow/PR/session 不污染当前状态", () => {
+    const databasePath = createMigratedDatabase();
+    const detail = withDatabase(databasePath, (context) => {
+      const project = createProject(context, { id: "project-current-diagnosis", name: "current diagnosis" });
+      const task = createTask(context, { id: "task-current-diagnosis", projectId: project.id, title: "current diagnosis" });
+      const oldAttempt = createAttempt(context, { id: "attempt-1-old", projectId: project.id, taskId: task.id });
+      createPullRequest(context, {
+        id: "pr-old",
+        projectId: project.id,
+        taskId: task.id,
+        attemptId: oldAttempt.id,
+        providerKind: "github",
+        status: "closed"
+      });
+      context.db
+        .prepare(
+          `INSERT INTO workflow_runs (id, project_id, task_id, attempt_id, profile_id, status, external_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run("workflow-old", project.id, task.id, oldAttempt.id, "feature", "blocked", "inner-old");
+      context.db
+        .prepare(
+          `INSERT INTO agent_sessions (id, project_id, task_id, attempt_id, provider_kind, role, status)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run("agent-old", project.id, task.id, oldAttempt.id, "fake", "outer", "stalled");
+      context.db
+        .prepare(
+          `INSERT INTO events (type, summary, project_id, task_id, attempt_id, workflow_run_id, severity, payload_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          "daemon.recovery_decision",
+          "old workflow requires operator attention",
+          project.id,
+          task.id,
+          oldAttempt.id,
+          "workflow-old",
+          "warn",
+          JSON.stringify({
+            resourceKind: "workflow_run",
+            resourceId: "workflow-old",
+            decision: "operator_attention",
+            reasonCode: "old-workflow-blocked",
+            observedSummary: "old workflow blocked",
+            nextAction: "operator_review",
+            operatorAttentionRequired: true
+          })
+        );
+      const currentAttempt = createAttempt(context, { id: "attempt-z-current", projectId: project.id, taskId: task.id });
+      createWorkspace(context, {
+        id: "workspace-current",
+        projectId: project.id,
+        taskId: task.id,
+        attemptId: currentAttempt.id,
+        status: "ready",
+        workspacePath: "/tmp/current",
+        repoPath: "/tmp/current/repo",
+        branch: "coordinator/current",
+        baseBranch: "main"
+      });
+      context.db
+        .prepare(
+          `INSERT INTO events (type, summary, project_id, task_id, severity)
+           VALUES (?, ?, ?, ?, ?)`
+        )
+        .run("pr.merged", "historical merge action", project.id, task.id, "info");
+      return getOperatorTaskDetail(context, task.id);
+    });
+
+    expect(detail.currentBlocker).toBe("created");
+    expect(detail.diagnosis.operatorAttention).toMatchObject({
+      required: false,
+      reasons: []
+    });
+    expect(detail.diagnosis.providerProtocolInspections.map((item) => item.type)).not.toContain("pr.merged");
+  });
+
+  it("operator detail 能展示当前 blocked workspace 作为 blocker 和 attention", () => {
+    const databasePath = createMigratedDatabase();
+    const detail = withDatabase(databasePath, (context) => {
+      const project = createProject(context, { id: "project-blocked-workspace", name: "blocked workspace" });
+      const task = createTask(context, { id: "task-blocked-workspace", projectId: project.id, title: "blocked workspace" });
+      const attempt = createAttempt(context, { id: "attempt-blocked-workspace", projectId: project.id, taskId: task.id });
+      createWorkspace(context, {
+        id: "workspace-blocked",
+        projectId: project.id,
+        taskId: task.id,
+        attemptId: attempt.id,
+        status: "ready",
+        workspacePath: "/tmp/blocked",
+        repoPath: "/tmp/blocked/repo",
+        branch: "coordinator/blocked",
+        baseBranch: "main"
+      });
+      context.db.prepare("UPDATE workspaces SET status = ? WHERE id = ?").run("blocked", "workspace-blocked");
+      return getOperatorTaskDetail(context, task.id);
+    });
+
+    expect(detail.workspace).toMatchObject({ id: "workspace-blocked", status: "blocked" });
+    expect(detail.currentBlocker).toBe("workspace blocked: workspace-blocked");
+    expect(detail.diagnosis.operatorAttention).toMatchObject({
+      required: true,
+      reasons: expect.arrayContaining(["workspace blocked: workspace-blocked"])
+    });
   });
 
   it("controlTaskRuntime 通过 Core gate 暂停、恢复、retry 和取消 task，并写入 operator event", () => {

@@ -2,7 +2,17 @@ import { describe, expect, it } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createHumanRequest, createProject, createTask, listTaskEvents, runMigrations, withDatabase } from "@coordinator/db";
+import {
+  createAttempt,
+  createHumanRequest,
+  createOperation,
+  createProject,
+  createTask,
+  listTaskEvents,
+  runMigrations,
+  updateOperation,
+  withDatabase
+} from "@coordinator/db";
 import { buildServer } from "./server.js";
 
 describe("API health", () => {
@@ -128,12 +138,101 @@ describe("API health", () => {
       expect(detail.statusCode).toBe(200);
       expect(detail.json()).toMatchObject({
         task: { title: "Web manual task" },
+        diagnosis: {
+          currentBlocker: "created",
+          operatorAttention: { required: false }
+        },
         surface: {
           json: {
             available_tools: [{ name: "write_execution_plan" }, { name: "ask_human" }]
           }
         }
       });
+    } finally {
+      if (previous === undefined) {
+        delete process.env.COORDINATOR_DB_PATH;
+      } else {
+        process.env.COORDINATOR_DB_PATH = previous;
+      }
+    }
+  });
+
+  it("task detail API 返回 operator-only diagnosis 摘要", async () => {
+    const databasePath = join(mkdtempSync(join(tmpdir(), "coordinator-api-diagnosis-")), "api.sqlite");
+    runMigrations(databasePath);
+    withDatabase(databasePath, (context) => {
+      const project = createProject(context, { id: "project-api-diagnosis", name: "diagnosis" });
+      const task = createTask(context, { id: "task-api-diagnosis", projectId: project.id, title: "diagnosis" });
+      const attempt = createAttempt(context, { id: "attempt-api-diagnosis", projectId: project.id, taskId: task.id });
+      context.db
+        .prepare(
+          `INSERT INTO workflow_runs (id, project_id, task_id, attempt_id, profile_id, status, external_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run("run-api", project.id, task.id, attempt.id, "feature", "unknown", "inner-run-api");
+      const operation = createOperation(context, {
+        id: "operation-api-diagnosis",
+        idempotencyKey: "daemon:api-diagnosis",
+        kind: "daemon:workflow:inspect",
+        projectId: project.id,
+        taskId: task.id,
+        attemptId: attempt.id
+      });
+      updateOperation(context, {
+        operationId: operation.id,
+        status: "unknown",
+        lastObservedState: {
+          decision: "operator_attention",
+          reasonCode: "workflow-profile-mismatch",
+          observedSummary: "profile mismatch",
+          lockToken: "must-not-leak"
+        }
+      });
+      context.db
+        .prepare(
+          `INSERT INTO events (type, summary, project_id, task_id, attempt_id, workflow_run_id, operation_id, severity, payload_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          "daemon.recovery_decision",
+          "workflow-profile-mismatch: workflow_run:run-api",
+          project.id,
+          task.id,
+          attempt.id,
+          "run-api",
+          operation.id,
+          "warn",
+          JSON.stringify({
+            resourceKind: "workflow_run",
+            resourceId: "run-api",
+            operationId: operation.id,
+            decision: "operator_attention",
+            reasonCode: "workflow-profile-mismatch",
+            observedSummary: "workflow protocol profile mismatch",
+            nextAction: "operator_review",
+            operatorAttentionRequired: true,
+            lockToken: "must-not-leak"
+          })
+        );
+    });
+
+    const previous = process.env.COORDINATOR_DB_PATH;
+    process.env.COORDINATOR_DB_PATH = databasePath;
+    try {
+      const server = buildServer();
+      const response = await server.inject({ method: "GET", url: "/tasks/task-api-diagnosis" });
+
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      expect(body.diagnosis).toMatchObject({
+        operatorAttention: {
+          required: true,
+          reasons: expect.arrayContaining(["workflow-profile-mismatch"])
+        },
+        operationLedger: [{ id: "operation-api-diagnosis", lastReasonCode: "workflow-profile-mismatch" }],
+        recoveryTimeline: [{ reasonCode: "workflow-profile-mismatch", nextAction: "operator_review" }]
+      });
+      expect(JSON.stringify(body.diagnosis)).not.toContain("must-not-leak");
     } finally {
       if (previous === undefined) {
         delete process.env.COORDINATOR_DB_PATH;

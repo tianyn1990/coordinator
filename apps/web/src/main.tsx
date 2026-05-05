@@ -119,6 +119,56 @@ type TaskDetail = {
   events: EventRecord[];
   surface: SurfaceEnvelope;
   currentBlocker: string;
+  diagnosis: OperatorTaskDiagnosis;
+};
+
+type OperatorTaskDiagnosis = {
+  currentBlocker: string;
+  operatorAttention: {
+    required: boolean;
+    reasons: string[];
+  };
+  retryBudget: {
+    scheduledCount: number;
+    latestDueAt?: string;
+    exhausted: boolean;
+    lastReason?: string;
+  };
+  operationLedger: Array<{
+    id: string;
+    kind: string;
+    status: string;
+    failureCode?: string;
+    externalId?: string;
+    lastDecision?: string;
+    lastReasonCode?: string;
+    lastObservedSummary?: string;
+  }>;
+  recoveryTimeline: Array<{
+    eventId: number;
+    resourceKind?: string;
+    resourceId?: string;
+    operationId?: string;
+    decision?: string;
+    reasonCode?: string;
+    observedSummary?: string;
+    nextAction?: string;
+    retryDueAt?: string;
+    operatorAttentionRequired: boolean;
+    artifactRefs: string[];
+    severity: string;
+    createdAt: string;
+  }>;
+  providerProtocolInspections: Array<{
+    eventId: number;
+    type: string;
+    summary: string;
+    resource?: string;
+    operationId?: string;
+    artifactRefs: string[];
+    severity: string;
+    createdAt: string;
+  }>;
 };
 
 type Flash = {
@@ -417,6 +467,73 @@ function TaskDetailView({
       </section>
 
       <section className="panel wide">
+        <h3>Diagnosis</h3>
+        <div className="diagnosis-grid">
+          <div>
+            <p className="field-label">Operator attention</p>
+            <p className={detail.diagnosis.operatorAttention.required ? "attention warn" : "attention ok"}>
+              {detail.diagnosis.operatorAttention.required ? "required" : "not required"}
+            </p>
+            <RecordList
+              empty="暂无 operator attention reason。"
+              items={detail.diagnosis.operatorAttention.reasons}
+            />
+          </div>
+          <div>
+            <p className="field-label">Retry budget</p>
+            <RecordTable
+              rows={[
+                ["Scheduled", String(detail.diagnosis.retryBudget.scheduledCount)],
+                ["Latest due", detail.diagnosis.retryBudget.latestDueAt ?? "none"],
+                ["Exhausted", String(detail.diagnosis.retryBudget.exhausted)],
+                ["Last reason", detail.diagnosis.retryBudget.lastReason ?? "none"]
+              ]}
+            />
+          </div>
+        </div>
+        <div className="diagnosis-columns">
+          <DiagnosisList
+            title="Recovery timeline"
+            empty="暂无 recovery decision。"
+            items={detail.diagnosis.recoveryTimeline.map((item) => [
+              item.reasonCode ?? item.decision ?? "recovery",
+              [
+                item.createdAt,
+                item.resourceKind && item.resourceId ? `${item.resourceKind}:${item.resourceId}` : undefined,
+                item.nextAction ? `next=${item.nextAction}` : undefined,
+                item.observedSummary
+              ]
+                .filter(Boolean)
+                .join(" · ")
+            ])}
+          />
+          <DiagnosisList
+            title="Operation ledger"
+            empty="暂无 operation。"
+            items={detail.diagnosis.operationLedger.map((item) => [
+              `${item.kind} · ${item.status}`,
+              [
+                item.failureCode ? `failure=${item.failureCode}` : undefined,
+                item.lastDecision ? `decision=${item.lastDecision}` : undefined,
+                item.lastReasonCode,
+                item.lastObservedSummary
+              ]
+                .filter(Boolean)
+                .join(" · ")
+            ])}
+          />
+          <DiagnosisList
+            title="Provider / protocol inspect"
+            empty="暂无 inspect 摘要。"
+            items={detail.diagnosis.providerProtocolInspections.map((item) => [
+              item.type,
+              [item.createdAt, item.resource, item.summary].filter(Boolean).join(" · ")
+            ])}
+          />
+        </div>
+      </section>
+
+      <section className="panel wide">
         <h3>Coordinator Surface</h3>
         <div className="surface-grid">
           <div>
@@ -625,6 +742,26 @@ function RecordList({ items, empty }: { items: string[]; empty: string }) {
         <li key={item}>{item}</li>
       ))}
     </ul>
+  );
+}
+
+function DiagnosisList({ title, empty, items }: { title: string; empty: string; items: Array<[string, string]> }) {
+  return (
+    <div className="diagnosis-list">
+      <p className="field-label">{title}</p>
+      {items.length === 0 ? (
+        <p className="muted">{empty}</p>
+      ) : (
+        <ul className="compact-list">
+          {items.map(([primary, secondary], index) => (
+            <li key={`${primary}-${index}`}>
+              <strong>{primary}</strong>
+              {secondary ? <span>{secondary}</span> : null}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 

@@ -750,6 +750,18 @@ export function getActiveWorkspaceByAttempt(context: DbContext, attemptId: strin
   return row ? mapWorkspaceRow(row) : undefined;
 }
 
+export function getOperatorWorkspaceByAttempt(context: DbContext, attemptId: string): WorkspaceRecord | undefined {
+  const row = context.db
+    .prepare(
+      `SELECT * FROM workspaces
+       WHERE attempt_id = ? AND status IN ('planned', 'creating', 'ready', 'dirty', 'blocked')
+       ORDER BY created_at ASC, id ASC
+       LIMIT 1`
+    )
+    .get(attemptId);
+  return row ? mapWorkspaceRow(row) : undefined;
+}
+
 export function listWorkspacesByStatus(context: DbContext, statuses: string[], limit = 50): WorkspaceRecord[] {
   if (statuses.length === 0) {
     return [];
@@ -1287,6 +1299,18 @@ export function listOperationsByStatusAndKindPrefix(
        LIMIT ?`
     )
     .all(...statuses, `${kindPrefix}%`, limit)
+    .map(mapOperationRow);
+}
+
+export function listOperationsByTask(context: DbContext, taskId: string, limit = 10): OperationRecord[] {
+  return context.db
+    .prepare(
+      `SELECT * FROM operations
+       WHERE task_id = ?
+       ORDER BY updated_at DESC, created_at DESC, id DESC
+       LIMIT ?`
+    )
+    .all(taskId, limit)
     .map(mapOperationRow);
 }
 
