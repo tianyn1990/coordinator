@@ -1,0 +1,21 @@
+# Tasks
+
+- [x] 1. 更新 OpenSpec delta
+  - [x] 1.1 在 `daemon-recovery-matrix` 中补充 `workflow:action` operation recovery 要求。
+  - [x] 1.2 在 `daemon-runtime` 中补充 daemon 对 workflow action operation 的 read-only reconciliation 要求。
+- [x] 2. 实现 recovery 路径
+  - [x] 2.1 在 daemon tick 中扫描 `workflow:action` 的 `running/failed/unknown` operation。
+  - [x] 2.2 通过 DB workflow run + workflow protocol `status --run` 执行 read-only inspect。
+  - [x] 2.3 inspect 匹配时由 Core recovery decision 封口旧 operation 为 `reconciled`。
+  - [x] 2.4 inspect 失败或状态冲突时保持 `unknown` 并写 recovery/operator attention event。
+  - [x] 2.5 确保同 tick 不重复 inspect 同一 workflow run。
+- [x] 3. 测试
+  - [x] 3.1 覆盖 unknown `workflow:action` 经 inspect 匹配后标记为 `reconciled`。
+  - [x] 3.2 覆盖 inspect 失败时不推进 workflow run completed/handoff。
+  - [x] 3.3 覆盖同 state_version/action 在 reconcile 后给出清晰 CAS/idempotency 行为，后续使用新 state_version 可继续。
+  - [x] 3.4 覆盖只调用 workflow protocol，不读取 `.workflow` private state。
+- [x] 4. 验证与 review
+  - [x] 4.1 运行 `pnpm typecheck`。
+  - [x] 4.2 运行 `pnpm test`。
+  - [x] 4.3 运行 `openspec validate --all --strict`。
+  - [x] 4.4 交给独立 `gpt-5.5 high` subagent review，并显式检查 docs 总体设计心智、过度设计、协议偏离、分层污染和 agent surface/tool 暴露。

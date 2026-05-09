@@ -9,6 +9,7 @@ import {
   getActiveAgentSessionByTask,
   getLatestPullRequestByTask,
   getActiveWorkflowRunByAttempt,
+  getWorkflowRun,
   getHumanRequest,
   getLock,
   getOperationByIdempotencyKey,
@@ -332,6 +333,7 @@ export function runDaemonTick(context: DbContext, input: DaemonRuntimeInput = {}
   actions.push(...reconcileWorkspaces(context, tickId, input, touchedTaskIds));
   actions.push(...reconcileExpiredLocks(context, tickId, now, input));
   actions.push(...reconcilePullRequestOperations(context, tickId, input, touchedTaskIds));
+  actions.push(...reconcileWorkflowActionOperations(context, tickId, input, touchedWorkflowRunIds, touchedTaskIds));
   actions.push(...watchActiveAgentSessions(context, tickId, owner, now));
   actions.push(...reconcileWorkflowRuns(context, tickId, owner, input, touchedWorkflowRunIds, touchedTaskIds));
   actions.push(...wakeAnsweredHumanRequests(context, tickId, owner, now, input, touchedTaskIds));
@@ -511,6 +513,108 @@ function reconcilePullRequestOperations(
     }
   }
   return actions;
+}
+
+function reconcileWorkflowActionOperations(
+  context: DbContext,
+  tickId: string,
+  input: DaemonRuntimeInput,
+  touchedWorkflowRunIds: Set<string>,
+  touchedTaskIds: Set<string>
+): DaemonActionResult[] {
+  const operations = listOperationsByStatusAndKindPrefix(context, ["running", "failed", "unknown"], "workflow:action", input.candidateLimit ?? 5)
+    .filter((operation) => operation.kind === "workflow:action" && !hasPersistedRecoveryDecision(operation.lastObservedState));
+  const actions: DaemonActionResult[] = [];
+  const inspectedRuns = new Map<string, { observedSummary: string } | { error: Error }>();
+  for (const operation of operations) {
+    const run = workflowRunFromActionOperation(context, operation);
+    if (!run) {
+      const decision = decideOperationInspectFailure({
+        operation,
+        error: new WorkflowProtocolError("workflow action operation missing workflow run")
+      });
+      persistRecoveryDecision(context, decision, {
+        tickId,
+        operationStatus: "unknown",
+        severity: "warn"
+      });
+      if (operation.taskId) {
+        touchedTaskIds.add(operation.taskId);
+      }
+      actions.push({
+        kind: "reconcile_failed",
+        taskId: operation.taskId,
+        status: "failed",
+        summary: decision.observedSummary
+      });
+      continue;
+    }
+
+    touchedWorkflowRunIds.add(run.id);
+    let observation = inspectedRuns.get(run.id);
+    if (!observation) {
+      // action 已可能产生外部副作用；恢复时只能 read-only inspect，不能直接重放 action。
+      try {
+        const inspected = inspectWorkflowRun(context, buildWorkflowInspectInput(run.id, input.workflowInspectRunner));
+        observation = { observedSummary: `workflow action inspected: ${inspected.workflowRun.id}:${inspected.workflowRun.status}` };
+      } catch (error) {
+        observation = { error: error instanceof Error ? error : new Error(String(error)) };
+      }
+      inspectedRuns.set(run.id, observation);
+    }
+    if ("observedSummary" in observation) {
+      const decision = decideOperationRecovery({
+        operation,
+        observedExternalState: "matches-intent",
+        observedSummary: observation.observedSummary,
+        retryAllowed: false
+      });
+      persistRecoveryDecision(context, decision, {
+        tickId,
+        operationStatus: operationStatusForDecision(decision),
+        severity: decision.operatorAttentionRequired ? "warn" : "debug"
+      });
+      actions.push({
+        kind: decision.kind === "reconciled" ? "workflow_inspected" : "retry_blocked",
+        taskId: operation.taskId,
+        workflowRunId: run.id,
+        status: decision.operatorAttentionRequired ? "failed" : "skipped",
+        summary: decision.observedSummary
+      });
+    } else {
+      const decision = decideOperationInspectFailure({
+        operation,
+        error: observation.error
+      });
+      persistRecoveryDecision(context, decision, {
+        tickId,
+        operationStatus: "unknown",
+        severity: "warn"
+      });
+      if (operation.taskId) {
+        touchedTaskIds.add(operation.taskId);
+      }
+      actions.push({
+        kind: "reconcile_failed",
+        taskId: operation.taskId,
+        workflowRunId: run.id,
+        status: "failed",
+        summary: decision.observedSummary
+      });
+    }
+  }
+  return actions;
+}
+
+function workflowRunFromActionOperation(context: DbContext, operation: OperationRecord): WorkflowRunRecord | undefined {
+  const workflowRunId = isRecord(operation.lastObservedState) ? toOptionalString(operation.lastObservedState.workflowRunId) : undefined;
+  if (workflowRunId) {
+    return getWorkflowRun(context, workflowRunId);
+  }
+  if (operation.attemptId) {
+    return getActiveWorkflowRunByAttempt(context, operation.attemptId);
+  }
+  return undefined;
 }
 
 function isLockOwnerActive(context: DbContext, resourceKind: string, resourceId: string): boolean {

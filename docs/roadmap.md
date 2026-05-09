@@ -157,10 +157,10 @@ P2 只预留接口和规划，不进入 V1 完成标准：
 ### 当前进度
 
 - 当前阶段：`Iteration 12: P1 / P2 Hardening` 已完成第六个切片 `observability and operator diagnosis polish`。
-- 当前 OpenSpec change：`harden-observability-operator-diagnosis` 已完成实现、验证和独立 `gpt-5.5 high` review；归档后位置应为 `openspec/changes/archive/2026-05-05-harden-observability-operator-diagnosis`。
-- 当前正式规格：归档时应同步到 `openspec/specs/coordinator-surface/spec.md`、`openspec/specs/core-data-model/spec.md`、`openspec/specs/web-human-review-surface/spec.md`。
+- 当前 OpenSpec change：`reconcile-workflow-action-operations` 已完成实现、验证、独立 `gpt-5.5 high` review 和归档；归档后位置为 `openspec/changes/archive/2026-05-09-reconcile-workflow-action-operations`。
+- 当前正式规格：已同步到 `openspec/specs/daemon-recovery-matrix/spec.md`、`openspec/specs/daemon-runtime/spec.md`。
 - 下一阶段：继续 `Iteration 12: P1 / P2 Hardening`。
-- 下一阶段重点：根据后续优先级进入下一批 P1/P2 hardening 切片。Slice 12.6 已补齐 operator-only diagnosis，后续如继续增强 observability，应保持只读派生、operator-only 展示和 agent-facing surface 不扩大的边界。
+- 下一阶段重点：根据后续优先级进入下一批 P1/P2 hardening 切片。Workflow action operation recovery 已补齐正式闭环，后续如继续增强 observability 或 recovery，应保持只读派生、protocol-only 观察和 agent-facing surface 不扩大的边界。
 
 ### Iteration 12 后续切片顺序
 
@@ -349,6 +349,8 @@ harden-daemon-reconciliation-matrix
 - Coordinator Surface 已补强 paused/canceled 语义：paused 映射到现有 resume surface、canceled 映射到 completed terminal surface；二者只保留 inspect 或空工具，并在 recommended next step、recovery 和 denied actions 中明确不得继续执行副作用操作。
 - 第十二轮第一个切片经过独立 `gpt-5.5 high` subagent review。首次 review 指出 paused/canceled surface 仍可能暴露执行工具；已修复并补回归测试，复审确认无 must-fix。
 - 本切片验证通过：`openspec validate --all --strict`、`pnpm typecheck`、`pnpm test`、`pnpm build`；review 修复后也通过 focused tests 和最终全量验证。
+- 已补齐 workflow:action operation 的正式恢复闭环：daemon 通过 workflow protocol status 只读 inspect 同步对账，unknown/running/failed 的旧 action operation 可被封口为 reconciled；inspect 失败或冲突保持 unknown/operator attention，不读取 `.workflow` private state，不静默推进 completed/handoff/pr_ready。
+- workflow action recovery 已补强同 tick 去重与失败路径可观测性：同一 workflow run 多个 action operation 复用一次 status observation；真实 `invokeWorkflowAction` 失败会记录 workflowRunId，便于 daemon 恢复时准确定位对应 run；相关测试已补齐。
 - 已实现 daemon/Core recovery matrix：新增 Core-owned `RecoveryDecision`，将 daemon 恢复路径收敛为有限的 `Observation -> Core RecoveryDecision -> Daemon Action`，daemon 继续只做 runtime driver，不判断业务完成、review 结论、workflow profile 或 merge readiness。
 - Operation replay 已覆盖 `running`、`failed`、`unknown` operation 的主要恢复场景：`matches-intent` 标记 reconciled，`absent` 按 retry budget 安排 retry 或 operator attention，`conflicts-with-intent` 进入 operator attention，`unclear` 保持 unknown/operator review。
 - Daemon operation replay 候选查询已在 DB 层按 `kind LIKE 'daemon:%'` 和未持久化 recovery decision 过滤后再 `LIMIT`，避免非 daemon backlog 或已处理 daemon backlog 挤占候选窗口。

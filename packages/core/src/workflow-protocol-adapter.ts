@@ -398,7 +398,12 @@ export function invokeWorkflowAction(context: DbContext, input: InvokeWorkflowAc
         status: sideEffectWindowStarted ? "unknown" : "failed",
         now,
         failureCode: error instanceof Error ? error.name : "unknown",
-        lastObservedState: { phase: "workflow-action-failed", error: error instanceof Error ? error.message : String(error), action }
+        lastObservedState: {
+          phase: "workflow-action-failed",
+          workflowRunId: workflowRun.id,
+          error: error instanceof Error ? error.message : String(error),
+          action
+        }
       });
     }
     throw error;

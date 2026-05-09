@@ -28,6 +28,7 @@ import {
   FakeAgentProvider,
   FakePullRequestProvider,
   buildTaskSurfaceFromDb,
+  invokeWorkflowAction,
   parseAgentToolRequest,
   runDaemonTick,
   type AgentProviderRunInput,
@@ -926,6 +927,365 @@ describe("daemon runtime", () => {
           (event.payload as { reasonCode?: string } | undefined)?.reasonCode === "unknown-operation-external-matches"
       )
     ).toHaveLength(1);
+  });
+
+  it("unknown workflow action operation 通过 protocol inspect 对账后封口为 reconciled", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createTaskFixture(databasePath);
+    const calls: string[][] = [];
+    let branch = "";
+    const runner: WorkflowProtocolRunner = (args) => {
+      calls.push(args);
+      return JSON.stringify({
+        runId: "inner-action-run",
+        profile: "feature",
+        lifecycle: "active",
+        handoff: { available: false, artifacts: [], deniedActions: [] },
+        summary: "action status inspected"
+      });
+    };
+
+    withDatabase(databasePath, (context) => {
+      const created = createWorkflowWorkspaceFixture(context, fixture, "workflow-action-reconcile");
+      branch = created.branch;
+      context.db
+        .prepare(
+          `INSERT INTO workflow_runs (id, project_id, task_id, attempt_id, profile_id, status, external_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run("workflow-action-reconcile", fixture.projectId, fixture.taskId, created.attempt.id, "feature", "running", "inner-action-run");
+      const operation = createOperation(context, {
+        idempotencyKey: "workflow:action:workflow-action-reconcile:1:run-alignment-checks",
+        kind: "workflow:action",
+        projectId: fixture.projectId,
+        taskId: fixture.taskId,
+        attemptId: created.attempt.id,
+        externalId: "inner-action-run"
+      });
+      updateOperation(context, {
+        operationId: operation.id,
+        status: "unknown",
+        lastObservedState: { phase: "workflow-action-failed", workflowRunId: "workflow-action-reconcile", action: "run-alignment-checks" }
+      });
+    });
+
+    withDatabase(databasePath, (context) => runDaemonTick(context, {
+      workflowInspectRunner: runner,
+      workspaceGitRunner: createWorkflowWorkspaceGitRunner(branch)
+    }));
+
+    const state = withDatabase(databasePath, (context) => ({
+      operation: getOperationByIdempotencyKey(context, "workflow:action:workflow-action-reconcile:1:run-alignment-checks"),
+      run: context.db.prepare("SELECT status, state_version FROM workflow_runs WHERE id = ?").get("workflow-action-reconcile") as {
+        status: string;
+        state_version: number;
+      },
+      events: listTaskEvents(context, fixture.taskId)
+    }));
+    expect(calls.map((args) => args.join(" "))).toEqual(["protocol status --run inner-action-run"]);
+    expect(state.operation).toMatchObject({ status: "reconciled" });
+    expect(state.run).toMatchObject({ status: "running", state_version: 1 });
+    expect(
+      state.events.find(
+        (event) =>
+          event.type === "daemon.recovery_decision" &&
+          (event.payload as { reasonCode?: string } | undefined)?.reasonCode === "unknown-operation-external-matches"
+      )?.payload
+    ).toMatchObject({
+      decision: "reconciled",
+      resourceKind: "operation"
+    });
+    expect(state.events.filter((event) => event.type === "daemon.workflow_reconciled")).toHaveLength(0);
+  });
+
+  it("真实 invokeWorkflowAction 失败记录 workflowRunId，并可由 daemon 对账封口", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createTaskFixture(databasePath);
+    const calls: string[][] = [];
+    let branch = "";
+    let actionKey = "";
+    const failingActionRunner: WorkflowProtocolRunner = (args) => {
+      calls.push(args);
+      if (args[1] === "action") {
+        throw new Error("openspec validate failed");
+      }
+      return JSON.stringify({
+        runId: "inner-action-run",
+        profile: "feature",
+        lifecycle: "active",
+        handoff: { available: false, artifacts: [], deniedActions: [] },
+        summary: "status after failed action"
+      });
+    };
+
+    withDatabase(databasePath, (context) => {
+      const created = createWorkflowWorkspaceFixture(context, fixture, "workflow-action-real-failure");
+      branch = created.branch;
+      context.db
+        .prepare(
+          `INSERT INTO workflow_runs (id, project_id, task_id, attempt_id, profile_id, status, external_id, state_version)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run("workflow-action-real-failure", fixture.projectId, fixture.taskId, created.attempt.id, "feature", "running", "inner-action-run", 1);
+      expect(() =>
+        invokeWorkflowAction(context, {
+          workflowRunId: "workflow-action-real-failure",
+          action: "run-alignment-checks",
+          expectedStateVersion: 1,
+          runner: failingActionRunner
+        })
+      ).toThrow(/openspec validate failed/);
+      const row = context.db
+        .prepare("SELECT idempotency_key FROM operations WHERE kind = ? AND attempt_id = ?")
+        .get("workflow:action", created.attempt.id) as { idempotency_key: string };
+      actionKey = row.idempotency_key;
+    });
+
+    const afterFailure = withDatabase(databasePath, (context) => getOperationByIdempotencyKey(context, actionKey));
+    expect(afterFailure).toMatchObject({
+      status: "unknown",
+      lastObservedState: expect.objectContaining({ workflowRunId: "workflow-action-real-failure" })
+    });
+
+    withDatabase(databasePath, (context) => runDaemonTick(context, {
+      workflowInspectRunner: failingActionRunner,
+      workspaceGitRunner: createWorkflowWorkspaceGitRunner(branch)
+    }));
+
+    const state = withDatabase(databasePath, (context) => ({
+      operation: getOperationByIdempotencyKey(context, actionKey),
+      run: context.db.prepare("SELECT status, state_version FROM workflow_runs WHERE id = ?").get("workflow-action-real-failure") as {
+        status: string;
+        state_version: number;
+      }
+    }));
+    expect(calls.map((args) => args.join(" "))).toEqual([
+      "protocol action --run inner-action-run run-alignment-checks",
+      "protocol status --run inner-action-run"
+    ]);
+    expect(state.operation).toMatchObject({ status: "reconciled" });
+    expect(state.run).toMatchObject({ status: "running", state_version: 2 });
+
+    const replayRunner: WorkflowProtocolRunner = (args) =>
+      JSON.stringify({
+        runId: "inner-action-run",
+        profile: "feature",
+        lifecycle: "active",
+        handoff: { available: false, artifacts: [], deniedActions: [] },
+        summary: args[1] === "action" ? "new action applied" : "old version replay inspected"
+      });
+    const replay = withDatabase(databasePath, (context) => {
+      const oldVersion = invokeWorkflowAction(context, {
+        workflowRunId: "workflow-action-real-failure",
+        action: "run-alignment-checks",
+        expectedStateVersion: 1,
+        runner: replayRunner
+      });
+      const newVersion = invokeWorkflowAction(context, {
+        workflowRunId: "workflow-action-real-failure",
+        action: "run-alignment-checks",
+        expectedStateVersion: 2,
+        runner: replayRunner
+      });
+      return { oldVersion, newVersion };
+    });
+    expect(replay.oldVersion.reused).toBe(true);
+    expect(replay.oldVersion.operationId).toBe(state.operation?.id);
+    expect(replay.newVersion.reused).toBe(false);
+  });
+
+  it("同一 workflow run 多个 action operation 在同一 tick 只 inspect 一次", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createTaskFixture(databasePath);
+    const calls: string[][] = [];
+    let branch = "";
+    const runner: WorkflowProtocolRunner = (args) => {
+      calls.push(args);
+      return JSON.stringify({
+        runId: "inner-action-run",
+        profile: "feature",
+        lifecycle: "active",
+        handoff: { available: false, artifacts: [], deniedActions: [] },
+        summary: "single status observation"
+      });
+    };
+
+    withDatabase(databasePath, (context) => {
+      const created = createWorkflowWorkspaceFixture(context, fixture, "workflow-action-dedupe");
+      branch = created.branch;
+      context.db
+        .prepare(
+          `INSERT INTO workflow_runs (id, project_id, task_id, attempt_id, profile_id, status, external_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run("workflow-action-dedupe", fixture.projectId, fixture.taskId, created.attempt.id, "feature", "running", "inner-action-run");
+      for (const action of ["run-alignment-checks", "freeze-requirements"]) {
+        const operation = createOperation(context, {
+          idempotencyKey: `workflow:action:workflow-action-dedupe:1:${action}`,
+          kind: "workflow:action",
+          projectId: fixture.projectId,
+          taskId: fixture.taskId,
+          attemptId: created.attempt.id,
+          externalId: "inner-action-run"
+        });
+        updateOperation(context, {
+          operationId: operation.id,
+          status: "unknown",
+          lastObservedState: { workflowRunId: "workflow-action-dedupe", action }
+        });
+      }
+    });
+
+    withDatabase(databasePath, (context) => runDaemonTick(context, {
+      workflowInspectRunner: runner,
+      workspaceGitRunner: createWorkflowWorkspaceGitRunner(branch)
+    }));
+
+    const state = withDatabase(databasePath, (context) => ({
+      first: getOperationByIdempotencyKey(context, "workflow:action:workflow-action-dedupe:1:run-alignment-checks"),
+      second: getOperationByIdempotencyKey(context, "workflow:action:workflow-action-dedupe:1:freeze-requirements"),
+      run: context.db.prepare("SELECT state_version FROM workflow_runs WHERE id = ?").get("workflow-action-dedupe") as { state_version: number }
+    }));
+    expect(calls.map((args) => args.join(" "))).toEqual(["protocol status --run inner-action-run"]);
+    expect(state.first).toMatchObject({ status: "reconciled" });
+    expect(state.second).toMatchObject({ status: "reconciled" });
+    expect(state.run.state_version).toBe(1);
+  });
+
+  it("workflow action operation inspect 失败时保持 unknown 且不推进 completed", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createTaskFixture(databasePath);
+    const runner: WorkflowProtocolRunner = () => {
+      throw new Error("workflow action inspect unavailable secret-provider-output lockToken completeOperationJson");
+    };
+    let branch = "";
+
+    withDatabase(databasePath, (context) => {
+      const created = createWorkflowWorkspaceFixture(context, fixture, "workflow-action-inspect-failed");
+      branch = created.branch;
+      context.db
+        .prepare(
+          `INSERT INTO workflow_runs (id, project_id, task_id, attempt_id, profile_id, status, external_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run("workflow-action-inspect-failed", fixture.projectId, fixture.taskId, created.attempt.id, "feature", "running", "inner-action-run");
+      const operation = createOperation(context, {
+        idempotencyKey: "workflow:action:workflow-action-inspect-failed:1:run-alignment-checks",
+        kind: "workflow:action",
+        projectId: fixture.projectId,
+        taskId: fixture.taskId,
+        attemptId: created.attempt.id,
+        externalId: "inner-action-run"
+      });
+      updateOperation(context, {
+        operationId: operation.id,
+        status: "unknown",
+        lastObservedState: { phase: "workflow-action-failed", workflowRunId: "workflow-action-inspect-failed", action: "run-alignment-checks" }
+      });
+    });
+
+    const result = withDatabase(databasePath, (context) => runDaemonTick(context, {
+      workflowInspectRunner: runner,
+      workspaceGitRunner: createWorkflowWorkspaceGitRunner(branch)
+    }));
+
+    const state = withDatabase(databasePath, (context) => ({
+      operation: getOperationByIdempotencyKey(context, "workflow:action:workflow-action-inspect-failed:1:run-alignment-checks"),
+      run: context.db.prepare("SELECT status, handoff_kind FROM workflow_runs WHERE id = ?").get("workflow-action-inspect-failed") as {
+        status: string;
+        handoff_kind: string | null;
+      },
+      events: listTaskEvents(context, fixture.taskId)
+    }));
+    expect(result.actions).toContainEqual(expect.objectContaining({
+      kind: "reconcile_failed",
+      workflowRunId: "workflow-action-inspect-failed",
+      status: "failed"
+    }));
+    expect(state.operation).toMatchObject({ status: "unknown" });
+    expect(state.run).toMatchObject({ status: "running", handoff_kind: null });
+    expect(JSON.stringify(state.events)).not.toContain("secret-provider-output");
+    expect(JSON.stringify(state.events)).not.toContain("lockToken");
+    expect(JSON.stringify(state.events)).not.toContain("completeOperationJson");
+    expect(
+      state.events.find(
+        (event) =>
+          event.type === "daemon.recovery_decision" &&
+          (event.payload as { reasonCode?: string } | undefined)?.reasonCode === "operation-inspect-failed"
+      )?.payload
+    ).toMatchObject({
+      decision: "operator_attention",
+      observedSummary: "operation inspect failed"
+    });
+  });
+
+  it("workflow action recovery 只调用 protocol status，不读取 .workflow private state", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createTaskFixture(databasePath);
+    const calls: string[][] = [];
+    let branch = "";
+    const runner: WorkflowProtocolRunner = (args) => {
+      calls.push(args);
+      return JSON.stringify({
+        runId: "inner-action-run",
+        profile: "feature",
+        lifecycle: "active",
+        handoff: { available: false, artifacts: [], deniedActions: [] },
+        summary: "status from protocol"
+      });
+    };
+
+    withDatabase(databasePath, (context) => {
+      const { attempt, workspace, branch: createdBranch } = createWorkflowWorkspaceFixture(context, fixture, "workflow-action-private-state");
+      branch = createdBranch;
+      const repoPath = workspace.repoPath;
+      expect(repoPath).toBeDefined();
+      mkdirSync(join(repoPath!, ".workflow", "runs", "inner-action-run"), { recursive: true });
+      writeFileSync(
+        join(repoPath!, ".workflow", "runs", "inner-action-run", "state.json"),
+        JSON.stringify({
+          runId: "inner-action-run",
+          profile: "feature",
+          lifecycle: "completed",
+          handoff: { available: true, kind: "pr_ready" }
+        })
+      );
+      context.db
+        .prepare(
+          `INSERT INTO workflow_runs (id, project_id, task_id, attempt_id, profile_id, status, external_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run("workflow-action-private-state", fixture.projectId, fixture.taskId, attempt.id, "feature", "running", "inner-action-run");
+      const operation = createOperation(context, {
+        idempotencyKey: "workflow:action:workflow-action-private-state:1:run-alignment-checks",
+        kind: "workflow:action",
+        projectId: fixture.projectId,
+        taskId: fixture.taskId,
+        attemptId: attempt.id,
+        externalId: "inner-action-run"
+      });
+      updateOperation(context, {
+        operationId: operation.id,
+        status: "unknown",
+        lastObservedState: { workflowRunId: "workflow-action-private-state", action: "run-alignment-checks" }
+      });
+    });
+
+    withDatabase(databasePath, (context) => runDaemonTick(context, {
+      workflowInspectRunner: runner,
+      workspaceGitRunner: createWorkflowWorkspaceGitRunner(branch)
+    }));
+
+    const state = withDatabase(databasePath, (context) => ({
+      run: context.db.prepare("SELECT status, handoff_kind FROM workflow_runs WHERE id = ?").get("workflow-action-private-state") as {
+        status: string;
+        handoff_kind: string | null;
+      },
+      operation: getOperationByIdempotencyKey(context, "workflow:action:workflow-action-private-state:1:run-alignment-checks")
+    }));
+    expect(calls.map((args) => args.join(" "))).toEqual(["protocol status --run inner-action-run"]);
+    expect(state.run).toMatchObject({ status: "running", handoff_kind: null });
+    expect(state.operation).toMatchObject({ status: "reconciled" });
   });
 
   it("unknown daemon workflow inspect 失败时写 recovery decision 并封口，避免 tick 中断和重复撞错", () => {
