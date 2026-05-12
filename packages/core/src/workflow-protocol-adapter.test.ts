@@ -108,6 +108,12 @@ function createProtocolRunner() {
         substate: "complete-looking-debug-only",
         gate: { state: "open" },
         allowedActions: ["debug-only"],
+        actionInputs: {
+          "debug-only": {
+            requiredArgs: ["change-id"],
+            usage: "workflow protocol action --run inner-run-1 debug-only <change-id>"
+          }
+        },
         handoff: { available: false, artifacts: [], deniedActions: ["create-pr-from-coordinator"] },
         summary: "no handoff yet"
       });
@@ -257,6 +263,24 @@ describe("workflow protocol adapter", () => {
 
     expect(result.workflowRun).toMatchObject({ status: "running", handoffKind: undefined });
     expect(result.status.debug).toMatchObject({ stage: "review", substate: "complete-looking-debug-only" });
+    expect(result.status.actionInputHints).toEqual({
+      "debug-only": {
+        requiredArgs: ["change-id"],
+        usage: "workflow protocol action --run inner-run-1 debug-only <change-id>"
+      }
+    });
+
+    const events = withDatabase(databasePath, (context) => listTaskEvents(context, fixture.taskId));
+    const inspected = events.find((event) => event.type === "workflow.status_inspected");
+    expect(inspected?.payload).toMatchObject({
+      actionInputHints: {
+        "debug-only": {
+          requiredArgs: ["change-id"],
+          usage: "workflow protocol action --run inner-run-1 debug-only <change-id>"
+        }
+      }
+    });
+    expect(JSON.stringify(inspected?.payload)).not.toContain('"actionInputs"');
   });
 
   it("status 返回 runId 不匹配时拒绝持久化，避免通过私有状态猜测恢复", () => {

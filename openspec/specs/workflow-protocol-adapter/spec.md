@@ -47,7 +47,7 @@
 
 ### Requirement: workflow status 只能按 protocol handoff 推进外层 workflow run
 
-系统 SHALL 只用 lifecycle/handoff/artifacts/recovery/summary 更新外层 workflow run 粗粒度状态；stage/substate/gate/allowedActions/deniedActions 只能用于 debug/display event payload。
+系统 SHALL 只用 lifecycle/handoff/artifacts/recovery/summary 更新外层 workflow run 粗粒度状态；stage/substate/gate/allowedActions/deniedActions/actionInputs 只能用于 operator debug/display event payload。
 
 #### Scenario: stage 看似完成但无 handoff
 
@@ -61,9 +61,16 @@
 - **THEN** workflow run 状态更新为 handoff
 - **AND** handoff kind 保存为 pr_ready
 
+#### Scenario: status 返回 action input hints
+
+- **WHEN** workflow protocol status 返回顶层 `actionInputs`
+- **THEN** 系统只解析 action id、required args 和 usage 等窄字段
+- **AND** operator-only status 输出可以展示这些 action input hints
+- **AND** Coordinator Surface 不得因此新增 agent-facing tool、扩大 available tools 或根据 action input hints 推进外层状态机
+
 ### Requirement: 系统必须支持 action/artifacts/events 查询
 
-系统 SHALL 支持 `workflow protocol action --run <run-id> <action>`、`artifacts --run <run-id>`、`events --run <run-id>`，并记录外层 event。
+系统 SHALL 支持 `workflow protocol action --run <run-id> <action>`、`artifacts --run <run-id>`、`events --run <run-id>`，并记录外层 event。operator-only workflow inspect/action 入口 MAY 持久化状态 snapshot 或审计 event，因此它们不是纯读高频 polling API。
 
 #### Scenario: 执行 workflow action
 
@@ -84,6 +91,12 @@
 - **THEN** 系统调用 protocol events
 - **AND** append `workflow.events_inspected` event
 
+#### Scenario: operator debug 查询不是纯读 polling API
+
+- **WHEN** operator 使用 workflow status/events/action 调试入口
+- **THEN** 系统可以记录审计 event 或状态 snapshot
+- **AND** 这些入口不得进入 Coordinator Agent Surface
+
 ### Requirement: CLI/API workflow 入口必须是 operator-only
 
 系统 SHALL 提供 CLI/API 的 workflow capabilities/start/status/action/artifacts/events 调试入口，但这些入口不得进入 Coordinator Surface 的 agent tools。
@@ -97,3 +110,4 @@
 
 - **WHEN** operator 调用 API 为 attempt 启动 workflow run
 - **THEN** API 返回 workflow run 启动结果
+

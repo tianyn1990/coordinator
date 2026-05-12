@@ -107,6 +107,8 @@ Symphony 的核心经验会被吸收为：
   - `coordinator` 与 `workflow` 的正式协议边界。
 - [workflow-project-handoff.md](./workflow-project-handoff.md)
   - 交接给 `/Users/hetao/Documents/github/workflow` 工程的 protocol bridge 实现说明。
+- [workflow-action-inputs-handoff.md](./workflow-action-inputs-handoff.md)
+  - 交接给 `/Users/hetao/Documents/github/workflow` 工程的 actionInputs protocol schema 正式化说明。
 - [execution-workspace.md](./execution-workspace.md)
   - workspace、git worktree、branch、worker runtime、agent provider。
 - [project-registry.md](./project-registry.md)

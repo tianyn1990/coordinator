@@ -11,8 +11,8 @@
     "build": "pnpm -r build",
     "dev:api": "pnpm --filter @coordinator/api dev",
     "dev:web": "pnpm --filter @coordinator/web dev",
-    "cli": "pnpm --filter @coordinator/cli start --",
-    "migrate": "pnpm --filter @coordinator/cli start -- migrate",
+    "cli": "pnpm --filter @coordinator/cli start",
+    "migrate": "pnpm --filter @coordinator/cli start migrate",
     "test": "vitest run",
     "typecheck": "tsc -b tsconfig.packages.json"
   },

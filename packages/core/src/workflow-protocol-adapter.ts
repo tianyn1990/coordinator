@@ -25,6 +25,8 @@ import {
 } from "@coordinator/db";
 
 const DEFAULT_PROTOCOL_TIMEOUT_MS = 120_000;
+const MAX_ACTION_INPUT_HINT_KEY_LENGTH = 120;
+const MAX_ACTION_INPUT_HINT_USAGE_LENGTH = 1_000;
 
 export type WorkflowProtocolRunner = (args: string[], options: { cwd: string; launcher: string; timeoutMs: number }) => string;
 
@@ -60,6 +62,11 @@ export type WorkflowHandoff = {
   recovery?: { action?: string; guidance?: string };
 };
 
+export type WorkflowActionInputHint = {
+  requiredArgs: string[];
+  usage?: string;
+};
+
 export type WorkflowStatus = {
   runId: string;
   profile?: string;
@@ -67,6 +74,7 @@ export type WorkflowStatus = {
   summary?: string;
   handoff: WorkflowHandoff;
   artifactRoot?: string;
+  actionInputHints: Record<string, WorkflowActionInputHint>;
   debug: {
     stage?: string;
     substate?: string;
@@ -594,6 +602,7 @@ function parseWorkflowStatus(value: unknown, options: { fallbackLifecycle?: Work
     summary: optionalString(object.summary) ?? optionalString(object.status),
     handoff,
     artifactRoot: optionalString(object.artifactRoot),
+    actionInputHints: parseActionInputHints(object.actionInputs),
     debug: {
       stage: optionalString(object.stage),
       substate: optionalString(object.substate),
@@ -604,6 +613,26 @@ function parseWorkflowStatus(value: unknown, options: { fallbackLifecycle?: Work
       eventLog: optionalString(object.eventLog)
     }
   };
+}
+
+function parseActionInputHints(value: unknown): Record<string, WorkflowActionInputHint> {
+  if (value === undefined || value === null) {
+    return {};
+  }
+  // 只投影 workflow 顶层 actionInputs 的窄提示，避免 raw status 或私有状态进入外层。
+  const object = requireObject(value, "actionInputs");
+  const hints: Record<string, WorkflowActionInputHint> = {};
+  for (const [actionId, rawHint] of Object.entries(object)) {
+    const normalizedActionId = requireBoundedNonEmpty(actionId, "actionInputs action id", MAX_ACTION_INPUT_HINT_KEY_LENGTH);
+    const hint = requireObject(rawHint, `actionInputs.${normalizedActionId}`);
+    hints[normalizedActionId] = {
+      requiredArgs: optionalStringArray(hint.requiredArgs, `actionInputs.${normalizedActionId}.requiredArgs`).map((arg, index) =>
+        requireBoundedNonEmpty(arg, `actionInputs.${normalizedActionId}.requiredArgs[${index}]`, MAX_ACTION_INPUT_HINT_KEY_LENGTH)
+      ),
+      usage: optionalBoundedString(hint.usage, MAX_ACTION_INPUT_HINT_USAGE_LENGTH)
+    };
+  }
+  return hints;
 }
 
 function parseWorkflowArtifacts(value: unknown): WorkflowArtifacts {
@@ -712,6 +741,7 @@ function protocolStatusEventPayload(status: WorkflowStatus, command: string): un
     summary: status.summary,
     handoff: status.handoff,
     artifactRoot: status.artifactRoot,
+    actionInputHints: status.actionInputHints,
     // debug 字段只服务观测和排查，不能被外层状态机当成完成语义。
     debug: status.debug
   };
@@ -867,6 +897,14 @@ function requireNonEmpty(value: string, fieldName: string): string {
   return normalized;
 }
 
+function requireBoundedNonEmpty(value: string, fieldName: string, maxLength: number): string {
+  const normalized = requireNonEmpty(value, fieldName);
+  if (normalized.length > maxLength) {
+    throw new WorkflowProtocolError(`${fieldName} 长度不能超过 ${maxLength}`);
+  }
+  return normalized;
+}
+
 function requireObject(value: unknown, fieldName: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new WorkflowProtocolError(`${fieldName} 必须是 object`);
@@ -890,6 +928,14 @@ function requireString(value: unknown, fieldName: string): string {
 
 function optionalString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim().length > 0 ? value : undefined;
+}
+
+function optionalBoundedString(value: unknown, maxLength: number): string | undefined {
+  const normalized = optionalString(value);
+  if (!normalized) {
+    return undefined;
+  }
+  return normalized.length > maxLength ? `${normalized.slice(0, maxLength)}...` : normalized;
 }
 
 function requireBoolean(value: unknown, fieldName: string): boolean {

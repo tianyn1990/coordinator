@@ -503,6 +503,8 @@ export function defaultMigrationsDir(): string {
 export function openDatabase(databasePath: string): DatabaseSync {
   const db = new DatabaseSync(databasePath);
   db.exec("PRAGMA foreign_keys = ON;");
+  // operator debug 入口会写审计事件，短暂 writer contention 应等待而不是立即失败。
+  db.exec("PRAGMA busy_timeout = 5000;");
   db.exec("PRAGMA journal_mode = WAL;");
   return db;
 }

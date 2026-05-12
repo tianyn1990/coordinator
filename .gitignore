@@ -8,6 +8,9 @@
 .claude/
 .agents/
 
+# 本地 coordinator 实测目录，不入版本控制
+.coordinator-smoke/
+
 # 本地依赖与通用产物
 node_modules/
 dist/

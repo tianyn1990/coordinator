@@ -142,6 +142,7 @@ Coordinator 外层状态迁移只依赖：
 - `gate`
 - `allowedActions`
 - `deniedActions`
+- `actionInputs`
 - `currentChange`
 - `eventLog`
 
@@ -162,6 +163,12 @@ Coordinator 外层状态迁移只依赖：
   },
   "allowedActions": ["run-alignment-checks"],
   "deniedActions": ["skip-runtime"],
+  "actionInputs": {
+    "materialize-change": {
+      "requiredArgs": ["change-id"],
+      "usage": "workflow protocol action --run run-... materialize-change <change-id>"
+    }
+  },
   "summary": "workflow run is active and has not produced a handoff",
   "currentChange": {
     "available": true,
@@ -186,6 +193,8 @@ Coordinator 外层状态迁移只依赖：
   "eventLog": ".workflow/runs/run-.../observability/events.jsonl"
 }
 ```
+
+`actionInputs` 是 workflow 对 action 参数的窄提示。coordinator 只在 operator/debug status 中展示 sanitized action input hints，例如 action id、`requiredArgs` 和 `usage`。这些 hint 不进入 Coordinator Agent Surface，不扩大 `available_tools`，也不让 coordinator 根据 workflow debug 字段自动猜测参数或推进外层状态机。
 
 ### 4.4 action
 
