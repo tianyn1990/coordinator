@@ -28,3 +28,10 @@
 - 提交信息必须使用中文，并包含清晰且相对详细的变更说明（建议包含背景、主要改动、验证结果）。
 - 每个 OpenSpec change 完成并通过 review 后，必须先归档该 change，再对当前代码改动执行一次完整提交。
 - 这样做的目标是让后续 change 始终在干净基线上推进，避免多个 change 的代码混淆在同一提交或同一未归档状态中。
+
+## 本地运行与 build 约束
+
+- `packages/cli` 和 `apps/api` 通过 workspace package 依赖加载 `@coordinator/core` 时，会走 `packages/core/package.json` 的 `exports`，实际读取 `packages/core/dist`，不是直接读取 `packages/core/src`。
+- 因此修改 `packages/core/src` 后，如果要在 `pnpm cli ...`、`pnpm dev:api`、daemon tick 或本地 smoke 流程中验证效果，必须先执行 `pnpm --filter @coordinator/core build`。
+- build 后，已启动的 `pnpm dev:api` 进程仍持有旧代码；需要重启 API 服务后，新逻辑才会在 Web/API/daemon 场景生效。
+- 若只运行直接 import `src` 的单测，可能看起来已经通过，但本地服务和 CLI 仍可能使用旧 `dist`；涉及运行时行为修复时必须同时确认 build 产物已更新。
