@@ -44,7 +44,7 @@ import {
   type AgentProvider,
   type RunCoordinatorAgentSessionInput
 } from "./agent-provider-runtime.js";
-import { buildTaskSurfaceFromDb } from "./surface.js";
+import { buildTaskSurfaceFromDb, type SurfaceEnvelope } from "./surface.js";
 import {
   WorkflowProtocolError,
   inspectWorkflowRun,
@@ -1105,7 +1105,7 @@ function advanceTaskWithAgent(
     return retryDelayCheck;
   }
 
-  const requestId = `daemon-${wakeReason}-v${task.stateVersion}`;
+  const requestId = buildAgentSessionRequestId(wakeReason, surface);
   const providerId = input.provider?.id ?? input.providerId ?? surface.json.project.outer_agent_default_provider ?? "codex";
   const previousAgentOperation = getOperationByIdempotencyKey(
     context,
@@ -1440,6 +1440,22 @@ function deriveWakeReason(task: TaskRecord): string {
     return "retry_due";
   }
   return "planning";
+}
+
+function buildAgentSessionRequestId(wakeReason: string, surface: SurfaceEnvelope): string {
+  const task = surface.json.task;
+  const attempt = surface.json.attempt;
+  const workspace = surface.json.workspace;
+  const workflowRun = surface.json.workflow_runs[0];
+  const parts = [
+    `daemon-${wakeReason}`,
+    `task-v${task.state_version}`,
+    // task stateVersion 不会覆盖 attempt/workspace/workflow 的每一次变化；这些窄摘要能避免不同 surface 被误判为同一快照。
+    `attempt-${attempt?.id ?? "none"}-${attempt?.status ?? "none"}`,
+    `workspace-${workspace?.id ?? "none"}-${workspace?.status ?? "none"}`,
+    `workflow-${workflowRun?.id ?? "none"}-${workflowRun?.status ?? "none"}-${workflowRun?.handoff_kind ?? "none"}`
+  ];
+  return parts.join(":");
 }
 
 function normalizeOwner(value: string): string {

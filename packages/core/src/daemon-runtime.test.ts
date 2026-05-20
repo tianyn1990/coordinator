@@ -366,11 +366,38 @@ describe("daemon runtime", () => {
     expect(second.actions).toContainEqual(
       expect.objectContaining({
         kind: "agent_tool_skipped",
-        summary: "task snapshot already processed: daemon-planning-v0"
+        summary: "task snapshot already processed: daemon-planning:task-v0:attempt-none-none:workspace-none-none:workflow-none-none-none"
       })
     );
     const events = withDatabase(databasePath, (context) => listTaskEvents(context, "task-daemon"));
     expect(events.filter((event) => event.type === "agent.session_completed")).toHaveLength(1);
+  });
+
+  it("attempt 创建后即使 task stateVersion 不变，daemon 也能基于新 surface 继续推进", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createTaskFixture(databasePath);
+    writeTaskArtifact(fixture.workspaceRoot, "execution-plan.md", "# Plan\n\n1. create attempt\n");
+
+    withDatabase(databasePath, (context) =>
+      runDaemonTick(context, { provider: new FakeAgentProvider("```coordinator-tool\ntool: write_execution_plan\nartifact: execution-plan.md\n```") })
+    );
+    withDatabase(databasePath, (context) =>
+      runDaemonTick(context, { provider: new FakeAgentProvider("```coordinator-tool\ntool: create_attempt\nreason: initial\n```") })
+    );
+    const third = withDatabase(databasePath, (context) =>
+      runDaemonTick(context, { provider: new FakeAgentProvider("```coordinator-tool\ntool: ask_human\nkind: smoke\nartifact: execution-plan.md\n```") })
+    );
+
+    expect(third.actions).toContainEqual(
+      expect.objectContaining({
+        kind: "agent_tool_executed",
+        toolName: "ask_human",
+        status: "succeeded"
+      })
+    );
+    const events = withDatabase(databasePath, (context) => listTaskEvents(context, fixture.taskId));
+    expect(events.filter((event) => event.type === "agent.session_completed")).toHaveLength(3);
+    expect(events.map((event) => event.type)).not.toContain("daemon.agent_session_skipped");
   });
 
   it("daemon operation replay 匹配 intent 时标记 reconciled 并写窄 recovery event", () => {
@@ -1994,7 +2021,8 @@ describe("daemon runtime", () => {
 
     const result = withDatabase(databasePath, (context) =>
       runDaemonTick(context, {
-        pullRequestProvider: new DaemonMergedProvider()
+        pullRequestProvider: new DaemonMergedProvider(),
+        provider: new FakeAgentProvider("no-op")
       })
     );
     const state = withDatabase(databasePath, (context) => ({
@@ -2066,7 +2094,8 @@ describe("daemon runtime", () => {
 
     const result = withDatabase(databasePath, (context) =>
       runDaemonTick(context, {
-        pullRequestProvider: new DaemonMergedProvider()
+        pullRequestProvider: new DaemonMergedProvider(),
+        provider: new FakeAgentProvider("no-op")
       })
     );
 
@@ -2111,7 +2140,8 @@ describe("daemon runtime", () => {
 
     const result = withDatabase(databasePath, (context) =>
       runDaemonTick(context, {
-        now: new Date("2026-05-04T00:00:01.000Z")
+        now: new Date("2026-05-04T00:00:01.000Z"),
+        provider: new FakeAgentProvider("no-op")
       })
     );
     const lock = withDatabase(databasePath, (context) => getLock(context, "pr-merge", "pr-lock"));
