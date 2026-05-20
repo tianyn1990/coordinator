@@ -14,6 +14,7 @@ import {
   createAttemptWorkspace,
   createPullRequestRuntime,
   executeCoordinatorAgentTool,
+  getOperatorExecutionSummary,
   inspectAgentSession,
   inspectPullRequestReviewRuntime,
   inspectWorkflowCapabilities,
@@ -117,6 +118,31 @@ export function runCli(args: string[]): CliResult {
       stdout: format === "markdown" ? surface.markdown : `${JSON.stringify(surface.json)}\n`,
       stderr: ""
     };
+  }
+
+  if (command === "summary") {
+    const databasePathResult = readRequiredOption(rest, "--db");
+    const taskIdResult = readRequiredOption(rest, "--task");
+    const error = databasePathResult.error ?? taskIdResult.error;
+    if (error) {
+      return { exitCode: 1, stdout: "", stderr: `${error}\n` };
+    }
+
+    const databasePath = databasePathResult.value;
+    const taskId = taskIdResult.value;
+    if (!databasePath || !taskId) {
+      return { exitCode: 1, stdout: "", stderr: "summary 参数不完整\n" };
+    }
+
+    try {
+      const summary = withDatabase(databasePath, (context) => getOperatorExecutionSummary(context, taskId));
+      return { exitCode: 0, stdout: `${JSON.stringify(summary)}\n`, stderr: "" };
+    } catch (error) {
+      if (error instanceof OperatorSurfaceError) {
+        return { exitCode: 1, stdout: "", stderr: `${error.message}\n` };
+      }
+      throw error;
+    }
   }
 
   if (command === "task") {
@@ -720,7 +746,7 @@ export function runCli(args: string[]): CliResult {
   return {
     exitCode: 1,
       stdout: "",
-      stderr: `未知命令：${command}\n可用命令：health, migrate --db <path>, timeline --db <path> --task <task-id>, surface --db <path> --task <task-id>, task control, register --db <path> --repo <path>, projects --db <path>, workspace create, workspace preflight, workflow <subcommand>, agent <subcommand>, agent-tool <subcommand>, daemon <subcommand>, pr <subcommand>\n`
+      stderr: `未知命令：${command}\n可用命令：health, migrate --db <path>, timeline --db <path> --task <task-id>, surface --db <path> --task <task-id>, summary --db <path> --task <task-id>, task control, register --db <path> --repo <path>, projects --db <path>, workspace create, workspace preflight, workflow <subcommand>, agent <subcommand>, agent-tool <subcommand>, daemon <subcommand>, pr <subcommand>\n`
   };
 }
 

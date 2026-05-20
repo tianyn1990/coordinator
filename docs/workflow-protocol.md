@@ -196,6 +196,8 @@ Coordinator 外层状态迁移只依赖：
 
 `actionInputs` 是 workflow 对 action 参数的窄提示。coordinator 只在 operator/debug status 中展示 sanitized action input hints，例如 action id、`requiredArgs` 和 `usage`。这些 hint 不进入 Coordinator Agent Surface，不扩大 `available_tools`，也不让 coordinator 根据 workflow debug 字段自动猜测参数或推进外层状态机。
 
+同理，`allowedActions` 只说明 workflow 当前内部控制面允许哪些 action。它不是 Coordinator 的自动执行计划，也不是 daemon 的 action queue。running workflow 没有 handoff 时，Coordinator 的稳定动作是 inspect 或等待 handoff；daemon 不得根据 `allowedActions` 或 `actionInputs` 自动调用 `workflow protocol action`。
+
 ### 4.4 action
 
 ```bash
@@ -207,6 +209,8 @@ workflow protocol action --run <run-id> <action> [arg]
 参数仍保持窄。
 
 如果 action 需要复杂上下文，应由 workflow surface 指导 inner agent 写 artifact，而不是让 coordinator 传复杂 JSON。
+
+第一版中，workflow action 入口属于 operator/debug 能力或 workflow runtime 内部推进能力，不进入 Coordinator Agent Surface，也不进入 daemon 自动推进路径。若未来需要让外层 agent 触发 workflow action，必须作为独立设计变更重新确认 agent-visible 工具、参数来源、审批边界、operation 审计和 handoff 影响。
 
 ### 4.5 artifacts
 

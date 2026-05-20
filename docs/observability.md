@@ -167,6 +167,46 @@ diagnosis 输出必须保持白名单摘要：
 - 不得展示 provider raw output、secret、lock token、完整 operation JSON、完整 recovery matrix、完整 workflow status JSON 或复杂内部对象。
 - Web 可以展示 diagnosis，但这些信息不自动进入 Coordinator Agent Markdown surface，也不得新增 agent-facing recovery/operator/internal tools。
 
+## 4.2 Operator Execution Summary
+
+Iteration 12.7 增加轻量 operator-only execution summary，用于真实 smoke 和排查时按执行链路分组理解任务。
+
+execution summary 仍是只读派生结果，不是新的真相源：
+
+- 只从已持久化 task、project、attempt、workspace、workflow run、agent session、events、artifacts 派生。
+- 查询 summary 不触发 workflow protocol、provider、git 或外部平台 inspect。
+- summary 可以展示最近 coordinator tools、outer agent sessions、workspace checkpoint、workflow handoff/recovery、关键 artifact refs。
+- summary 不进入 Coordinator Agent Markdown surface，不改变 available tools，不新增 agent-facing diagnosis/recovery/workflow-action tool。
+
+建议分组：
+
+```text
+task
+attempt
+workspace
+agent_sessions
+coordinator_tools
+workflow
+artifacts
+next_step
+```
+
+## 4.3 Extra Artifact Debug Event
+
+daemon artifact bridge 允许 outer agent 通过 `coordinator-artifact` block 写入当前 surface 的 `artifact_root`。当当前 requested tool 并不需要 artifact，但 agent 仍输出 artifact block 时，daemon 应记录额外 debug event，帮助 operator 区分“工具必需产物”和“额外产物噪音”。
+
+该 event 只保存窄摘要：
+
+```text
+tickId
+toolName
+artifactCount
+artifactRefs
+classification
+```
+
+不得保存 artifact 正文、完整 final response、复杂 tool result 或内部对象。
+
 ## 5. Artifact
 
 artifact 用于保存非结构化或半结构化信息。

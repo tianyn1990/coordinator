@@ -26,30 +26,22 @@
 
 系统 SHALL 在 JSON surface 中包含 surface_id、surface_kind、task、project、attempt、current_state、execution_plan、workspace、workflow_runs、agent_sessions、pull_request、human_requests、autonomy_guidance、available_tools、denied_actions、recommended_next_step、recovery、artifact_root、created_at。
 
-#### Scenario: 校验必需字段
+#### Scenario: workflow running surface 推荐等待 handoff
 
-- **WHEN** 生成任意 kind 的 surface
-- **THEN** JSON surface 包含全部必需字段
+- **WHEN** workflow run 状态为 running 且未 handoff
+- **THEN** Markdown surface 的 recommended next step 表达 inspect workflow 或等待 handoff
+- **AND** recovery 文案不暗示 Coordinator 可以绕过 workflow protocol 执行内部 action
 
 ### Requirement: 工具可见性必须按当前状态收窄
 
 系统 SHALL 按 `docs/contracts.md` 的 tool visibility matrix 派生当前可见 agent tools，且不得包含 operator-only tools。
 
-#### Scenario: 无计划任务
+#### Scenario: workflow running surface 只允许 inspect 或 ask human
 
-- **WHEN** task 尚无 execution plan
-- **THEN** surface 只暴露 `write_execution_plan` 与 `ask_human`
-
-#### Scenario: 等待 human request
-
-- **WHEN** 当前存在 pending human request
-- **THEN** surface 不暴露任何执行性副作用工具
-- **AND** surface 不暴露 `record_human_answer`
-
-#### Scenario: merge approval 有效
-
-- **WHEN** PR/MR 已打开且 approval snapshot 有效
-- **THEN** surface 可暴露 `merge_after_approval` 与 inspect 类工具
+- **WHEN** 当前 attempt 有 workflow run 状态为 running
+- **THEN** surface 不暴露 `start_workflow_run`
+- **AND** surface 不暴露 workflow action executor 或 workflow debug action tool
+- **AND** surface 可以暴露 `inspect_workflow_run` 和 `ask_human`
 
 ### Requirement: Surface 必须在 PR/MR 生命周期中反映正确工具可见性
 
@@ -161,3 +153,4 @@
 - **THEN** Coordinator Surface available tools 仍只包含当前状态允许的 agent tools
 - **AND** available tools 不包含 `diagnose_task`、`replay_operation`、`recover_task`、`release_lock`、`daemon_tick`、`approve_merge` 或 `record_human_answer`
 - **AND** agent-facing Markdown 不包含完整 operation JSON、provider raw output、lock token 或完整 recovery matrix
+

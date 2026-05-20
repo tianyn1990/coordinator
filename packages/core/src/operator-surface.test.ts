@@ -5,7 +5,9 @@ import { describe, expect, it } from "vitest";
 import {
   ActiveResourceConflictError,
   createAttempt,
+  appendEvent,
   createHumanRequest,
+  createExecutionPlan,
   createOperation,
   createProject,
   createPullRequest,
@@ -22,6 +24,7 @@ import {
   controlTaskRuntime,
   createManualTask,
   getOperatorTaskDetail,
+  getOperatorExecutionSummary,
   listOperatorTasks,
   recordHumanAnswerRuntime
 } from "./index.js";
@@ -224,6 +227,64 @@ describe("operator surface", () => {
     expect(detail.surface.json.available_tools.map((tool) => tool.name)).not.toEqual(
       expect.arrayContaining(["recover_task", "replay_operation", "release_lock", "daemon_tick"])
     );
+  });
+
+  it("execution summary 按链路分组展示状态、tool 和 extra artifact，且不污染 surface", () => {
+    const databasePath = createMigratedDatabase();
+    const summary = withDatabase(databasePath, (context) => {
+      const project = createProject(context, { id: "project-summary", name: "summary", defaultBranch: "main" });
+      const task = createTask(context, { id: "task-summary", projectId: project.id, title: "summary" });
+      createExecutionPlan(context, {
+        id: "plan-summary",
+        projectId: project.id,
+        taskId: task.id,
+        status: "active",
+        artifactPath: "execution-plan.md"
+      });
+      const attempt = createAttempt(context, { id: "attempt-summary", projectId: project.id, taskId: task.id });
+      createWorkspace(context, {
+        id: "workspace-summary",
+        projectId: project.id,
+        taskId: task.id,
+        attemptId: attempt.id,
+        status: "ready",
+        workspacePath: "/tmp/workspace-summary",
+        branch: "coordinator/task-summary/attempt-summary"
+      });
+      context.db
+        .prepare(
+          `INSERT INTO workflow_runs (id, project_id, task_id, attempt_id, profile_id, status, external_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run("workflow-summary", project.id, task.id, attempt.id, "feature", "running", "inner-summary");
+      appendEvent(context, {
+        type: "daemon.agent_extra_artifact_written",
+        summary: "agent wrote extra coordinator artifacts for create_attempt",
+        projectId: project.id,
+        taskId: task.id,
+        artifactRefs: ["note.md"],
+        payload: {
+          toolName: "create_attempt",
+          artifactCount: 1,
+          artifactRefs: ["note.md"],
+          classification: "extra-artifact-for-non-artifact-tool"
+        },
+        severity: "debug"
+      });
+      return getOperatorExecutionSummary(context, task.id);
+    });
+
+    expect(summary).toMatchObject({
+      task: { id: "task-summary" },
+      attempt: { id: "attempt-summary" },
+      workspace: { id: "workspace-summary", status: "ready" },
+      workflow: { id: "workflow-summary", status: "running", externalId: "inner-summary" }
+    });
+    expect(summary.coordinatorTools).toContainEqual(
+      expect.objectContaining({ toolName: "create_attempt", extraArtifact: true, artifactRefs: ["note.md"] })
+    );
+    expect(summary.artifacts).toContainEqual(expect.objectContaining({ path: "note.md", extra: true }));
+    expect(summary.nextStep.availableTools).toEqual(["inspect_workflow_run", "ask_human"]);
   });
 
   it("diagnosis 当前 attention 只看当前实体，历史 workflow/PR/session 不污染当前状态", () => {

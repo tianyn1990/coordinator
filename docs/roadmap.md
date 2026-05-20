@@ -156,11 +156,11 @@ P2 只预留接口和规划，不进入 V1 完成标准：
 
 ### 当前进度
 
-- 当前阶段：`Iteration 12: P1 / P2 Hardening` 已完成第六个切片 `observability and operator diagnosis polish`。
-- 当前 OpenSpec change：`reconcile-workflow-action-operations` 已完成实现、验证、独立 `gpt-5.5 high` review 和归档；归档后位置为 `openspec/changes/archive/2026-05-09-reconcile-workflow-action-operations`。
-- 当前正式规格：已同步到 `openspec/specs/daemon-recovery-matrix/spec.md`、`openspec/specs/daemon-runtime/spec.md`。
+- 当前阶段：`Iteration 12: P1 / P2 Hardening` 已完成第七个切片 `workflow running 观察边界与 smoke 可观测性优化`。
+- 当前 OpenSpec change：`harden-workflow-observability-boundaries` 已完成实现、验证、独立 `gpt-5.5 high` review 和归档；归档后位置为 `openspec/changes/archive/2026-05-20-harden-workflow-observability-boundaries`。
+- 当前正式规格：已同步到 `openspec/specs/agent-provider-runtime/spec.md`、`openspec/specs/coordinator-surface/spec.md`、`openspec/specs/daemon-runtime/spec.md`、`openspec/specs/observability/spec.md`、`openspec/specs/workflow-protocol-adapter/spec.md`。
 - 下一阶段：继续 `Iteration 12: P1 / P2 Hardening`。
-- 下一阶段重点：根据后续优先级进入下一批 P1/P2 hardening 切片。Workflow action operation recovery 已补齐正式闭环，后续如继续增强 observability 或 recovery，应保持只读派生、protocol-only 观察和 agent-facing surface 不扩大的边界。
+- 下一阶段重点：根据后续优先级进入下一批 P1/P2 hardening 或真实 smoke 复盘切片。后续如继续增强 workflow/operator/debug 能力，应保持 daemon inspect-only、operator summary 只读派生、agent-facing surface 不扩大的边界。
 
 ### Iteration 12 后续切片顺序
 
@@ -269,6 +269,42 @@ harden-daemon-reconciliation-matrix
 
 - UI/API tests 或 contract tests 覆盖 recovery event 展示和 agent surface 不泄漏内部字段。
 
+#### Slice 12.7: workflow running 观察边界与 smoke 可观测性优化
+
+状态：已完成，归档 change 为 `openspec/changes/archive/2026-05-20-harden-workflow-observability-boundaries`。
+
+建议 OpenSpec change：
+
+```text
+harden-workflow-observability-boundaries
+```
+
+目标：
+
+- 明确 daemon 对 running workflow run 的职责是通过 `workflow protocol status` inspect/reconcile、记录 handoff/recovery 观察结果，而不是根据 `allowedActions`、`actionInputHints`、stage 或 gate 主动执行 workflow action。
+- 优化 Outer Coordinator Agent prompt：只有当前工具需要 artifact，或计划/报告确实需要修订时，才输出 `coordinator-artifact`。`create_attempt`、`create_workspace`、`start_workflow_run`、`inspect_workflow_run` 等普通推进/观察步骤不应顺手改写 `execution-plan.md`。
+- 增强 running workflow surface 文案：当 workflow 仍 active 且未 handoff 时，agent-facing surface 应表达“inspect 或等待 handoff”，避免把 workflow debug action 理解为 Coordinator 可执行下一步。
+- 增加额外 artifact 写入的可观察信号：当 agent 在不需要 artifact 的工具请求中仍输出 artifact，daemon 可以保留受控写入，但必须记录窄摘要 debug event，帮助 operator 判断这是必要产物还是额外噪音。
+- 补充 operator 执行链路摘要：先实现轻量 CLI/API/operator summary 或等价 Core 派生能力，把 task、attempt、workspace、outer agent session、coordinator tools、workflow run、handoff/recovery、关键 artifact 分组展示，降低真实 smoke 和问题排查理解成本。
+- 记录 workflow action executor 的边界决策：暂不新增 agent-facing workflow action tool，不让 daemon 自动执行 workflow action；如未来需要，应优先作为 operator/debug 能力单独设计，并明确 action 参数、审计、审批和 handoff 影响。
+
+边界：
+
+- 不新增 agent-facing workflow action executor。
+- 不让 daemon 根据 workflow `allowedActions` 或 `actionInputHints` 自动推进 action。
+- 不读取或写入 `.workflow` private state。
+- 不把 workflow debug 字段、完整 workflow status、operation 大对象或复杂 JSON 暴露给 Coordinator Agent Surface。
+- 不把 operator summary 变成新的真相源；summary 只能从已持久化状态、event、operation 和 artifact refs 派生。
+- 不做完整 Web UI 重构；本切片先完成可验证的 Core/CLI/API 级摘要或等价最小展示。
+
+验收建议：
+
+- tests 覆盖 daemon running workflow 只 inspect、不执行 workflow action。
+- tests 覆盖 running workflow surface 不暴露 `start_workflow_run`、workflow action executor 或 debug action tool，并明确推荐 inspect/等待 handoff。
+- tests 覆盖 prompt artifact 规则，提示 agent 非 artifact 工具不要输出 `coordinator-artifact`。
+- tests 覆盖额外 artifact 写入会记录 debug event，payload 仅包含 toolName、artifactCount、artifactRefs、tickId 等窄字段。
+- tests 或 CLI/API smoke 覆盖 operator summary 分组输出；断言 summary 不进入 agent-facing surface。
+
 ### 重点关注事项
 
 - 已建立 project registry 核心服务，支持工程注册、GitHub/GitLab 识别、默认分支确认、workflow launcher 和默认 provider 配置。
@@ -294,6 +330,11 @@ harden-daemon-reconciliation-matrix
 - Workflow status 只用 lifecycle/handoff/artifacts/recovery/summary 更新 workflow run 粗粒度状态；stage/substate/gate/allowedActions/deniedActions/actionInputs 只进入 operator/debug payload。`actionInputs` 会被收窄为 action input hints，用于 operator 判断 action 参数，不进入 Coordinator Agent Surface。
 - 已实现 CLI/API operator-only workflow 调试入口：capabilities/start/status/action/artifacts/events；这些入口未进入 Coordinator Surface，也不是 agent tools。`workflow action` CLI/API 需要显式 expected state version，避免响应丢失后的重复副作用。
 - 本地 smoke hardening 后，root `pnpm cli ...` / `pnpm migrate ...` 入口不再向 CLI 传入裸 `--`；SQLite 连接设置短暂 `busy_timeout`，降低 operator debug 查询写审计 event 时的短暂 writer contention。workflow operator debug 查询仍不是纯读高频 polling API。
+- Slice 12.7 已明确 running workflow 的 inspect-only 边界：daemon 只通过 `workflow protocol status` 观察 running workflow，不根据 `allowedActions`、`actionInputHints`、stage 或 gate 自动执行 workflow action；workflow action 入口继续是 operator/debug 能力，不进入 Coordinator Agent Surface。
+- Outer Coordinator Agent prompt 已补充 artifact 使用纪律：只有 artifact-based tool 或真实计划/报告修订才输出 `coordinator-artifact`，普通推进/观察工具不应顺手覆盖 `execution-plan.md`。
+- Running workflow surface 已增强推荐语义：当前 workflow 未 handoff 时，agent-facing guidance 表达 inspect 或等待 handoff，不暗示 Coordinator 可绕过 workflow protocol 执行内部 action。
+- Daemon artifact bridge 已增加 `daemon.agent_extra_artifact_written` debug event；当非 artifact tool 携带 artifact 时仍受控写入，但额外记录窄摘要，且 `update_pr` 仅在带 `body-artifact` 时才视为 artifact 必需。
+- 已新增 operator-only execution summary：Core `getOperatorExecutionSummary`、CLI `summary --db <path> --task <task-id>`、API `GET /tasks/:taskId/summary` 按 task/attempt/workspace/agent/tool/workflow/artifact/next step 分组展示，只从持久化事实派生，不触发外部 inspect，不进入 agent-facing surface。
 - 已补充 Workflow Protocol Adapter contract tests：capabilities cwd、profile implemented gate、operation-first start、start side effect 后 unknown、stage/substate 不驱动 handoff、action operation/idempotency/replay、arg 规范化、artifact/event 只读引用、`.workflow` private state 不读写、active run 复用与 profile conflict。
 - 第六轮经过多轮独立 `gpt-5.5 high` subagent review，所有必须修复项已处理并复验。后续可加强但不阻塞本轮：status/action/artifacts/events 校验返回 runId 与当前 externalId 一致；API 对 CAS/lock conflict 返回更细的 409 与 machine-readable code；capabilities.commands 按命令做 gate；daemon/reconciliation 迭代补齐 `unknown` operation 的 inspect/reconcile 矩阵。
 - 已实现 Agent Provider Runtime：提供 `AgentProvider` interface、`CodexProvider`、`ClaudeCodeProvider`、`FakeAgentProvider`，以及 `runCoordinatorAgentSession` / `inspectAgentSession`。

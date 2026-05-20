@@ -113,6 +113,25 @@ describe("Coordinator Surface", () => {
     expect(surface.json.available_tools.map((tool) => tool.name)).toEqual(["inspect_workflow_run"]);
   });
 
+  it("workflow running surface 明确 inspect 或等待 handoff，不暴露 workflow action", () => {
+    const surface = buildCoordinatorSurface(
+      baseSnapshot({
+        surfaceKind: "execution",
+        task: { ...baseSnapshot().task, status: "running" },
+        executionPlan: { id: "plan-1", status: "active", artifactPath: "execution-plan.md" },
+        attempt: { id: "attempt-1", status: "created" },
+        workspace: { id: "workspace-1", status: "ready", path: "/tmp/workspace", branch: "coordinator/task/attempt" },
+        workflowRuns: [{ id: "workflow-1", status: "running", profileId: "feature" }]
+      })
+    );
+
+    expect(surface.json.available_tools.map((tool) => tool.name)).toEqual(["inspect_workflow_run", "ask_human"]);
+    expect(surface.json.available_tools.map((tool) => tool.name)).not.toContain("start_workflow_run");
+    expect(JSON.stringify(surface.json.available_tools)).not.toContain("workflow_action");
+    expect(surface.markdown).toContain("等待 workflow 自己推进");
+    expect(surface.markdown).toContain("不要绕过 workflow handoff 执行内部 action");
+  });
+
   it("surface 不暴露 operator-only 工具", () => {
     const surface = buildCoordinatorSurface(baseSnapshot());
 

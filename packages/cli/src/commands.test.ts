@@ -65,6 +65,23 @@ describe("runCli", () => {
     });
   });
 
+  it("支持 summary 命令", () => {
+    const databasePath = join(mkdtempSync(join(tmpdir(), "coordinator-cli-")), "summary.sqlite");
+    runMigrations(databasePath);
+    withDatabase(databasePath, (context) => {
+      const project = createProject(context, { name: "coordinator" });
+      createTask(context, { id: "task-summary", projectId: project.id, title: "summary" });
+    });
+
+    const result = runCli(["summary", "--db", databasePath, "--task", "task-summary"]);
+
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      task: { id: "task-summary", title: "summary" },
+      nextStep: { availableTools: ["write_execution_plan", "ask_human"] }
+    });
+  });
+
   it("register 命令要求显式传入 db", () => {
     const result = runCli(["register", "--repo", "/tmp/repo"]);
 

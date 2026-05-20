@@ -21,6 +21,7 @@ export {
   OperatorSurfaceError,
   controlTaskRuntime,
   createManualTask,
+  getOperatorExecutionSummary,
   getOperatorTaskDetail,
   listOperatorTasks,
   recordHumanAnswerRuntime
@@ -81,6 +82,7 @@ export type {
   ControlTaskInput,
   ControlTaskResult,
   CreateManualTaskInput,
+  OperatorExecutionSummary,
   OperatorTaskControlAction,
   OperatorTaskDiagnosis,
   OperatorTaskDetail,

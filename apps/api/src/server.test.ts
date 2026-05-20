@@ -242,6 +242,33 @@ describe("API health", () => {
     }
   });
 
+  it("task summary API 返回 operator-only execution summary", async () => {
+    const databasePath = join(mkdtempSync(join(tmpdir(), "coordinator-api-summary-")), "api.sqlite");
+    runMigrations(databasePath);
+    withDatabase(databasePath, (context) => {
+      const project = createProject(context, { id: "project-api-summary", name: "summary" });
+      createTask(context, { id: "task-api-summary", projectId: project.id, title: "summary" });
+    });
+    const previous = process.env.COORDINATOR_DB_PATH;
+    process.env.COORDINATOR_DB_PATH = databasePath;
+    const server = buildServer();
+    try {
+      const response = await server.inject({ method: "GET", url: "/tasks/task-api-summary/summary" });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({
+        task: { id: "task-api-summary", title: "summary" },
+        nextStep: { availableTools: ["write_execution_plan", "ask_human"] }
+      });
+    } finally {
+      if (previous === undefined) {
+        delete process.env.COORDINATOR_DB_PATH;
+      } else {
+        process.env.COORDINATOR_DB_PATH = previous;
+      }
+    }
+  });
+
   it("Web API 可回答 human request，并把正文写入 artifact", async () => {
     const databasePath = join(mkdtempSync(join(tmpdir(), "coordinator-api-human-answer-")), "api.sqlite");
     const workspaceRoot = mkdtempSync(join(tmpdir(), "coordinator-api-human-workspaces-"));

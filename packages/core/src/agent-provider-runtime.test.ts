@@ -86,6 +86,7 @@ describe("agent provider runtime", () => {
     expect(existsSync(result.artifacts.finalResponsePath)).toBe(true);
     expect(readFileSync(result.artifacts.promptPath, "utf8")).toContain("# Coordinator Surface");
     expect(readFileSync(result.artifacts.promptPath, "utf8")).toContain("coordinator-tool 代码块");
+    expect(readFileSync(result.artifacts.promptPath, "utf8")).toContain("普通推进或观察工具默认不需要 coordinator-artifact");
     expect(readFileSync(result.artifacts.promptPath, "utf8")).toContain("description: run outer coordinator agent");
     expect(readFileSync(result.artifacts.promptPath, "utf8")).toContain("workspace: 当前 surface 未发现 active workspace");
 

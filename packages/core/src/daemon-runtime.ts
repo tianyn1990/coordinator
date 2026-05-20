@@ -1146,8 +1146,16 @@ function advanceTaskWithAgent(
       payload: { tickId, surfaceId: session.surfaceId }
     });
 
-    const writtenArtifacts = writeCoordinatorArtifacts(context, surface, session.finalResponse, owner, tickId, session.session.id);
     const toolRequest = parseAgentToolRequest(session.finalResponse);
+    const writtenArtifacts = writeCoordinatorArtifacts(context, {
+      surface,
+      finalResponse: session.finalResponse,
+      owner,
+      tickId,
+      agentSessionId: session.session.id,
+      requestedToolName: toolRequest?.toolName,
+      requestedToolArgs: normalizeStringArgs(toolRequest?.args)
+    });
     if (!toolRequest) {
       appendEvent(context, {
         type: "daemon.agent_tool_skipped",
@@ -1362,12 +1370,17 @@ function getLatestRetrySchedule(context: DbContext, taskId: string): { dueAt: st
 
 function writeCoordinatorArtifacts(
   context: DbContext,
-  surface: ReturnType<typeof buildTaskSurfaceFromDb>,
-  finalResponse: string,
-  owner: string,
-  tickId: string,
-  agentSessionId: string
+  input: {
+    surface: ReturnType<typeof buildTaskSurfaceFromDb>;
+    finalResponse: string;
+    owner: string;
+    tickId: string;
+    agentSessionId: string;
+    requestedToolName?: string;
+    requestedToolArgs?: Record<string, string>;
+  }
 ): string[] {
+  const { surface, finalResponse, owner, tickId, agentSessionId, requestedToolName, requestedToolArgs } = input;
   const root = resolve(surface.json.artifact_root);
   mkdirSync(root, { recursive: true });
   const rootReal = realpathSync(root);
@@ -1413,8 +1426,41 @@ function writeCoordinatorArtifacts(
       artifactRefs: refs,
       payload: { tickId, artifactCount: refs.length }
     });
+    if (requestedToolName && !toolRequestNeedsWrittenArtifact(requestedToolName, requestedToolArgs ?? {})) {
+      appendEvent(context, {
+        type: "daemon.agent_extra_artifact_written",
+        summary: `agent wrote extra coordinator artifacts for ${requestedToolName}`,
+        projectId: surface.json.project.id,
+        taskId: surface.json.task.id,
+        agentSessionId,
+        artifactRefs: refs,
+        payload: {
+          tickId,
+          toolName: requestedToolName,
+          artifactCount: refs.length,
+          artifactRefs: refs,
+          classification: "extra-artifact-for-non-artifact-tool"
+        },
+        severity: "debug"
+      });
+    }
   }
   return refs;
+}
+
+function toolRequestNeedsWrittenArtifact(toolName: string, args: Record<string, string>): boolean {
+  if (["write_execution_plan", "revise_execution_plan", "ask_human", "create_pr", "request_merge_approval", "handoff_to_human"].includes(toolName)) {
+    return true;
+  }
+  // update_pr 只有更新正文时才需要 body artifact；仅改标题不应把额外 artifact 归类为必需产物。
+  return toolName === "update_pr" && typeof args["body-artifact"] === "string" && args["body-artifact"].length > 0;
+}
+
+function normalizeStringArgs(args: Record<string, string | undefined> | undefined): Record<string, string> | undefined {
+  if (!args) {
+    return undefined;
+  }
+  return Object.fromEntries(Object.entries(args).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
 }
 
 function buildWorkflowInspectInput(

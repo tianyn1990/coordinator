@@ -20,32 +20,17 @@
 - **AND** 触发对应恢复动作
 
 ### Requirement: daemon 必须执行 watchdog 和 reconciliation
+
 系统 SHALL 对 active agent session、workflow run、workspace、human request、lock 状态和需要恢复的 workflow action operation 执行 watchdog 与 reconciliation，并在外部状态与数据库不一致时通过 Core recovery decision 采取受控修复或降级，而不是静默推进完成。daemon 不得直接拥有恢复策略；daemon 必须把 observation 交给 Core，并执行 Core 返回的有限 recovery action。
 
-#### Scenario: workflow 运行状态丢失
-- **WHEN** workflow run 数据库状态为 running 但外部状态不可用
-- **THEN** daemon 将 observation 传给 Core recovery service
-- **AND** Core 将该 run 标记为需要再检查、unknown 或 operator attention
-- **AND** 系统不把它直接视为 completed
-- **AND** 系统记录恢复事件
+#### Scenario: running workflow 只能 inspect
 
-#### Scenario: workflow protocol consistency violation
-- **WHEN** workflow protocol status 返回 runId 或 profile 与当前 workflow run 不匹配
-- **THEN** daemon 不自动重启 workflow run
-- **AND** Core recovery decision 进入 unknown 或 operator attention
-- **AND** 系统不读取 `.workflow` private state
-
-#### Scenario: workflow action operation 通过 daemon 恢复
-- **WHEN** 存在 `workflow:action` operation 状态为 `running`、`failed` 或 `unknown`
-- **THEN** daemon 通过 workflow protocol `status --run` 执行 read-only inspect
-- **AND** daemon 将 observation 交给 Core recovery service
-- **AND** daemon 只执行 Core 返回的 mark reconciled、mark unknown 或 operator attention 动作
-
-#### Scenario: workflow action operation inspect 失败
-- **WHEN** `workflow:action` operation 的 read-only inspect 失败
-- **THEN** daemon 记录 recovery decision 和 operator attention 摘要
-- **AND** action operation 保持 `unknown`
-- **AND** workflow run 不得被推进到 completed 或 handoff
+- **WHEN** workflow run 数据库状态为 running
+- **AND** workflow protocol status 返回 lifecycle active 且 handoff unavailable
+- **THEN** daemon 只记录 status/recovery observation
+- **AND** workflow run 保持 running
+- **AND** daemon 不调用 `workflow protocol action`
+- **AND** daemon 不根据 allowedActions、actionInputHints、stage 或 gate 推进 workflow action
 
 ### Requirement: daemon 必须支持 human request 唤醒
 系统 SHALL 在 human request 被回答后唤醒对应 task，并生成新的 Coordinator Surface 继续推进。
@@ -71,18 +56,17 @@
 - **AND** 系统记录 no-progress 或 retry blocked 事件
 
 ### Requirement: daemon 事件必须可观测
+
 系统 SHALL 记录 daemon tick、task claim、reconcile、retry、wake-up、failure 和 recovery decision 事件，以便 UI 和审计追踪。recovery decision event payload 必须保持窄摘要，不得作为 Coordinator Agent 主输入。
 
-#### Scenario: 记录 tick 事件
-- **WHEN** daemon 执行一次 tick
-- **THEN** 系统写入可观测事件
-- **AND** 事件包含 tick 级别摘要和受影响资源引用
+#### Scenario: 非 artifact tool 写入额外 artifact
 
-#### Scenario: 记录 recovery decision 事件
-- **WHEN** Core 产出 recovery decision
-- **THEN** daemon 或 Core 写入 append-only recovery event
-- **AND** event 包含 resource kind/id、operation id、decision、reason code、observed summary、next action 和 artifact refs
-- **AND** event 不包含 provider raw output、secret、lock token 或完整内部对象
+- **WHEN** outer agent 请求的 coordinator tool 不需要 artifact
+- **AND** final response 仍包含 coordinator-artifact block
+- **THEN** daemon 可以在路径校验通过后受控写入 artifact
+- **AND** daemon 记录 debug event 标记 extra artifact
+- **AND** event payload 只包含 tickId、toolName、artifactCount、artifactRefs 等窄字段
+- **AND** event 不包含 artifact 正文或复杂内部对象
 
 ### Requirement: daemon 必须尊重 operator pause 和 cancel
 

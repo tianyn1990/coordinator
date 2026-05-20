@@ -115,6 +115,64 @@ export type OperatorInspectionSummary = {
   createdAt: string;
 };
 
+export type OperatorExecutionSummary = {
+  task: {
+    id: string;
+    title: string;
+    status: string;
+    autonomy: string;
+    stateVersion: number;
+  };
+  project: {
+    id: string;
+    name: string;
+    defaultBranch?: string;
+  };
+  attempt?: {
+    id: string;
+    status: string;
+    reason: string;
+  };
+  workspace?: {
+    id: string;
+    status: string;
+    branch?: string;
+    path?: string;
+  };
+  agentSessions: Array<{
+    id: string;
+    role: string;
+    providerKind: string;
+    status: string;
+  }>;
+  coordinatorTools: Array<{
+    eventId: number;
+    toolName?: string;
+    status?: string;
+    summary: string;
+    artifactRefs: string[];
+    extraArtifact: boolean;
+  }>;
+  workflow?: {
+    id: string;
+    profileId: string;
+    status: string;
+    externalId?: string;
+    handoffKind?: string;
+  };
+  artifacts: Array<{
+    path: string;
+    kind?: string;
+    sourceEventType?: string;
+    extra: boolean;
+  }>;
+  nextStep: {
+    recommended: string;
+    currentBlocker: string;
+    availableTools: string[];
+  };
+};
+
 export type CreateManualTaskInput = {
   projectId: string;
   title: string;
@@ -286,6 +344,68 @@ export function getOperatorTaskDetail(context: DbContext, taskId: string): Opera
     surface,
     currentBlocker,
     diagnosis
+  };
+}
+
+export function getOperatorExecutionSummary(context: DbContext, taskId: string): OperatorExecutionSummary {
+  const detail = getOperatorTaskDetail(context, taskId);
+  const currentWorkflowRun = findCurrentWorkflowRun(detail.workflowRuns, detail.attempt);
+  const toolEvents = detail.events.filter((event) =>
+    event.type === "agent_tool_call" ||
+    event.type === "daemon.agent_tool_executed" ||
+    event.type === "daemon.agent_artifact_written" ||
+    event.type === "daemon.agent_extra_artifact_written"
+  );
+  return {
+    task: {
+      id: detail.task.id,
+      title: detail.task.title,
+      status: detail.task.status,
+      autonomy: detail.task.autonomy,
+      stateVersion: detail.task.stateVersion
+    },
+    project: {
+      id: detail.project.id,
+      name: detail.project.name,
+      defaultBranch: detail.project.defaultBranch
+    },
+    attempt: detail.attempt
+      ? {
+          id: detail.attempt.id,
+          status: detail.attempt.status,
+          reason: detail.attempt.reason
+        }
+      : undefined,
+    workspace: detail.workspace
+      ? {
+          id: detail.workspace.id,
+          status: detail.workspace.status,
+          branch: detail.workspace.branch,
+          path: detail.workspace.workspacePath
+        }
+      : undefined,
+    agentSessions: detail.agentSessions.map((session) => ({
+      id: session.id,
+      role: session.role,
+      providerKind: session.providerKind,
+      status: session.status
+    })),
+    coordinatorTools: toolEvents.slice(-12).map(mapCoordinatorToolSummary),
+    workflow: currentWorkflowRun
+      ? {
+          id: currentWorkflowRun.id,
+          profileId: currentWorkflowRun.profileId,
+          status: currentWorkflowRun.status,
+          externalId: currentWorkflowRun.externalId,
+          handoffKind: currentWorkflowRun.handoffKind
+        }
+      : undefined,
+    artifacts: summarizeArtifactRefs(detail.events),
+    nextStep: {
+      recommended: detail.surface.json.recommended_next_step,
+      currentBlocker: detail.currentBlocker,
+      availableTools: detail.surface.json.available_tools.map((tool) => tool.name)
+    }
   };
 }
 
@@ -525,6 +645,39 @@ function mapInspectionSummary(event: EventRecord): OperatorInspectionSummary {
     severity: event.severity,
     createdAt: event.createdAt
   };
+}
+
+function mapCoordinatorToolSummary(event: EventRecord): OperatorExecutionSummary["coordinatorTools"][number] {
+  const payload = isRecord(event.payload) ? event.payload : undefined;
+  return {
+    eventId: event.id,
+    toolName: readString(payload, "toolName"),
+    status: readString(payload, "status") ?? readString(payload, "toolStatus"),
+    summary: truncateText(event.summary, 240) ?? event.type,
+    artifactRefs: event.artifactRefs,
+    extraArtifact: event.type === "daemon.agent_extra_artifact_written"
+  };
+}
+
+function summarizeArtifactRefs(events: EventRecord[]): OperatorExecutionSummary["artifacts"] {
+  const byPath = new Map<string, OperatorExecutionSummary["artifacts"][number]>();
+  for (const event of events) {
+    for (const ref of event.artifactRefs) {
+      if (!byPath.has(ref)) {
+        byPath.set(ref, {
+          path: ref,
+          sourceEventType: event.type,
+          extra: event.type === "daemon.agent_extra_artifact_written"
+        });
+        continue;
+      }
+      const existing = byPath.get(ref);
+      if (existing && event.type === "daemon.agent_extra_artifact_written") {
+        existing.extra = true;
+      }
+    }
+  }
+  return [...byPath.values()].slice(-20);
 }
 
 function deriveOperatorAttentionReasons(input: {

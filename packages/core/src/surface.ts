@@ -707,7 +707,7 @@ function deriveVisibleTools(snapshot: SurfaceSnapshot): SurfaceToolJson[] {
 
   if (snapshot.workflowRuns.some((run) => run.status === "running" || run.status === "blocked" || run.status === "planned")) {
     return [
-      tool("inspect_workflow_run", "查看 workflow run 状态。"),
+      tool("inspect_workflow_run", "查看 workflow run 状态；running workflow 只 inspect 或等待 handoff，不执行 workflow 内部 action。"),
       tool("ask_human", "在信息不足时向人类提问。")
     ];
   }
@@ -798,7 +798,7 @@ function deriveRecommendedNextStep(snapshot: SurfaceSnapshot): string {
     return "workspace recovery 已阻塞；等待 operator review 或通过 human request 明确处理方式。";
   }
   if (snapshot.workflowRuns.some((run) => run.status === "running" || run.status === "blocked")) {
-    return "检查 workflow run，并根据 handoff 或 blocked 原因继续。";
+    return "检查 workflow run 状态；如果尚未产生 handoff，则等待 workflow 自己推进或继续由 daemon inspect。";
   }
   return "继续推进当前 surface 所指示的单一下一步。";
 }
@@ -815,6 +815,9 @@ function deriveRecovery(snapshot: SurfaceSnapshot): string {
   }
   if (snapshot.workflowRuns.some((run) => run.status === "blocked")) {
     return "读取 workflow handoff/recovery，必要时生成新的 human request 或 resume surface。";
+  }
+  if (snapshot.workflowRuns.some((run) => run.status === "running")) {
+    return "running workflow 只能通过 workflow protocol status 观察；不要绕过 workflow handoff 执行内部 action。";
   }
   if (snapshot.pullRequest && snapshot.pullRequest.status === "open") {
     return "若 review 或 validation 变化，先更新 surface 再决定 rework、approval 或 merge。";

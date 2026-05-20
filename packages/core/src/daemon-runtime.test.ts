@@ -234,6 +234,101 @@ describe("daemon runtime", () => {
     expect(surface.json.execution_plan).toMatchObject({ artifact_path: "execution-plan.md", status: "active" });
   });
 
+  it("非 artifact tool 携带 artifact 时记录 extra artifact debug event", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createTaskFixture(databasePath);
+    withDatabase(databasePath, (context) => {
+      createExecutionPlan(context, {
+        projectId: fixture.projectId,
+        taskId: fixture.taskId,
+        status: "active",
+        artifactPath: "execution-plan.md"
+      });
+    });
+    const provider = new FakeAgentProvider(
+      [
+        "```coordinator-artifact",
+        "path: note.md",
+        "content:",
+        "# Extra",
+        "```",
+        "",
+        "```coordinator-tool",
+        "tool: create_attempt",
+        "reason: initial",
+        "```"
+      ].join("\n")
+    );
+
+    const result = withDatabase(databasePath, (context) => runDaemonTick(context, { provider }));
+
+    expect(result.actions).toContainEqual(
+      expect.objectContaining({
+        kind: "agent_tool_executed",
+        toolName: "create_attempt",
+        status: "succeeded"
+      })
+    );
+    const events = withDatabase(databasePath, (context) => listTaskEvents(context, fixture.taskId));
+    const extraEvent = events.find((event) => event.type === "daemon.agent_extra_artifact_written");
+    expect(extraEvent).toMatchObject({
+      artifactRefs: ["note.md"],
+      severity: "debug"
+    });
+    expect(extraEvent?.payload).toMatchObject({
+      toolName: "create_attempt",
+      artifactCount: 1,
+      artifactRefs: ["note.md"],
+      classification: "extra-artifact-for-non-artifact-tool"
+    });
+    expect(JSON.stringify(extraEvent?.payload)).not.toContain("# Extra");
+  });
+
+  it("update_pr 仅改标题时携带 artifact 也归类为 extra artifact", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createTaskFixture(databasePath);
+    withDatabase(databasePath, (context) => {
+      const attempt = createAttempt(context, {
+        projectId: fixture.projectId,
+        taskId: fixture.taskId
+      });
+      createPullRequest(context, {
+        id: "pr-extra-artifact",
+        projectId: fixture.projectId,
+        taskId: fixture.taskId,
+        attemptId: attempt.id,
+        providerKind: "fake",
+        externalId: "fake-pr-extra",
+        status: "open"
+      });
+    });
+    const provider = new FakeAgentProvider(
+      [
+        "```coordinator-artifact",
+        "path: pr-note.md",
+        "content:",
+        "# Note",
+        "```",
+        "",
+        "```coordinator-tool",
+        "tool: update_pr",
+        "pr: pr-extra-artifact",
+        "title: 只改标题",
+        "```"
+      ].join("\n")
+    );
+
+    const result = withDatabase(databasePath, (context) =>
+      runDaemonTick(context, { provider, pullRequestProvider: new FakePullRequestProvider() })
+    );
+
+    const events = withDatabase(databasePath, (context) => listTaskEvents(context, fixture.taskId));
+    expect(events.find((event) => event.type === "daemon.agent_extra_artifact_written")?.payload).toMatchObject({
+      toolName: "update_pr",
+      artifactRefs: ["pr-note.md"]
+    });
+  });
+
   it("daemon artifact bridge 拒绝通过 symlink 写出 artifact_root", () => {
     const databasePath = createMigratedDatabase();
     const fixture = createTaskFixture(databasePath);

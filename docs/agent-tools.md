@@ -44,6 +44,8 @@ workspace 创建成功后，切换为 attempt workspace artifact root：
 
 工具参数只接受相对当前 surface `artifact_root` 的相对路径。pre-workspace artifact 不会被自动迁移到 attempt workspace；后续 surface 只能通过 DB artifact record 或明确引用继续看到这些产物。
 
+不是所有工具请求都应该附带 artifact。`write_execution_plan`、`revise_execution_plan`、`ask_human`、`create_pr`、`request_merge_approval` 等 artifact-based 工具需要先写正文 artifact；`create_attempt`、`create_workspace`、`start_workflow_run`、`inspect_workflow_run` 等普通推进或观察工具默认不需要 `coordinator-artifact`。如果计划确实需要调整，应使用 `revise_execution_plan`，避免在普通推进步骤中顺手覆盖已有 `execution-plan.md`。
+
 ### 2.2 工具参数必须窄
 
 优先使用：

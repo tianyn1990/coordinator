@@ -41,6 +41,19 @@ Iteration 9 已落地最小 `runDaemonTick`：
 
 当前 P0 子集仍保持 daemon 不是 agent：daemon 不判断需求、方案、review 结论或 workflow profile 语义，只负责唤醒、reconcile、retry、事件记录和调用已存在 Core service。
 
+#### 1.1.1 Running workflow inspect-only 边界
+
+当 workflow run 仍处于 running / active 且尚未产生 handoff 时，daemon 的职责是持续通过 `workflow protocol status` 做只读 inspect/reconcile，并记录 workflow status、handoff、recovery 等观察结果。
+
+即使 workflow status 中包含 `allowedActions`、`actionInputHints`、stage、substate 或 gate，daemon 也不得据此主动调用 `workflow protocol action`。这些字段只服务 operator/debug 展示和审计排查；是否执行 workflow 内部 action 仍属于 workflow runtime/operator debug 边界，不是 daemon 自动推进职责。
+
+这一约束的上层语义是：
+
+```text
+daemon 是巡检与恢复运行时，不是 workflow 内部执行者。
+running workflow 的下一步由 workflow protocol 和 handoff 表达，coordinator 不越过 handoff 猜测内部进度。
+```
+
 ### 1.2 当前已落地的 recovery hardening 子集
 
 Iteration 12.2 已补齐 daemon/Core recovery matrix 的第一层实现：
@@ -97,6 +110,7 @@ daemon 不负责：
 - 技术方案判断。
 - review 结论判断。
 - workflow profile 语义选择。
+- 根据 workflow allowedActions / actionInputHints 主动执行 workflow action。
 - 直接修改代码。
 - 绕过 Coordinator Agent 执行高层策略。
 

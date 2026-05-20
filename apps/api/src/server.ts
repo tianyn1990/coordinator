@@ -16,6 +16,7 @@ import {
   createAttemptWorkspace,
   createPullRequestRuntime,
   executeCoordinatorAgentTool,
+  getOperatorExecutionSummary,
   getOperatorTaskDetail,
   inspectAgentSession,
   inspectPullRequestReviewRuntime,
@@ -178,6 +179,21 @@ export function buildServer(): FastifyInstance {
 
     const events = withDatabase(databasePath, (context) => listTaskEvents(context, request.params.taskId));
     return { taskId: request.params.taskId, events };
+  });
+  server.get<{ Params: { taskId: string } }>("/tasks/:taskId/summary", async (request, reply) => {
+    const databasePath = process.env.COORDINATOR_DB_PATH;
+    if (!databasePath) {
+      return reply.code(503).send({ error: "COORDINATOR_DB_PATH 未配置" });
+    }
+
+    try {
+      return withDatabase(databasePath, (context) => getOperatorExecutionSummary(context, request.params.taskId));
+    } catch (error) {
+      if (error instanceof OperatorSurfaceError) {
+        return reply.code(404).send({ error: error.message });
+      }
+      throw error;
+    }
   });
   server.get<{ Params: { taskId: string } }>("/tasks/:taskId/surface", async (request, reply) => {
     const databasePath = process.env.COORDINATOR_DB_PATH;
