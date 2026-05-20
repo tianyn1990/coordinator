@@ -259,13 +259,13 @@ describe("agent provider runtime", () => {
       timeoutMs: 1234
     });
     expect(calls[0].args).toEqual([
+      "--ask-for-approval",
+      "never",
       "exec",
       "--cd",
       "/tmp",
       "--sandbox",
       "read-only",
-      "--ask-for-approval",
-      "never",
       "--skip-git-repo-check",
       "--output-last-message",
       outputPath,

@@ -148,13 +148,14 @@ export class CodexProvider implements AgentProvider {
   run(input: AgentProviderRunInput): AgentProviderRunResult {
     const prompt = readFileSync(input.promptPath, "utf8");
     const args = [
+      // 当前 Codex CLI 将 approval policy 作为顶层参数解析，必须放在 exec 子命令之前。
+      "--ask-for-approval",
+      "never",
       "exec",
       "--cd",
       input.cwd,
       "--sandbox",
       "read-only",
-      "--ask-for-approval",
-      "never",
       "--skip-git-repo-check",
       "--output-last-message",
       input.outputPath,
