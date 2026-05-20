@@ -198,12 +198,15 @@ operator tools 只能由 Web/CLI/operator 调用，不得进入 Coordinator Agen
 参数：
 
 ```text
---profile <profile-id>
+无必填参数
 ```
 
 说明：
 
-- `profile-id` 来自 current surface 暴露的可用 profile，且必须来自 `workflow protocol capabilities` 声明的 implemented profiles。
+- 外层 Coordinator Agent 不选择 workflow profile；它只请求启动 workflow。
+- 如果人类在外部入口显式选择了 workflow profile，Core 会把该选择作为 human explicit selection 传给 workflow runtime。
+- 如果没有 human explicit selection，Core 使用 omitted/default/auto 语义，让 workflow runtime 根据任务上下文自主选择 actual profile。
+- `default` / `auto` 不是真实 profile id，不能作为 actual profile 持久化。
 - Iteration 8 暂不接受 `provider` 参数；inner provider 由 project/workflow 配置决定。后续如需要 agent 基于 capability 选择 provider，应通过独立 change 明确契约后再开放。
 
 #### resume_workflow_run

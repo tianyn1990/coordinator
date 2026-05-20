@@ -757,7 +757,7 @@ describe("daemon runtime", () => {
   it("workspace recovery operator attention 会阻止同 tick 启动 agent 和 workflow 工具", () => {
     const databasePath = createMigratedDatabase();
     const fixture = createReadyWorkspaceFixture(databasePath, "workspace-block", { currentBranch: "wrong-branch" });
-    const provider = new FakeAgentProvider("```coordinator-tool\ntool: start_workflow_run\nprofile: feature\n```");
+    const provider = new FakeAgentProvider("```coordinator-tool\ntool: start_workflow_run\n```");
 
     const result = withDatabase(databasePath, (context) => runDaemonTick(context, {
       provider,

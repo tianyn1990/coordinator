@@ -1,8 +1,8 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { createProject, createTask, runMigrations, withDatabase } from "@coordinator/db";
+import { createAttempt, createProject, createTask, createWorkspace, runMigrations, withDatabase } from "@coordinator/db";
 import { runCli } from "./commands.js";
 
 describe("runCli", () => {
@@ -29,7 +29,8 @@ describe("runCli", () => {
         { id: "0003_project_registry.sql", applied: true },
         { id: "0004_workflow_protocol_adapter.sql", applied: true },
         { id: "0005_agent_provider_runtime.sql", applied: true },
-        { id: "0006_pr_mr_provider.sql", applied: true }
+        { id: "0006_pr_mr_provider.sql", applied: true },
+        { id: "0007_workflow_selection.sql", applied: true }
       ]
     });
   });
@@ -348,6 +349,75 @@ describe("runCli", () => {
       nextStatus: "paused",
       task: { status: "paused" }
     });
+  });
+
+  it("workflow start 命令把 auto 语义委托给 runtime", () => {
+    const databasePath = join(mkdtempSync(join(tmpdir(), "coordinator-cli-workflow-start-")), "workflow.sqlite");
+    const repoPath = mkdtempSync(join(tmpdir(), "coordinator-cli-workflow-repo-"));
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "coordinator-cli-workflow-workspaces-"));
+    const launcherPath = join(mkdtempSync(join(tmpdir(), "coordinator-cli-workflow-launcher-")), "workflow");
+    writeFileSync(
+      launcherPath,
+      `#!/bin/sh
+set -eu
+if [ "$1" = "protocol" ] && [ "$2" = "capabilities" ]; then
+  cat <<'JSON'
+{"protocolVersion":"1","profiles":[{"id":"feature","purpose":"feature work","implemented":true}],"commands":["start","status","action","artifacts","events"],"handoffKinds":["pr_ready","human_review_required","manual_handoff","blocked","completed_no_pr"]}
+JSON
+  exit 0
+fi
+if [ "$1" = "protocol" ] && [ "$2" = "start" ]; then
+  if printf '%s' "$@" | grep -Eq -- '--workflow[[:space:]]+(auto|default)'; then
+    echo 'should not pass auto/default as concrete workflow' >&2
+    exit 1
+  fi
+  cat <<'JSON'
+{"runId":"inner-run-1","profile":"feature","lifecycle":"active","handoff":{"available":false,"artifacts":[],"deniedActions":[]},"summary":"started"}
+JSON
+  exit 0
+fi
+echo "unexpected args: $*" >&2
+exit 1
+`
+    );
+    chmodSync(launcherPath, 0o755);
+    runMigrations(databasePath);
+    withDatabase(databasePath, (context) => {
+      const project = createProject(context, {
+        id: "project-cli-workflow-start",
+        name: "workflow",
+        repoPath,
+        workspaceRoot,
+        workflowLauncher: launcherPath
+      });
+      const task = createTask(context, { id: "task-cli-workflow-start", projectId: project.id, title: "workflow" });
+      const attempt = createAttempt(context, { id: "attempt-cli-workflow-start", projectId: project.id, taskId: task.id });
+      createWorkspace(context, {
+        id: "workspace-cli-workflow-start",
+        projectId: project.id,
+        taskId: task.id,
+        attemptId: attempt.id,
+        status: "ready",
+        workspacePath: join(workspaceRoot, project.id, task.id, attempt.id),
+        repoPath: join(workspaceRoot, project.id, task.id, attempt.id, "repo"),
+        branch: "coordinator/task-cli-workflow-start/attempt-cli-workflow-start",
+        baseBranch: "main"
+      });
+      mkdirSync(join(workspaceRoot, project.id, task.id, attempt.id, "repo", ".git"), { recursive: true });
+    });
+
+    const result = runCli(["workflow", "start", "--db", databasePath, "--attempt", "attempt-cli-workflow-start", "--profile", "auto"]);
+
+    expect(result.exitCode).toBe(0);
+    const body = JSON.parse(result.stdout);
+    expect(body).toMatchObject({
+      workflowRun: {
+        selectionSource: "runtime_auto",
+        requestedProfileAlias: "auto",
+        profileId: "feature"
+      }
+    });
+    expect(body.workflowRun).not.toHaveProperty("requestedProfileId");
   });
 
   it("pr create 命令要求 title 和 body artifact 参数", () => {

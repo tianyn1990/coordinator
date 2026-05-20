@@ -284,13 +284,14 @@ function startWorkflowRunFromTool(
   input: ExecuteCoordinatorAgentToolInput & { args: CoordinatorAgentToolArgs; actor: string }
 ): WorkflowRunResult {
   const attemptId = requireCurrentAttempt(surface);
-  const profileId = requireArg(input.args, "profile");
+  if (input.args.profile !== undefined) {
+    throw new CoordinatorAgentToolError("start_workflow_run 不接受 outer Agent 传入的 profile；profile 只能来自人类显式选择或 workflow runtime 自主选择", "invalid_argument");
+  }
   if (input.args.provider !== undefined) {
     throw new CoordinatorAgentToolError("start_workflow_run 当前不接受 provider 参数；inner provider 由 workflow/project 配置决定", "invalid_argument");
   }
   return startWorkflowRun(context, {
     attemptId,
-    profileId,
     owner: input.actor,
     ttlMs: input.workflowStart?.ttlMs,
     now: input.workflowStart?.now,

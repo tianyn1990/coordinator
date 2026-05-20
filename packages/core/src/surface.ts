@@ -183,6 +183,9 @@ type WorkspaceSnapshotJson = {
 export type WorkflowRunSnapshot = {
   id?: string;
   profileId?: string;
+  selectionSource?: string;
+  requestedProfileId?: string;
+  requestedProfileAlias?: string;
   status?: string;
   handoffKind?: string;
 };
@@ -190,6 +193,9 @@ export type WorkflowRunSnapshot = {
 type WorkflowRunSnapshotJson = {
   id?: string;
   profile_id?: string;
+  selection_source?: string;
+  requested_profile_id?: string;
+  requested_profile_alias?: string;
   status?: string;
   handoff_kind?: string;
 };
@@ -437,6 +443,9 @@ export function buildTaskSurfaceFromDb(context: DbContext, taskId: string): Surf
           {
             id: activeWorkflowRun.id,
             profileId: activeWorkflowRun.profile_id,
+            selectionSource: activeWorkflowRun.selection_source,
+            requestedProfileId: activeWorkflowRun.requested_profile_id ?? undefined,
+            requestedProfileAlias: activeWorkflowRun.requested_profile_alias ?? undefined,
             status: activeWorkflowRun.status,
             handoffKind: activeWorkflowRun.handoff_kind ?? undefined
           }
@@ -551,7 +560,11 @@ export function renderSurfaceMarkdown(
   }
   if (json.workflow_runs.length > 0) {
     for (const run of json.workflow_runs) {
-      lines.push(`- workflow_run: ${run.id ?? "unknown"} profile=${run.profile_id ?? "unknown"} status=${run.status ?? "unknown"} handoff=${run.handoff_kind ?? "none"}`);
+      const selection = run.selection_source ? `${run.selection_source}` : "unknown";
+      const requested = run.requested_profile_id ?? run.requested_profile_alias ?? "auto";
+      lines.push(
+        `- workflow_run: ${run.id ?? "unknown"} profile=${run.profile_id ?? "unknown"} selection=${selection} requested=${requested} status=${run.status ?? "unknown"} handoff=${run.handoff_kind ?? "none"}`
+      );
     }
   } else {
     lines.push(`- workflow_run: 当前 surface 未发现 active workflow run。`);
@@ -738,7 +751,7 @@ function deriveVisibleTools(snapshot: SurfaceSnapshot): SurfaceToolJson[] {
 
   if (snapshot.workspace.status === "ready" || snapshot.workspace.status === "dirty") {
     return [
-      tool("start_workflow_run", "在当前 workspace 中启动 workflow run。"),
+      tool("start_workflow_run", "在当前 workspace 中启动 workflow run；profile 由 workflow runtime 或人类显式选择决定。"),
       tool("revise_execution_plan", "在计划需要调整时更新 execution plan。"),
       tool("ask_human", "在信息不足时向人类提问。")
     ];
@@ -798,7 +811,7 @@ function deriveRecommendedNextStep(snapshot: SurfaceSnapshot): string {
     return "workspace recovery 已阻塞；等待 operator review 或通过 human request 明确处理方式。";
   }
   if (snapshot.workflowRuns.some((run) => run.status === "running" || run.status === "blocked")) {
-    return "检查 workflow run 状态；如果尚未产生 handoff，则等待 workflow 自己推进或继续由 daemon inspect。";
+    return "检查 workflow run 状态；如果尚未产生 handoff，则等待 workflow 自己推进或继续由 daemon inspect。profile 由 workflow runtime 最终决定，不由外层 Agent 选择。";
   }
   return "继续推进当前 surface 所指示的单一下一步。";
 }
@@ -903,7 +916,7 @@ function toolArgs(name: string): string[] {
     revise_execution_plan: ["--artifact <path>", "--reason <short-reason>"],
     create_attempt: ["--reason <reason>"],
     create_workspace: ["--attempt <attempt-id>"],
-    start_workflow_run: ["--profile <profile-id>"],
+    start_workflow_run: [],
     resume_workflow_run: ["--run <workflow-run-id>"],
     inspect_workflow_run: ["--run <workflow-run-id>"],
     ask_human: ["--kind <kind>", "--artifact <path>"],
@@ -1045,18 +1058,31 @@ function findActiveWorkflowRunForAttempt(
   | {
       id: string;
       profile_id: string;
+      selection_source: string;
+      requested_profile_id: string | null;
+      requested_profile_alias: string | null;
       status: string;
       handoff_kind: string | null;
     }
   | undefined {
   return context.db
     .prepare(
-      `SELECT id, profile_id, status, handoff_kind FROM workflow_runs
+      `SELECT id, profile_id, selection_source, requested_profile_id, requested_profile_alias, status, handoff_kind FROM workflow_runs
        WHERE attempt_id = ? AND status IN ('planned', 'starting', 'running', 'blocked', 'handoff', 'unknown')
        ORDER BY created_at ASC, id ASC
        LIMIT 1`
     )
-    .get(attemptId) as { id: string; profile_id: string; status: string; handoff_kind: string | null } | undefined;
+    .get(attemptId) as
+    | {
+        id: string;
+        profile_id: string;
+        selection_source: string;
+        requested_profile_id: string | null;
+        requested_profile_alias: string | null;
+        status: string;
+        handoff_kind: string | null;
+      }
+    | undefined;
 }
 
 function findRecentAgentSessionsForTask(
@@ -1299,6 +1325,9 @@ function toWorkflowRunJson(run: WorkflowRunSnapshot): WorkflowRunSnapshotJson {
   return {
     id: run.id,
     profile_id: run.profileId,
+    selection_source: run.selectionSource,
+    requested_profile_id: run.requestedProfileId,
+    requested_profile_alias: run.requestedProfileAlias,
     status: run.status,
     handoff_kind: run.handoffKind
   };

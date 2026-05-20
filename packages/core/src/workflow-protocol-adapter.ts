@@ -27,6 +27,11 @@ import {
 const DEFAULT_PROTOCOL_TIMEOUT_MS = 120_000;
 const MAX_ACTION_INPUT_HINT_KEY_LENGTH = 120;
 const MAX_ACTION_INPUT_HINT_USAGE_LENGTH = 1_000;
+const UNKNOWN_WORKFLOW_PROFILE = "unknown";
+
+type WorkflowSelection =
+  | { source: "runtime_auto"; requestedProfileId?: undefined; requestedProfileAlias: "auto" | "default" }
+  | { source: "human_explicit"; requestedProfileId: string; requestedProfileAlias?: undefined };
 
 export type WorkflowProtocolRunner = (args: string[], options: { cwd: string; launcher: string; timeoutMs: number }) => string;
 
@@ -100,7 +105,7 @@ export type WorkflowEvents = {
 
 export type StartWorkflowRunInput = {
   attemptId: string;
-  profileId: string;
+  profileId?: string;
   owner?: string;
   ttlMs?: number;
   now?: Date;
@@ -181,22 +186,25 @@ export function startWorkflowRun(context: DbContext, input: StartWorkflowRunInpu
   const project = requireProjectRecord(context, attempt.projectId);
   const workspace = requireReadyWorkspace(context, attempt.id);
   const launcher = requireWorkflowLauncher(project);
-  const capabilities = readCapabilities(project, requireProjectRepoPath(project), runner);
-  assertImplementedProfile(capabilities, input.profileId);
+  const selection = normalizeWorkflowSelection(input.profileId);
+  if (selection.requestedProfileId) {
+    const capabilities = readCapabilities(project, requireProjectRepoPath(project), runner);
+    assertImplementedProfile(capabilities, selection.requestedProfileId);
+  }
 
   const existing = getActiveWorkflowRunByAttempt(context, attempt.id);
   if (existing) {
-    if (existing.profileId !== input.profileId) {
+    if (selection.requestedProfileId && existing.profileId !== selection.requestedProfileId) {
       throw new ActiveResourceConflictError(
-        `attempt ${attempt.id} 已有 active workflow run profile=${existing.profileId}，不能复用为 ${input.profileId}`
+        `attempt ${attempt.id} 已有 active workflow run profile=${existing.profileId}，不能复用为 ${selection.requestedProfileId}`
       );
     }
     if (!existing.externalId) {
       throw new ActiveResourceConflictError(`workflow run ${existing.id} 缺少 external id，需要 reconcile 后再继续`);
     }
-    const status = inspectStatusForRun(context, project, launcher, existing, runner);
-    const updated = persistWorkflowStatus(context, existing, status, "workflow.status_inspected", "status");
-    return { workflowRun: updated, status, reused: true };
+      const status = inspectStatusForRun(context, project, launcher, existing, runner);
+      const updated = persistWorkflowStatus(context, existing, status, "workflow.status_inspected", "status");
+      return { workflowRun: updated, status, reused: true };
   }
 
   let workflowLock: LockRecord | undefined;
@@ -206,7 +214,7 @@ export function startWorkflowRun(context: DbContext, input: StartWorkflowRunInpu
   let sideEffectWindowStarted = false;
   try {
     const operation = createOperation(context, {
-      idempotencyKey: workflowStartKey(attempt.id, input.profileId),
+      idempotencyKey: workflowStartKey(attempt.id, selection),
       kind: "workflow:start",
       projectId: project.id,
       taskId: attempt.taskId,
@@ -226,14 +234,22 @@ export function startWorkflowRun(context: DbContext, input: StartWorkflowRunInpu
         operationId: operation.id,
         status: "running",
         now,
-        lastObservedState: { phase: "lock-acquired", profileId: input.profileId }
+        lastObservedState: {
+          phase: "lock-acquired",
+          profileId: selection.requestedProfileId ?? UNKNOWN_WORKFLOW_PROFILE,
+          selectionSource: selection.source,
+          requestedProfileAlias: selection.requestedProfileAlias
+        }
       });
       // 在真正启动 workflow 前先落库，避免 start 已发生但外层没有任何可恢复记录。
       return createWorkflowRun(context, {
         projectId: project.id,
         taskId: attempt.taskId,
         attemptId: attempt.id,
-        profileId: input.profileId,
+        profileId: selection.requestedProfileId ?? UNKNOWN_WORKFLOW_PROFILE,
+        selectionSource: selection.source,
+        requestedProfileId: selection.requestedProfileId,
+        requestedProfileAlias: selection.requestedProfileAlias,
         status: "starting"
       });
     });
@@ -241,14 +257,12 @@ export function startWorkflowRun(context: DbContext, input: StartWorkflowRunInpu
 
     // workflow protocol stdout 是本 adapter 的唯一输入边界；不扫描 `.workflow` 私有文件。
     sideEffectWindowStarted = true;
-    const raw = runProtocolJson(project, workspace.repoPath, launcher, runner, [
-      "protocol",
-      "start",
-      "--workflow",
-      input.profileId
-    ]);
+    const startArgs = selection.requestedProfileId
+      ? ["protocol", "start", "--workflow", selection.requestedProfileId]
+      : ["protocol", "start"];
+    const raw = runProtocolJson(project, workspace.repoPath, launcher, runner, startArgs);
     const startStatus = parseWorkflowStatus(raw, { fallbackLifecycle: "active" });
-    const status = normalizeStartedStatus(startStatus, input.profileId);
+    const status = normalizeStartedStatus(startStatus);
     const coarseStatus = coarseWorkflowStatus(status);
     const lock = workflowLock;
     const workflowRunRecord = startingWorkflowRun;
@@ -260,6 +274,7 @@ export function startWorkflowRun(context: DbContext, input: StartWorkflowRunInpu
         workflowRunId: workflowRunRecord.id,
         expectedStateVersion: workflowRunRecord.stateVersion,
         status: coarseStatus,
+        profileId: status.profile,
         externalId: status.runId,
         handoffKind: status.handoff.kind,
         lock: {
@@ -286,7 +301,15 @@ export function startWorkflowRun(context: DbContext, input: StartWorkflowRunInpu
         status: "succeeded",
         now,
         externalId: status.runId,
-        lastObservedState: { phase: "workflow-started", runId: status.runId, status: coarseStatus }
+        lastObservedState: {
+          phase: "workflow-started",
+          runId: status.runId,
+          status: coarseStatus,
+          profile: status.profile,
+          selectionSource: selection.source,
+          requestedProfileId: selection.requestedProfileId,
+          requestedProfileAlias: selection.requestedProfileAlias
+        }
       });
       return updated;
     });
@@ -314,9 +337,9 @@ export function inspectWorkflowRun(context: DbContext, input: InspectWorkflowRun
   const workflowRun = requireWorkflowRunRecord(context, input.workflowRunId);
   const project = requireProjectRecord(context, workflowRun.projectId);
   const launcher = requireWorkflowLauncher(project);
-  const status = inspectStatusForRun(context, project, launcher, workflowRun, input.runner ?? runWorkflowProtocol);
-  const updated = persistWorkflowStatus(context, workflowRun, status, "workflow.status_inspected", "status");
-  return { workflowRun: updated, status, reused: true };
+    const status = inspectStatusForRun(context, project, launcher, workflowRun, input.runner ?? runWorkflowProtocol);
+    const updated = persistWorkflowStatus(context, workflowRun, status, "workflow.status_inspected", "status");
+    return { workflowRun: updated, status, reused: true };
 }
 
 export function invokeWorkflowAction(context: DbContext, input: InvokeWorkflowActionInput): WorkflowRunResult {
@@ -532,6 +555,7 @@ function persistWorkflowStatus(
       workflowRunId: workflowRun.id,
       expectedStateVersion: workflowRun.stateVersion,
       status: coarseStatus,
+      profileId: status.profile,
       externalId: status.runId,
       handoffKind: status.handoff.kind,
       lock: options.updateLock
@@ -566,7 +590,7 @@ function assertProtocolStatusMatchesRun(workflowRun: WorkflowRunRecord, status: 
   if (status.runId !== workflowRun.externalId) {
     throw new WorkflowProtocolError("workflow protocol runId mismatch");
   }
-  if (status.profile && status.profile !== workflowRun.profileId) {
+  if (status.profile && workflowRun.profileId !== UNKNOWN_WORKFLOW_PROFILE && status.profile !== workflowRun.profileId) {
     throw new WorkflowProtocolError("workflow protocol profile mismatch");
   }
 }
@@ -708,10 +732,12 @@ function parseOptionalActionGuidance(value: unknown): { action?: string; guidanc
   };
 }
 
-function normalizeStartedStatus(status: WorkflowStatus, requestedProfile: string): WorkflowStatus {
+function normalizeStartedStatus(status: WorkflowStatus): WorkflowStatus {
+  if (!status.profile) {
+    throw new WorkflowProtocolError("workflow protocol start 必须返回 actual profile");
+  }
   return {
     ...status,
-    profile: status.profile ?? requestedProfile,
     summary: status.summary ?? "workflow run started"
   };
 }
@@ -877,8 +903,16 @@ function requireWorkflowRunRecord(context: DbContext, workflowRunId: string): Wo
   return workflowRun;
 }
 
-function workflowStartKey(attemptId: string, profileId: string): string {
-  return `workflow:start:${attemptId}:${profileId}`;
+function workflowStartKey(attemptId: string, selection: WorkflowSelection): string {
+  return `workflow:start:${attemptId}:${selection.requestedProfileId ? `human:${selection.requestedProfileId}` : selection.requestedProfileAlias}`;
+}
+
+function normalizeWorkflowSelection(profileId: string | undefined): WorkflowSelection {
+  const normalized = profileId?.trim();
+  if (!normalized || normalized === "auto" || normalized === "default") {
+    return { source: "runtime_auto", requestedProfileAlias: normalized === "default" ? "default" : "auto" };
+  }
+  return { source: "human_explicit", requestedProfileId: normalized };
 }
 
 function workflowActionKey(workflowRunId: string, stateVersion: number, action: string, arg?: string): string {

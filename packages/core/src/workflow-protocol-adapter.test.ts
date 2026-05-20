@@ -184,7 +184,7 @@ describe("workflow protocol adapter", () => {
     expect(protocol.calls.some((call) => call.args[1] === "start")).toBe(false);
   });
 
-  it("operation-first 启动 workflow run，并在 workspace repo 内执行 protocol", () => {
+  it("operation-first 以 human explicit profile 启动 workflow run，并在 workspace repo 内执行 protocol", () => {
     const databasePath = createMigratedDatabase();
     const fixture = createAttemptWithReadyWorkspace(databasePath);
     const protocol = createProtocolRunner();
@@ -201,7 +201,9 @@ describe("workflow protocol adapter", () => {
     expect(result.workflowRun).toMatchObject({
       status: "running",
       externalId: "inner-run-1",
-      profileId: "feature"
+      profileId: "feature",
+      selectionSource: "human_explicit",
+      requestedProfileId: "feature"
     });
     expect(result.reused).toBe(false);
     expect(protocol.calls.map((call) => call.args)).toEqual([
@@ -213,9 +215,112 @@ describe("workflow protocol adapter", () => {
     expect(protocol.calls[1].timeoutMs).toBe(120_000);
 
     const operation = withDatabase(databasePath, (context) =>
-      getOperationByIdempotencyKey(context, "workflow:start:attempt-workflow:feature")
+      getOperationByIdempotencyKey(context, "workflow:start:attempt-workflow:human:feature")
     );
     expect(operation).toMatchObject({ kind: "workflow:start", status: "succeeded" });
+  });
+
+  it("未传 profile 时以 runtime auto selection 启动，并持久化 actual profile", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createAttemptWithReadyWorkspace(databasePath);
+    const protocol = createProtocolRunner();
+
+    const result = withDatabase(databasePath, (context) =>
+      startWorkflowRun(context, {
+        attemptId: fixture.attemptId,
+        owner: "test-worker",
+        runner: protocol.runner
+      })
+    );
+
+    expect(result.workflowRun).toMatchObject({
+      status: "running",
+      externalId: "inner-run-1",
+      profileId: "feature",
+      selectionSource: "runtime_auto",
+      requestedProfileId: undefined,
+      requestedProfileAlias: "auto"
+    });
+    expect(protocol.calls.map((call) => call.args)).toEqual([["protocol", "start"]]);
+
+    const operation = withDatabase(databasePath, (context) =>
+      getOperationByIdempotencyKey(context, "workflow:start:attempt-workflow:auto")
+    );
+    expect(operation).toMatchObject({ kind: "workflow:start", status: "succeeded" });
+  });
+
+  it("显式传入 auto/default 时也按 runtime auto selection 启动", () => {
+    const autoDatabasePath = createMigratedDatabase();
+    const autoFixture = createAttemptWithReadyWorkspace(autoDatabasePath);
+    const autoProtocol = createProtocolRunner();
+
+    const autoResult = withDatabase(autoDatabasePath, (context) =>
+      startWorkflowRun(context, {
+        attemptId: autoFixture.attemptId,
+        profileId: "auto",
+        owner: "test-worker",
+        runner: autoProtocol.runner
+      })
+    );
+
+    expect(autoResult.workflowRun).toMatchObject({
+      status: "running",
+      profileId: "feature",
+      selectionSource: "runtime_auto",
+      requestedProfileId: undefined,
+      requestedProfileAlias: "auto"
+    });
+    expect(autoProtocol.calls.map((call) => call.args)).toEqual([["protocol", "start"]]);
+
+    const defaultDatabasePath = createMigratedDatabase();
+    const defaultFixture = createAttemptWithReadyWorkspace(defaultDatabasePath);
+    const defaultProtocol = createProtocolRunner();
+    const defaultResult = withDatabase(defaultDatabasePath, (context) =>
+      startWorkflowRun(context, {
+        attemptId: defaultFixture.attemptId,
+        profileId: "default",
+        owner: "test-worker",
+        runner: defaultProtocol.runner
+      })
+    );
+
+    expect(defaultResult.workflowRun).toMatchObject({
+      status: "running",
+      profileId: "feature",
+      selectionSource: "runtime_auto",
+      requestedProfileId: undefined,
+      requestedProfileAlias: "default"
+    });
+    expect(defaultProtocol.calls.map((call) => call.args)).toEqual([["protocol", "start"]]);
+  });
+
+  it("explicit profile 场景必须返回 actual profile，不能用 requested profile 兜底", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createAttemptWithReadyWorkspace(databasePath);
+    const protocolRunner = createProtocolRunner();
+    const protocol: WorkflowProtocolRunner = (args, options) => {
+      if (args[1] === "capabilities") {
+        return protocolRunner.runner(args, options);
+      }
+      return JSON.stringify({
+        runId: "inner-run-1",
+        protocolVersion: "1",
+        lifecycle: "active",
+        handoff: { available: false, artifacts: [], deniedActions: [] },
+        summary: "started without actual profile"
+      });
+    };
+
+    expect(() =>
+      withDatabase(databasePath, (context) =>
+        startWorkflowRun(context, {
+          attemptId: fixture.attemptId,
+          profileId: "feature",
+          owner: "test-worker",
+          runner: protocol
+        })
+      )
+    ).toThrow(/actual profile/);
   });
 
   it("start side effect 抛错后保留 starting workflow run 并将 operation 标记 unknown", () => {
@@ -240,7 +345,7 @@ describe("workflow protocol adapter", () => {
     ).toThrow(/timeout after external start/);
 
     const persisted = withDatabase(databasePath, (context) => ({
-      operation: getOperationByIdempotencyKey(context, "workflow:start:attempt-workflow:feature"),
+      operation: getOperationByIdempotencyKey(context, "workflow:start:attempt-workflow:human:feature"),
       workflowRun: getActiveWorkflowRunByAttempt(context, fixture.attemptId)
     }));
     expect(persisted.operation).toMatchObject({ status: "unknown" });

@@ -49,6 +49,8 @@ protocol 命令必须输出稳定 JSON。
 - action id。
 - artifact path。
 
+其中 profile id 只用于人类/operator 显式选择或 workflow runtime 返回的实际结果。外层 Coordinator Agent 不应根据 profile id 决策；当人类没有显式选择时，Coordinator 应以 omitted/default/auto 语义委托 workflow runtime 自主选择。
+
 ### 3.4 workflow 保留内部控制面
 
 workflow 内部的 stage/gate/surface 仍由 workflow runtime 管。
@@ -90,7 +92,7 @@ workflow protocol capabilities
 }
 ```
 
-Coordinator 只能展示和选择 `implemented=true` 的 profile。profile 选择必须引用 workflow catalog/capabilities 中的说明，不能靠 Project Registry 默认或外层启发式静默选择。
+Coordinator 可以把 `implemented=true` 的 profile 展示给 operator，并用于校验人类显式选择。profile 选择的最终语义真源仍是 workflow runtime；外层 Coordinator Agent 不得根据 capabilities catalogue 主动选择 profile，也不得靠 Project Registry 默认或外层启发式静默选择。
 
 Agent provider 不属于 workflow capability 真源。provider 能力由 Project Registry / AgentProvider registry 暴露，workflow 只声明它支持哪些 profile 和 protocol 命令。
 
@@ -98,6 +100,10 @@ Agent provider 不属于 workflow capability 真源。provider 能力由 Project
 
 ```bash
 workflow protocol start --workflow <profile>
+# 或省略 --workflow / 使用 default / auto，让 workflow runtime 自主选择
+workflow protocol start
+workflow protocol start --workflow default
+workflow protocol start --workflow auto
 ```
 
 输出：
@@ -106,6 +112,8 @@ workflow protocol start --workflow <profile>
 {
   "runId": "run-...",
   "profile": "feature",
+  "requestedProfile": null,
+  "selectionMode": "auto",
   "status": "running",
   "stage": "requirements",
   "substate": null,
@@ -120,6 +128,8 @@ workflow protocol start --workflow <profile>
   }
 }
 ```
+
+`profile` 表示 workflow runtime 最终选择或确认的 actual profile。`default` 和 `auto` 不是 actual profile，只表示“委托 workflow runtime 自主选择”。如果 operator 或任务来源提供了 human explicit profile，Coordinator 可以把该选择传给 workflow protocol；若 workflow 无法支持该选择，必须返回受控失败或 blocked/human-needed，而不是让 outer Agent 继续猜测。
 
 ### 4.3 status
 
@@ -340,17 +350,25 @@ completed_no_pr
 
 ### 6.1 启动
 
-Coordinator Agent 调用：
+Coordinator Agent 请求：
 
 ```text
-start_workflow_run --profile feature
+start_workflow_run
 ```
 
-Execution Adapter 调：
+Execution Adapter 根据任务上下文启动 workflow：
 
 ```bash
-workflow protocol start --workflow feature
+# 无 human explicit selection 时
+workflow protocol start
+
+# 有 human explicit selection 时
+workflow protocol start --workflow <human-selected-profile>
 ```
+
+Coordinator Agent 不选择 workflow profile。人类可以在外部入口显式选择，也可以在提示词中自然语言表达倾向；前者由 Coordinator 作为 human explicit selection 透传，后者由 workflow runtime 根据任务上下文自行理解。
+
+当前 Web/manual task 创建入口尚未提供独立 workflow selection 字段；若用户在任务描述中自然语言指定工作流，Coordinator 仍只把它作为任务上下文，具体 profile 由 workflow runtime 判断。后续如增加 UI 下拉或外部 task source 的结构化 profile 字段，必须保存为 human explicit selection，并继续禁止 outer Agent 改写或猜测该选择。
 
 ### 6.2 监控
 
@@ -452,6 +470,7 @@ coordinator 应校验兼容性。
 - 支持 capabilities/start/status/action/artifacts/events。
 - capabilities 在 project repo 中执行，用于获得 protocol version、implemented profiles、commands 和 handoff kinds。
 - start/status/action/artifacts/events 在 ready workspace repo 中执行。
+- start 支持 omitted/default/auto 语义，由 workflow runtime 返回 actual profile；human explicit selection 由 operator/task input 提供，不来自 outer Agent。
 - start/action 是副作用，必须走 operation、lock、fencing 和 idempotency。
 - action 必须携带 expected workflow run state version，避免响应丢失后基于最新状态重复执行同一副作用。
 - action idempotency key 使用 canonical JSON hash，不直接拼接 action/arg。
@@ -462,6 +481,7 @@ coordinator 应校验兼容性。
 
 - `unknown` workflow operation 的 inspect/reconcile 矩阵。
 - protocol 返回 run id 与当前 external id 的一致性校验。
+- protocol 返回 actual profile 与当前 workflow run 记录的一致性校验。
 - capabilities.commands 的 command gate。
 
 ## 11. 禁止事项
@@ -470,6 +490,8 @@ coordinator 应校验兼容性。
 - coordinator 不扫描 workflow artifact 来猜 completion。
 - coordinator 不把 workflow stage/substate 映射为 handoff。
 - coordinator 不把 workflow stage/substate/gate/allowedActions 当成外层状态迁移依据。
+- coordinator 不让 outer Agent 选择 workflow profile。
+- coordinator 不把 `default` 或 `auto` 当作 actual profile。
 - coordinator 不把 OpenSpec 状态当成 workflow 完成状态。
 - coordinator 不直接调用 OpenSpec 替 workflow 完成内部流程。
 - coordinator 不把 workflow private fixture 当成 protocol。

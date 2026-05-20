@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -8,6 +8,7 @@ import {
   createOperation,
   createProject,
   createTask,
+  createWorkspace,
   listTaskEvents,
   runMigrations,
   updateOperation,
@@ -393,6 +394,86 @@ describe("API health", () => {
       });
 
       expect(response.statusCode).toBe(400);
+    } finally {
+      if (previous === undefined) {
+        delete process.env.COORDINATOR_DB_PATH;
+      } else {
+        process.env.COORDINATOR_DB_PATH = previous;
+      }
+    }
+  });
+
+  it("workflow start API 把 auto 语义委托给 runtime", async () => {
+    const databasePath = join(mkdtempSync(join(tmpdir(), "coordinator-api-workflow-start-")), "api.sqlite");
+    const repoPath = mkdtempSync(join(tmpdir(), "coordinator-api-workflow-repo-"));
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "coordinator-api-workflow-workspaces-"));
+    const launcherPath = join(mkdtempSync(join(tmpdir(), "coordinator-api-workflow-launcher-")), "workflow");
+    writeFileSync(
+      launcherPath,
+      `#!/bin/sh
+set -eu
+if [ "$1" = "protocol" ] && [ "$2" = "start" ]; then
+  if printf '%s' "$@" | grep -Eq -- '--workflow[[:space:]]+(auto|default)'; then
+    echo 'should not pass auto/default as concrete workflow' >&2
+    exit 1
+  fi
+  cat <<'JSON'
+{"runId":"inner-run-1","profile":"feature","lifecycle":"active","handoff":{"available":false,"artifacts":[],"deniedActions":[]},"summary":"started"}
+JSON
+  exit 0
+fi
+echo "unexpected args: $*" >&2
+exit 1
+`
+    );
+    chmodSync(launcherPath, 0o755);
+    runMigrations(databasePath);
+    withDatabase(databasePath, (context) => {
+      const project = createProject(context, {
+        id: "project-api-workflow-start",
+        name: "workflow",
+        repoPath,
+        workspaceRoot,
+        workflowLauncher: launcherPath
+      });
+      const task = createTask(context, { id: "task-api-workflow-start", projectId: project.id, title: "workflow" });
+      const attempt = createAttempt(context, { id: "attempt-api-workflow-start", projectId: project.id, taskId: task.id });
+      const workspacePath = join(workspaceRoot, project.id, task.id, attempt.id);
+      const repoWorktree = join(workspacePath, "repo");
+      mkdirSync(join(repoWorktree, ".git"), { recursive: true });
+      createWorkspace(context, {
+        id: "workspace-api-workflow-start",
+        projectId: project.id,
+        taskId: task.id,
+        attemptId: attempt.id,
+        status: "ready",
+        workspacePath,
+        repoPath: repoWorktree,
+        branch: "coordinator/task-api-workflow-start/attempt-api-workflow-start",
+        baseBranch: "main"
+      });
+    });
+
+    const previous = process.env.COORDINATOR_DB_PATH;
+    process.env.COORDINATOR_DB_PATH = databasePath;
+    try {
+      const server = buildServer();
+      const response = await server.inject({
+        method: "POST",
+        url: "/attempts/attempt-api-workflow-start/workflow-runs",
+        payload: { profileId: "auto", owner: "api-test" }
+      });
+
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      expect(body).toMatchObject({
+        workflowRun: {
+          selectionSource: "runtime_auto",
+          requestedProfileAlias: "auto",
+          profileId: "feature"
+        }
+      });
+      expect(body.workflowRun).not.toHaveProperty("requestedProfileId");
     } finally {
       if (previous === undefined) {
         delete process.env.COORDINATOR_DB_PATH;

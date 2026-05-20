@@ -386,7 +386,6 @@ export function buildServer(): FastifyInstance {
       schema: {
         body: {
           type: "object",
-          required: ["profileId"],
           additionalProperties: false,
           properties: {
             profileId: { type: "string", minLength: 1 },
@@ -405,7 +404,7 @@ export function buildServer(): FastifyInstance {
         return withDatabase(databasePath, (context) =>
           startWorkflowRun(context, {
             attemptId: request.params.attemptId,
-            profileId: request.body.profileId,
+            profileId: request.body.profileId ?? undefined,
             owner: request.body.owner ?? "api"
           })
         );
@@ -895,7 +894,7 @@ type CreateWorkspaceBody = {
 };
 
 type StartWorkflowBody = {
-  profileId: string;
+  profileId?: string;
   owner?: string;
 };
 

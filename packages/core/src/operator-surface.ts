@@ -156,6 +156,9 @@ export type OperatorExecutionSummary = {
   workflow?: {
     id: string;
     profileId: string;
+    selectionSource?: string;
+    requestedProfileId?: string;
+    requestedProfileAlias?: string;
     status: string;
     externalId?: string;
     handoffKind?: string;
@@ -395,6 +398,9 @@ export function getOperatorExecutionSummary(context: DbContext, taskId: string):
       ? {
           id: currentWorkflowRun.id,
           profileId: currentWorkflowRun.profileId,
+          selectionSource: currentWorkflowRun.selectionSource,
+          requestedProfileId: currentWorkflowRun.requestedProfileId,
+          requestedProfileAlias: currentWorkflowRun.requestedProfileAlias,
           status: currentWorkflowRun.status,
           externalId: currentWorkflowRun.externalId,
           handoffKind: currentWorkflowRun.handoffKind

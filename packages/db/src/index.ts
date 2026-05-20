@@ -214,6 +214,9 @@ export type CreateWorkflowRunInput = {
   taskId: string;
   attemptId: string;
   profileId: string;
+  selectionSource?: string;
+  requestedProfileId?: string;
+  requestedProfileAlias?: string;
   status?: string;
   externalId?: string;
   handoffKind?: string;
@@ -273,6 +276,9 @@ export type WorkflowRunRecord = {
   taskId: string;
   attemptId: string;
   profileId: string;
+  selectionSource: string;
+  requestedProfileId?: string;
+  requestedProfileAlias?: string;
   status: string;
   externalId?: string;
   handoffKind?: string;
@@ -347,6 +353,7 @@ export type UpdateWorkflowRunInput = {
   workflowRunId: string;
   expectedStateVersion: number;
   status: string;
+  profileId?: string;
   externalId?: string;
   handoffKind?: string;
   lock?: {
@@ -971,6 +978,7 @@ export function updateWorkflowRun(context: DbContext, input: UpdateWorkflowRunIn
       .prepare(
         `UPDATE workflow_runs
          SET status = ?,
+             profile_id = COALESCE(?, profile_id),
              external_id = COALESCE(?, external_id),
              handoff_kind = ?,
              state_version = state_version + 1,
@@ -979,6 +987,7 @@ export function updateWorkflowRun(context: DbContext, input: UpdateWorkflowRunIn
       )
       .run(
         input.status,
+        input.profileId ?? null,
         input.externalId ?? null,
         input.handoffKind ?? null,
         input.workflowRunId,
@@ -1687,9 +1696,10 @@ function insertWorkflowRun(context: DbContext, input: CreateWorkflowRunInput): W
   context.db
     .prepare(
       `INSERT INTO workflow_runs (
-         id, project_id, task_id, attempt_id, profile_id, status, external_id, handoff_kind
+         id, project_id, task_id, attempt_id, profile_id, selection_source,
+         requested_profile_id, requested_profile_alias, status, external_id, handoff_kind
        )
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       id,
@@ -1697,6 +1707,9 @@ function insertWorkflowRun(context: DbContext, input: CreateWorkflowRunInput): W
       input.taskId,
       input.attemptId,
       input.profileId,
+      input.selectionSource ?? "human_explicit",
+      input.requestedProfileId ?? (input.selectionSource === "runtime_auto" ? null : input.profileId),
+      input.requestedProfileAlias ?? null,
       input.status ?? "planned",
       input.externalId ?? null,
       input.handoffKind ?? null
@@ -1709,7 +1722,13 @@ function insertWorkflowRun(context: DbContext, input: CreateWorkflowRunInput): W
     taskId: input.taskId,
     attemptId: input.attemptId,
     workflowRunId: id,
-    payload: { status: input.status ?? "planned", profileId: input.profileId }
+    payload: {
+      status: input.status ?? "planned",
+      profileId: input.profileId,
+      selectionSource: input.selectionSource ?? "human_explicit",
+      requestedProfileId: input.requestedProfileId ?? (input.selectionSource === "runtime_auto" ? undefined : input.profileId),
+      requestedProfileAlias: input.requestedProfileAlias
+    }
   });
 
   return requireWorkflowRun(context, id);
@@ -2120,6 +2139,9 @@ function mapWorkflowRunRow(row: unknown): WorkflowRunRecord {
     task_id: string;
     attempt_id: string;
     profile_id: string;
+    selection_source?: string;
+    requested_profile_id?: string | null;
+    requested_profile_alias?: string | null;
     status: string;
     external_id: string | null;
     handoff_kind: string | null;
@@ -2131,6 +2153,9 @@ function mapWorkflowRunRow(row: unknown): WorkflowRunRecord {
     taskId: value.task_id,
     attemptId: value.attempt_id,
     profileId: value.profile_id,
+    selectionSource: value.selection_source ?? "human_explicit",
+    requestedProfileId: value.requested_profile_id ?? undefined,
+    requestedProfileAlias: value.requested_profile_alias ?? undefined,
     status: value.status,
     externalId: value.external_id ?? undefined,
     handoffKind: value.handoff_kind ?? undefined,

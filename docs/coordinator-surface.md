@@ -84,6 +84,7 @@ agent 不能看到全量工具列表后自由发挥。
 例如：
 
 - 未创建 workspace 前，不暴露 `start_workflow_run`。
+- workspace ready 时可以暴露 `start_workflow_run`，但不要求外层 agent 选择 workflow profile；profile 最终由 workflow runtime 决定，除非任务已有 human explicit selection。
 - 未有可 merge 的 PR/MR 前，不暴露 `merge_after_approval`。
 - human request 等待中，不暴露继续执行工具，只暴露 inspect / wait 类信息。
 
@@ -98,6 +99,10 @@ agent 不能看到全量工具列表后自由发挥。
 - boolean。
 
 避免让 agent 手写复杂嵌套 JSON。
+
+工具参数的“窄”不等于把不属于 agent 的决策压给 agent。workflow profile 选择属于 human explicit input 或 workflow runtime 自主判断，不属于外层 Coordinator Agent 的普通参数。
+
+如果未来 Web/manual task 或外部 task source 增加结构化 workflow selection 字段，Surface 只能展示 Core 已持久化的人类显式意图和 workflow runtime 返回的 actual profile；不得把 profile 下拉、capabilities catalogue 或 runtime 内部 profile 说明作为 outer Agent 的选择菜单。
 
 复杂内容应写入 artifact。canonical artifact root 由当前 surface 的 `artifact_root` 给出。
 

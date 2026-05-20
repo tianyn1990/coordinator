@@ -225,7 +225,7 @@ export function decideWorkflowRecovery(input: WorkflowRecoveryObservation): Reco
       operatorAttentionRequired: true
     };
   }
-  if (input.status.profile && input.status.profile !== run.profileId) {
+  if (input.status.profile && run.profileId !== "unknown" && input.status.profile !== run.profileId) {
     return {
       ...base,
       kind: "operator_attention",

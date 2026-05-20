@@ -305,6 +305,38 @@ harden-workflow-observability-boundaries
 - tests 覆盖额外 artifact 写入会记录 debug event，payload 仅包含 toolName、artifactCount、artifactRefs、tickId 等窄字段。
 - tests 或 CLI/API smoke 覆盖 operator summary 分组输出；断言 summary 不进入 agent-facing surface。
 
+#### Slice 12.8: workflow profile 选择委托给 workflow runtime
+
+建议 OpenSpec change：
+
+```text
+delegate-workflow-profile-selection-to-runtime
+```
+
+目标：
+
+- 将 workflow profile 的最终选择权收回到 `workflow` runtime：外层 Coordinator Agent 不再主动选择 profile，也不根据 workflow capability catalogue 猜测 profile。
+- 允许人类在外部入口显式选择 workflow，或在任务提示词中表达倾向；Coordinator 只保存这份人类输入，并在启动 workflow 时把它作为上下文交给 `workflow` 自主判断。
+- 将 `default` / `auto` 语义收敛为“委托 workflow 自动选择”，而不是 Coordinator 静态注册的 profile。
+- 启动 workflow 时记录 `requested selection` 与 `actual profile`，让 operator 与审计可以区分“人类显式指定”与“workflow 自主选择”。
+- 取消 outer agent 侧对 workflow profile 的决策压力，避免 Coordinator 随 workflow profile 升级频繁同步注册表，也避免 agent 基于不完整 catalogue 误选 profile。
+
+边界：
+
+- 不让外层 Coordinator Agent 通过 surface/tool 直接选择 workflow profile。
+- 不把 workflow capability catalogue 当成外层 agent 的 profile 决策源。
+- 不要求 Coordinator 静态维护全部 workflow profile 注册表。
+- 不新增 agent-facing workflow action tool。
+- 不让 daemon 根据 running workflow 的 debug 字段自动执行 workflow action。
+- 不改变 workflow protocol 的 inspect-only 边界；running workflow 仍以 inspect / wait handoff 为默认动作。
+
+验收建议：
+
+- tests 覆盖外层 Agent 请求启动 workflow 时不携带 profile，或携带 `default/auto` 时由 workflow 自主选择。
+- tests 覆盖 human explicit selection 被透传给 workflow runtime，并能在结果中看到 `actual profile`。
+- tests 覆盖 outer agent surface 不再暴露 profile 选择参数。
+- tests 覆盖 daemon 仍只 inspect running workflow，不执行 workflow action。
+
 ### 重点关注事项
 
 - 已建立 project registry 核心服务，支持工程注册、GitHub/GitLab 识别、默认分支确认、workflow launcher 和默认 provider 配置。
@@ -324,11 +356,13 @@ harden-workflow-observability-boundaries
 - 已补充 Workspace Manager 高风险测试：deterministic branch、缺失 default branch、branch exists、active/ready 复用、creating workspace 收敛、operation terminal 防回退、workspace lock conflict、symlink escape、dirty/branch mismatch、missing workspace path fail-fast。
 - 第五轮独立 `gpt-5.5 high` subagent review 已确认无必须修复项。后续可加强但不阻塞本轮：更严格确认 git worktree 属于 project repo；如果未来 `assertArtifactRelativePath` 接收用户输入，应改为原始 path segment 级拒绝 `..`，不要依赖 normalize 后判断。
 - 已实现 Workflow Protocol Adapter：支持 capabilities/start/status/action/artifacts/events，所有入口只消费 workflow protocol JSON stdout，不读写 `.workflow` private state，不根据 workflow stage/substate/gate 推进外层业务状态。
-- Workflow capabilities 在 project repo 中查询，start/status/action/artifacts/events 在 ready workspace repo 中执行；profile 必须来自 capabilities 中 `implemented=true` 的声明，active workflow run 复用时必须匹配 profile。
+- Workflow capabilities 在 project repo 中查询，start/status/action/artifacts/events 在 ready workspace repo 中执行；当前 profile 的最终选择权由 workflow runtime 自主决定，Coordinator 只在 human explicit selection 场景下透传选择意图，`default/auto` 表示交给 workflow 自主选择。
 - Workflow start 已按 operation-first 与 fail-safe replay 收敛：先创建 `workflow:start:<attempt-id>:<profile-id>` operation 并获取 `attempt-workflow` lock，再落 `starting` workflow run 记录，之后执行 protocol start；start 成功后 workflow run 更新、`workflow.started` event、operation succeeded 在同一 transaction 内完成；side effect 窗口开始后的失败标记 operation `unknown`，避免自动重跑。
 - Workflow action 已纳入副作用契约：operator 必须传 expected workflow run state version，idempotency key 使用 canonical JSON + sha256，action/arg 先规范化再同时用于 protocol 入参和 idempotency key；action 成功后的 workflow run 更新、`workflow.action` event、operation succeeded 同 transaction 提交，并携带 lock token 做 fencing。
 - Workflow status 只用 lifecycle/handoff/artifacts/recovery/summary 更新 workflow run 粗粒度状态；stage/substate/gate/allowedActions/deniedActions/actionInputs 只进入 operator/debug payload。`actionInputs` 会被收窄为 action input hints，用于 operator 判断 action 参数，不进入 Coordinator Agent Surface。
 - 已实现 CLI/API operator-only workflow 调试入口：capabilities/start/status/action/artifacts/events；这些入口未进入 Coordinator Surface，也不是 agent tools。`workflow action` CLI/API 需要显式 expected state version，避免响应丢失后的重复副作用。
+- 本轮 Slice 12.8 已把 workflow profile 选择语义收拢为 runtime auto / human explicit 两类：outer Agent 不再主动选 profile，CLI/API 调试入口对 `profile` 改为 optional，`default/auto` 表示委托 workflow 自主选择；workflow start 结果新增 `selection_source`、`requested_profile_id`、`requested_profile_alias`，operator summary 与 surface 也展示这份分离语义。
+- smoke 与回归验证已确认 daemon 仍只 inspect running workflow，不执行 workflow action；真实 smoke 中旧 smoke DB 先需迁移到 `0007_workflow_selection.sql`，迁移后 daemon tick 能正常进入 running workflow inspect-only 分支。当前 `/Users/hetao/Documents/github/workflow` 侧仍以显式 `--workflow` 为主，profile-less start 的完整端到端能力仍受外部 runtime 支持程度限制。
 - 本地 smoke hardening 后，root `pnpm cli ...` / `pnpm migrate ...` 入口不再向 CLI 传入裸 `--`；SQLite 连接设置短暂 `busy_timeout`，降低 operator debug 查询写审计 event 时的短暂 writer contention。workflow operator debug 查询仍不是纯读高频 polling API。
 - Slice 12.7 已明确 running workflow 的 inspect-only 边界：daemon 只通过 `workflow protocol status` 观察 running workflow，不根据 `allowedActions`、`actionInputHints`、stage 或 gate 自动执行 workflow action；workflow action 入口继续是 operator/debug 能力，不进入 Coordinator Agent Surface。
 - Outer Coordinator Agent prompt 已补充 artifact 使用纪律：只有 artifact-based tool 或真实计划/报告修订才输出 `coordinator-artifact`，普通推进/观察工具不应顺手覆盖 `execution-plan.md`。
@@ -348,7 +382,7 @@ harden-workflow-observability-boundaries
 - Agent tool result 已收窄为 sanitized output，只返回 `kind/id/status/artifactPath/reused/handoffKind/nextStep` 等 agent 需要的信息；workspace lock token、manifest path、workflow debug、operation internals 等内部细节不进入 agent-facing tool result。
 - Agent tool artifact 采用 artifact-first：工具只接受相对当前 surface `artifact_root` 的路径；pre-workspace planning 阶段使用 task-local root，workspace ready 后使用 attempt workspace root；路径校验覆盖绝对路径、`..` segment、realpath containment、文件存在和大小限制。
 - Surface 当前只暴露 Iteration 8 executor 已实现的工具。PR/MR、merge、mark_done、handoff_to_human、resume_workflow_run 等未来工具继续保留在设计规划中，但在对应 executor 未落地前不作为当前 `available_tools` 暴露。
-- `start_workflow_run` 当前只接受 `profile`，不接受 `provider` 参数；inner provider 选择仍由 project/workflow 配置决定，后续如需让 agent 基于 capability 选择 provider，需要单独 change 明确契约。
+- `start_workflow_run` 当前不应让 outer agent 主动选择 profile；profile 仅在 human explicit selection 或 workflow 自主选择的语义下出现。后续若需要把选择意图显式拆分为 `default/auto` 与 `human_explicit`，需要在独立 change 中同步 surface、Core 和 workflow adapter 契约。
 - 已补 DB repository 中 execution plan 与 human request 的最小方法，并让 DB surface 投影 execution plan 与 recent human requests；human waiting 无 workflow run 时不暴露可调用工具，有 workflow run 时仅允许 inspect。
 - 已实现 CLI/API operator-only agent tool 调试入口：`agent-tool execute` 和 `POST /tasks/:taskId/agent-tools`；这些入口未进入 Coordinator Surface，不是 agent tools。
 - 已补充 Coordinator Agent Tools contract tests：surface visibility gate、artifact path 安全、execution plan 写入、human request 等待、sanitized workspace/workflow result、CLI/API operator 调试入口、未来未实现工具不提前暴露。

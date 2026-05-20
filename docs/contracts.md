@@ -215,6 +215,8 @@ update_project
 
 具体实现可以进一步收窄，但不能放宽到全量工具可见。
 
+`start_workflow_run` 可见时，outer Agent 只请求启动 workflow，不选择具体 profile。human explicit selection 只能来自外部入口或任务来源；没有 human explicit selection 时，Core 必须用 omitted/default/auto 语义委托 workflow runtime 自主选择 actual profile。
+
 ## 5. State Transition Ownership
 
 ### 5.1 状态所有权矩阵

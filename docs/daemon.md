@@ -39,7 +39,7 @@ Iteration 9 已落地最小 `runDaemonTick`：
 - 对 `resuming` task 使用 `daemon.retry_scheduled` 的 dueAt 做最小 retry_due gate。
 - 提供 CLI/API operator-only `daemon tick` 入口；这些入口不进入 Coordinator Surface。
 
-当前 P0 子集仍保持 daemon 不是 agent：daemon 不判断需求、方案、review 结论或 workflow profile 语义，只负责唤醒、reconcile、retry、事件记录和调用已存在 Core service。
+当前 P0 子集仍保持 daemon 不是 agent：daemon 不判断需求、方案、review 结论或 workflow profile 语义，也不把 `default/auto` 解释成具体 profile；它只负责唤醒、reconcile、retry、事件记录和调用已存在 Core service。
 
 #### 1.1.1 Running workflow inspect-only 边界
 
@@ -110,6 +110,7 @@ daemon 不负责：
 - 技术方案判断。
 - review 结论判断。
 - workflow profile 语义选择。
+- 把 human explicit selection 之外的 profile 写入 workflow start 请求。
 - 根据 workflow allowedActions / actionInputHints 主动执行 workflow action。
 - 直接修改代码。
 - 绕过 Coordinator Agent 执行高层策略。

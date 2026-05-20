@@ -353,22 +353,21 @@ export function runCli(args: string[]): CliResult {
       if (subcommand === "start") {
         const databasePathResult = readRequiredOption(workflowArgs, "--db");
         const attemptIdResult = readRequiredOption(workflowArgs, "--attempt");
-        const profileResult = readRequiredOption(workflowArgs, "--profile");
         const ownerResult = readOption(workflowArgs, "--owner");
-        const error = databasePathResult.error ?? attemptIdResult.error ?? profileResult.error ?? ownerResult.error;
+        const profileResult = readOption(workflowArgs, "--profile");
+        const error = databasePathResult.error ?? attemptIdResult.error ?? ownerResult.error ?? profileResult.error;
         if (error) {
           return { exitCode: 1, stdout: "", stderr: `${error}\n` };
         }
         const databasePath = databasePathResult.value;
         const attemptId = attemptIdResult.value;
-        const profileId = profileResult.value;
-        if (!databasePath || !attemptId || !profileId) {
+        if (!databasePath || !attemptId) {
           return { exitCode: 1, stdout: "", stderr: "workflow start 参数不完整\n" };
         }
         const result = withDatabase(databasePath, (context) =>
           startWorkflowRun(context, {
             attemptId,
-            profileId,
+            profileId: profileResult.value ?? undefined,
             owner: ownerResult.value ?? "cli"
           })
         );
