@@ -109,12 +109,16 @@ Symphony 的核心经验会被吸收为：
   - 交接给 `/Users/hetao/Documents/github/workflow` 工程的 protocol bridge 实现说明。
 - [workflow-action-inputs-handoff.md](./workflow-action-inputs-handoff.md)
   - 交接给 `/Users/hetao/Documents/github/workflow` 工程的 actionInputs protocol schema 正式化说明。
+- [workflow-stage-substate-handoff.md](./workflow-stage-substate-handoff.md)
+  - 交接给 `/Users/hetao/Documents/github/workflow` 工程的 stage/substate/progress protocol 展示增强说明。
 - [execution-workspace.md](./execution-workspace.md)
   - workspace、git worktree、branch、worker runtime、agent provider。
 - [project-registry.md](./project-registry.md)
   - 工程注册、GitHub/GitLab 检测、默认分支、provider 配置。
 - [observability.md](./observability.md)
   - 事件、日志、artifact、UI 调试视图和审计。
+- [web-developer-workbench.md](./web-developer-workbench.md)
+  - Web 多工程、多任务开发者工作台的产品心智、信息架构、页面布局和交互边界。
 - [research.md](./research.md)
   - 已调研社区方案与文章、可吸收点和拒绝吸收点。
 - [roadmap.md](./roadmap.md)

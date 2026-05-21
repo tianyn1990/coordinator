@@ -156,11 +156,13 @@ P2 只预留接口和规划，不进入 V1 完成标准：
 
 ### 当前进度
 
-- 当前阶段：`Iteration 12: P1 / P2 Hardening` 已完成第七个切片 `workflow running 观察边界与 smoke 可观测性优化`。
-- 当前 OpenSpec change：`harden-workflow-observability-boundaries` 已完成实现、验证、独立 `gpt-5.5 high` review 和归档；归档后位置为 `openspec/changes/archive/2026-05-20-harden-workflow-observability-boundaries`。
-- 当前正式规格：已同步到 `openspec/specs/agent-provider-runtime/spec.md`、`openspec/specs/coordinator-surface/spec.md`、`openspec/specs/daemon-runtime/spec.md`、`openspec/specs/observability/spec.md`、`openspec/specs/workflow-protocol-adapter/spec.md`。
-- 下一阶段：继续 `Iteration 12: P1 / P2 Hardening`。
-- 下一阶段重点：根据后续优先级进入下一批 P1/P2 hardening 或真实 smoke 复盘切片。后续如继续增强 workflow/operator/debug 能力，应保持 daemon inspect-only、operator summary 只读派生、agent-facing surface 不扩大的边界。
+- 当前阶段：`Iteration 13: Web Developer Workbench` 已完成 `Slice 13.1: Developer Workbench 信息架构与多任务入口`。
+- 当前 OpenSpec change：`improve-web-developer-workbench` 已完成实现、验证、独立 review 和归档；归档后位置为 `openspec/changes/archive/2026-05-21-improve-web-developer-workbench`。
+- 当前正式规格：已同步到 `openspec/specs/web-human-review-surface/spec.md` 和 `openspec/specs/observability/spec.md`；其他既有规格继续保持当前基线。
+- 当前已落地事实：Web 默认视图已从单任务 debug console 调整为多工程、多任务 Developer Workbench；任务详情仍可通过 Classic Debug 进入；Action Inbox 只从现有 task detail、human request、merge approval、diagnosis、PR/MR 和 task status 派生，不写 DB、不成为新的真相源、不扩大 Coordinator Agent Surface。
+- 当前验证结果：`pnpm --filter @coordinator/web build`、`pnpm typecheck`、`pnpm test -- apps/api/src/server.test.ts`、移动/桌面浏览器截图验证、`openspec validate improve-web-developer-workbench --strict` 和归档后的 `openspec validate --all --strict` 均已通过。
+- 下一阶段：经用户确认后进入 `Slice 13.2: Task Cockpit 与 Workflow Lens`。
+- 下一阶段重点：Task Cockpit 要把单任务外层流程与 workflow lens 分开展示，workflow 的 `stage/substate/gate/progress/actionInputs` 仍只能作为 operator-only 展示信息，不能驱动 daemon 自动 workflow action、Core 状态推断或 agent-facing surface。
 
 ### Iteration 12 后续切片顺序
 
@@ -336,6 +338,214 @@ delegate-workflow-profile-selection-to-runtime
 - tests 覆盖 human explicit selection 被透传给 workflow runtime，并能在结果中看到 `actual profile`。
 - tests 覆盖 outer agent surface 不再暴露 profile 选择参数。
 - tests 覆盖 daemon 仍只 inspect running workflow，不执行 workflow action。
+
+### Iteration 13: Web Developer Workbench
+
+Iteration 13 的目标是把 Web 从“单任务 operator debug 页面”升级为“开发者多工程、多任务协调工作台”。这个阶段的产品目标不是给 `workflow` 做一个漂亮状态页，而是让一个开发者能同时管理多个工程、多个任务，并把常规流程确认、异常筛选和 PR/MR 操作集中在 Web 中完成。
+
+本阶段必须继续遵守第 4 节固定动作：每个实现迭代开始前重读根目录 `AGENTS.md`、`docs/AGENTS.md`、`docs/web-developer-workbench.md` 与相关专题文档；创建 OpenSpec change；实现和测试；交给独立 `gpt-5.5 high` subagent review；修复并复审到无必须修复项；归档 change；更新进度和已落地事实；提交。按用户确认，本阶段每完成一个部分后暂停，由用户确认后再进入下一部分。
+
+#### Slice 13.0: workflow stage/substate handoff
+
+状态：已完成文档草案，等待用户确认后进入 roadmap 与实现迭代。
+
+产物：
+
+```text
+docs/workflow-stage-substate-handoff.md
+```
+
+目标：
+
+- 给 `/Users/hetao/Documents/github/workflow` 工程一份独立交接文档，说明为了 Web Workbench / Task Cockpit 展示 workflow 进度，workflow protocol 需要稳定输出 `stage`、`substate`、`gate`、`progress`、`stageArtifacts`、`allowedActions`、`deniedActions` 和 `actionInputs`。
+- 明确这些字段只用于 coordinator Web operator/debug 展示，不驱动 coordinator 外层状态机、PR readiness、done、merge，也不让 daemon 自动执行 workflow action。
+- 给 workflow 工程建议 OpenSpec change id、schema 示例、兼容性要求和 contract tests。
+
+边界：
+
+- 不修改 `/Users/hetao/Documents/github/workflow` 工程代码。
+- 不扩大 Coordinator Agent Surface。
+- 不新增 agent-facing workflow action tool。
+- 不改变 `docs/workflow-protocol.md` 已确认的 handoff 边界；真正外层推进仍依赖 `lifecycle + handoff + artifacts + recovery + summary`。
+
+验收建议：
+
+- `docs/AGENTS.md` 索引包含该 handoff 文档。
+- 文档能直接交给 workflow 工程 Agent 创建并执行对应 OpenSpec change。
+- 文档明确兼容字段缺失：缺失时 Web 显示 unknown/none 或退回 summary/artifacts，而不是失败。
+
+#### Slice 13.1: Developer Workbench 信息架构与多任务入口
+
+建议 OpenSpec change：
+
+```text
+improve-web-developer-workbench
+```
+
+目标：
+
+- 新增 Web Workbench 入口，作为开发者日常使用的主页面；老的密集 task detail 页面保留为 Classic Debug / Raw Detail。
+- 具体信息架构、页面布局、Action Inbox、task card、视觉方向和数据边界以 `docs/web-developer-workbench.md` 为准；本切片开始前必须重点阅读其中第 1-7、11-13 节。
+- Workbench 支持按 project、task status、operator attention、human request、PR/MR/review/merge 状态理解当前所有任务。
+- 页面默认回答“我现在同时管理哪些工程和任务、哪些在跑、哪些卡住、哪些需要我处理、下一步最安全的动作是什么”。
+- 新增 Action Inbox，集中展示待处理 human request、merge approval、PR/MR operator action、project config blocker 和高风险 recovery attention。
+- 新增任务卡片视图，卡片展示 project、title、task status、current blocker、outer flow 粗进度、workflow profile/stage/substate 简短摘要、PR/MR 状态、关键 artifact refs。
+- 保留全局 refresh / daemon tick 入口，但不把 raw timeline、surface JSON、operation ledger 默认铺满主页面。
+
+上层语义：
+
+- Web Workbench 是开发者的任务调度与确认中心。
+- CLI 继续作为补充工具，适合 smoke、排查和自动化脚本；真实用户主路径应尽量在 Web 完成。
+- Workbench 展示“多个任务的局面”，Task Cockpit 展示“单个任务的细节”。
+
+推荐页面结构：
+
+```text
+Global Command Bar
+Project Rail
+Workbench Board
+Action Inbox
+System Debug Drawer
+```
+
+可能需要的实现：
+
+- 前端路由或轻量 view state：`Workbench`、`Task Cockpit`、`Project Admin`、`Classic Debug`。
+- 基于现有 `GET /projects`、`GET /tasks`、`GET /tasks/:taskId` 先完成第一版多任务聚合；如性能或信息不足，再补只读 operator summary API。
+- 新增 Web 侧派生模型，把 task detail 转成 board/card/inbox 所需的展示结构。
+- 引入轻量 UI 依赖时优先考虑 `lucide-react`；流程图可在 13.2 再引入 `@xyflow/react`，避免 13.1 范围过大。
+
+边界：
+
+- 不改变 Core 状态机。
+- 不新增 daemon 自动动作。
+- 不新增 agent-facing tools。
+- 不把 diagnosis/operator summary 变成新的真相源；它只能从已持久化 task、project、attempt、workspace、workflow run、PR/MR、human request、event、operation 和 artifact refs 派生。
+- 不在前端重建业务状态机；前端只能做展示派生和 action routing。
+
+验收建议：
+
+- Web 能展示所有 project 和近期 tasks，并能按 project/status/needs-me 快速定位任务。
+- Pending human request 与 merge approval 能在 Action Inbox 中出现。
+- 点击任务卡片能进入单任务 Cockpit 或 Classic Debug。
+- Classic Debug 老页面仍可访问，便于排查。
+- 测试或浏览器验证覆盖：空状态、多 project、多状态任务、pending human request、merge approval、operator attention。
+- `pnpm --filter @coordinator/web build`、相关 API/Core tests、`pnpm typecheck` 通过。
+
+#### Slice 13.2: Task Cockpit 与 Workflow Lens
+
+建议 OpenSpec change：
+
+```text
+add-task-cockpit-workflow-lens
+```
+
+目标：
+
+- 新增单任务 Task Cockpit 页面，承接 Workbench 中点击任务后的主要详情体验。
+- 具体 Task Cockpit、Workflow Lens、Outer Flow Map、Debug Drawer、视觉方向和 workflow 展示边界以 `docs/web-developer-workbench.md` 为准；本切片开始前必须重点阅读其中第 1-5、8、11-13 节。
+- 展示外层流程：`Task -> Plan -> Attempt -> Workspace -> Workflow -> PR/MR -> Review -> Merge -> Done`。
+- 将 Workflow 作为 Task Cockpit 的核心观察区域，展示 `profile`、`lifecycle`、`stage`、`substate`、`gate`、`handoff`、`allowedActions`、`deniedActions`、`actionInputs`、`stageArtifacts` 和 latest workflow events。
+- 接入 workflow operator-only status/artifacts/events API，用于展示 workflow 内部进度和 evidence。
+- 将 raw surface、raw timeline、operation ledger、provider/protocol inspect、完整 event payload 等调试信息放入折叠 Debug Drawer。
+- 页面视觉方向采用 `industrial mission control`：深色石墨底、冷青 running、琥珀 waiting、人类确认强调、红色 blocked/failed、绿色 done；Workflow 节点视觉权重大于其他节点。
+
+上层语义：
+
+- Task Cockpit 用来理解单个任务“现在走到了哪里”和“为什么需要我介入”。
+- Workflow Lens 用来观察 workflow 内部执行位置，但不让 coordinator 接管 workflow 内部控制面。
+- Debug Drawer 服务工程排查，不是普通用户的默认阅读路径。
+
+推荐页面结构：
+
+```text
+Task Header
+Outer Flow Map
+Workflow Lens
+Evidence / Actions Panel
+Debug Drawer
+```
+
+可能需要的实现：
+
+- `TaskCockpitView`、`OuterFlowMap`、`WorkflowLens`、`EvidencePanel`、`DebugDrawer` 等前端组件。
+- 可引入 `@xyflow/react` 做交互式流程图；如果引入，应只用于 Web 展示，不把通用 DAG 引入 Core。
+- Web 侧为 workflow status 增加查询和缓存；如果 workflow status 缺失 `progress/stageArtifacts`，使用现有 `summary/handoff/artifacts/events` graceful fallback。
+- 将 `allowedActions/actionInputs` 放在 operator/debug 区域，避免用户误以为 daemon 会自动执行这些 action。
+
+边界：
+
+- `stage/substate/gate` 只做展示，不驱动 coordinator PR readiness、done、merge 或 task status 推断。
+- `allowedActions/actionInputs` 只展示，不触发 daemon 自动 action。
+- 不新增 agent-facing workflow action tool。
+- 不读取 `.workflow` private state；所有 workflow 信息都来自 protocol status/artifacts/events。
+- 不让流程图变成 Core 的通用 DAG engine；它只是 UI projection。
+
+验收建议：
+
+- Task Cockpit 能在不同 task 状态下展示外层流程节点状态。
+- Workflow running 且无 handoff 时，页面明确显示 coordinator 正在只读观察 workflow，下一步等待 handoff 或 operator/debug action。
+- Workflow status 缺少 stage/substate/progress/stageArtifacts 时页面仍可用。
+- PR/MR、human request、merge approval 的主要操作仍经 API/Core runtime 执行。
+- Browser/Playwright 或等价截图验证桌面和窄屏布局无重叠、文本不溢出、核心节点清晰。
+- `pnpm --filter @coordinator/web build`、相关 tests、`pnpm typecheck` 通过。
+
+#### Slice 13.3: Task Creation、Project Admin 与 Run Until Blocked
+
+建议 OpenSpec change：
+
+```text
+complete-web-task-project-operations
+```
+
+目标：
+
+- 重做任务创建体验，让 Web 成为真实任务下达入口，而不是小表单。
+- 具体 New Task、Project Admin、Run Until Blocked、workspace hook 预留、附件上传边界以 `docs/web-developer-workbench.md` 为准；本切片开始前必须重点阅读其中第 1-3、6-13 节。
+- 新增 Project Admin 页面，承接工程注册、provider/workflow/agent 配置、workspace root 与未来 workspace hook 预留。
+- 增加全局和单任务 `Run until blocked`，让用户可以从 Web 触发真实流程并尽量走到最远。
+- 补齐 Web 侧常用 PR/MR operator actions：create/update/inspect-review/request-approval/approve/reject/merge 的入口按当前 Core/API 能力逐步展示。
+- 预留附件/图片上传与任务上下文 artifact 能力，但如当前 artifact/API 模型不足，第一版只做设计和安全占位，不落不完整副作用。
+
+任务创建页面目标：
+
+- 支持选择 project。
+- 支持较大文本编辑区，用于描述需求、背景、验收标准和约束。
+- 支持 autonomy 选择。
+- 支持可选 human explicit workflow selection 或提示词内描述；默认仍委托 workflow runtime 自主选择。
+- 预留图片/文件 drop zone；实现前需先确认 artifact upload contract、路径安全、大小限制和存储位置。
+- 支持 `Create task` 与 `Create and run until blocked` 两种入口。
+
+Project Admin 目标：
+
+- 支持 Web 注册 project，对齐 `docs/project-registry.md`：repo path、default branch 确认、provider kind、workflow launcher、outer/inner agent defaults、workspace root。
+- 展示 project health：git/provider/workflow/agent/pr provider 的已配置/缺失状态。
+- 预留 workspace policy：create worktree preflight、init script hook、cleanup script hook、retention policy。
+- init/cleanup hook 第一版只做配置设计或只读占位；除非另开明确安全执行 contract，不执行任意脚本。
+
+Run Until Blocked 目标：
+
+- 全局模式：循环触发 daemon tick + refresh，推进安全队列直到没有可安全推进项或出现需要人类介入。
+- 单任务模式：聚焦当前 task 循环 tick + refresh，直到该 task 达到 terminal、waiting human、waiting merge approval、workflow running no handoff、operator attention、failed 或其他高风险停止条件。
+- 每轮 tick 后展示 actions summary 和停止原因。
+
+边界：
+
+- `Run until blocked` 只调用 daemon tick、refresh 和只读 inspect，不执行 workflow action。
+- 不绕过 Core policy gate，不直接写 DB。
+- 不让前端自己判断 merge readiness；merge 仍经 Core 重新 inspect 和 approval snapshot 校验。
+- 工程 init/cleanup hook 不在本切片直接执行任意脚本；如果要落地执行，必须另开 change 设计 sandbox、审批、审计、失败恢复和 path 安全。
+- 文件/图片上传不应绕过 artifact path 规则；若落地，需要明确 size/type/path/cleanup contract。
+
+验收建议：
+
+- Web 能完成 project register、manual task create、create-and-run 起步流程。
+- `Run until blocked` 在 workflow running no handoff 时停止，并明确显示 daemon inspect-only 边界。
+- `Run until blocked` 在 pending human request 或 merge approval 时停止并展示对应 action card。
+- Project Admin 能展示已有 project 配置和注册新 project；workspace hook 字段若只是预留，UI 必须标明尚未执行副作用。
+- PR/MR operator actions 在对应 Core gate 满足时可见，不满足时给出不可操作原因。
+- Browser/Playwright 或等价验证覆盖创建任务长文本、工程注册表单、run-until-blocked 停止状态、窄屏布局。
+- `pnpm --filter @coordinator/web build`、`pnpm --filter @coordinator/api build`、相关 tests、`pnpm typecheck`、`openspec validate --all --strict` 通过。
 
 ### 重点关注事项
 

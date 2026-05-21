@@ -176,12 +176,66 @@ type Flash = {
   message: string;
 };
 
+type ViewMode = "workbench" | "classic-debug";
+
+type ProjectRailItem = {
+  id: string;
+  name: string;
+  total: number;
+  attention: number;
+};
+
+type MissionMetrics = {
+  total: number;
+  running: number;
+  needsHuman: number;
+  attention: number;
+  review: number;
+  done: number;
+};
+
+type TaskCard = {
+  task: TaskListItem;
+  detail?: TaskDetail;
+  prSummary: string;
+  statusTone: "running" | "waiting" | "attention" | "done" | "idle";
+  nextOwner: string;
+  blocker: string;
+  workflowSummary: string;
+  artifactSummary: string;
+  needsHuman: boolean;
+  needsMergeApproval: boolean;
+  attentionRequired: boolean;
+  hasPrAttention: boolean;
+};
+
+type ActionInboxItem = {
+  id: string;
+  taskId: string;
+  projectName: string;
+  title: string;
+  kind: "merge" | "human" | "attention" | "pr" | "failed";
+  tone: "waiting" | "attention" | "danger";
+  label: string;
+  summary: string;
+};
+
+type WorkbenchModel = {
+  projectRail: ProjectRailItem[];
+  metrics: MissionMetrics;
+  cards: TaskCard[];
+  inbox: ActionInboxItem[];
+};
+
 const apiBase = import.meta.env.VITE_COORDINATOR_API_BASE ?? "http://127.0.0.1:4310";
 
 function App() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [tasks, setTasks] = useState<TaskListItem[]>([]);
+  const [taskDetails, setTaskDetails] = useState<Record<string, TaskDetail>>({});
   const [selectedTaskId, setSelectedTaskId] = useState<string | undefined>();
+  const [selectedProjectId, setSelectedProjectId] = useState("all");
+  const [viewMode, setViewMode] = useState<ViewMode>("workbench");
   const [detail, setDetail] = useState<TaskDetail | undefined>();
   const [loading, setLoading] = useState(false);
   const [flash, setFlash] = useState<Flash | undefined>();
@@ -197,7 +251,9 @@ function App() {
       setTasks(taskResult.tasks);
       const taskId = nextTaskId ?? taskResult.tasks[0]?.id;
       setSelectedTaskId(taskId);
-      setDetail(taskId ? await request<TaskDetail>(`/tasks/${taskId}`) : undefined);
+      const hydratedDetails = await hydrateTaskDetails(taskResult.tasks);
+      setTaskDetails(hydratedDetails);
+      setDetail(taskId ? hydratedDetails[taskId] ?? (await request<TaskDetail>(`/tasks/${taskId}`)) : undefined);
     } catch (error) {
       setFlash({ tone: "error", message: error instanceof Error ? error.message : String(error) });
     } finally {
@@ -213,12 +269,19 @@ function App() {
     setSelectedTaskId(taskId);
     setLoading(true);
     try {
-      setDetail(await request<TaskDetail>(`/tasks/${taskId}`));
+      const nextDetail = taskDetails[taskId] ?? (await request<TaskDetail>(`/tasks/${taskId}`));
+      setDetail(nextDetail);
+      setTaskDetails((current) => ({ ...current, [taskId]: nextDetail }));
     } catch (error) {
       setFlash({ tone: "error", message: error instanceof Error ? error.message : String(error) });
     } finally {
       setLoading(false);
     }
+  }
+
+  async function openTask(taskId: string, mode: ViewMode) {
+    setViewMode(mode);
+    await selectTask(taskId);
   }
 
   async function createTask(event: React.FormEvent<HTMLFormElement>) {
@@ -274,6 +337,11 @@ function App() {
     }
   }
 
+  const workbench = useMemo(
+    () => buildWorkbenchModel(projects, tasks, taskDetails, selectedProjectId),
+    [projects, tasks, taskDetails, selectedProjectId]
+  );
+
   async function decideMerge(pr: PullRequest, humanRequest: HumanRequest, decision: "approve" | "reject") {
     if (!detail) return;
     try {
@@ -319,83 +387,61 @@ function App() {
   }
 
   return (
-    <main className="app-shell">
-      <aside className="sidebar">
-        <header className="brand">
+    <main className="workbench-shell">
+      <header className="global-bar">
+        <div className="brand-mark">
           <div>
             <p>coordinator</p>
-            <h1>Operator Console</h1>
+            <h1>Developer Workbench</h1>
           </div>
           <span>{serviceInfo.stage}</span>
-        </header>
-
-        <form className="create-task" onSubmit={createTask}>
-          <label>
-            Project
-            <select name="projectId" required>
-              <option value="">选择工程</option>
-              {projects.map((project) => (
-                <option key={project.id} value={project.id}>
-                  {project.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            Title
-            <input name="title" placeholder="新任务标题" required />
-          </label>
-          <label>
-            Description
-            <textarea name="description" rows={4} placeholder="任务背景、约束、验收标准" />
-          </label>
-          <label>
-            Autonomy
-            <select name="autonomy" defaultValue="balanced">
-              <option value="balanced">balanced</option>
-              <option value="conservative">conservative</option>
-              <option value="aggressive">aggressive</option>
-            </select>
-          </label>
-          <button type="submit">Create task</button>
-        </form>
-
-        <section className="task-list" aria-label="Task list">
-          {tasks.map((task) => (
-            <button
-              key={task.id}
-              type="button"
-              className={task.id === selectedTaskId ? "task-row selected" : "task-row"}
-              onClick={() => void selectTask(task.id)}
-            >
-              <span className="task-title">{task.title}</span>
-              <span className="task-meta">
-                {task.projectName} · {task.status} · {task.autonomy}
-              </span>
-            </button>
-          ))}
-        </section>
-      </aside>
-
-      <section className="workspace">
-        <div className="topbar">
-          <div>
-            <p className="eyebrow">API {apiBase}</p>
-            <h2>{detail?.task.title ?? "未选择 task"}</h2>
-          </div>
-          <div className="actions">
-            <button type="button" onClick={() => void refresh()} disabled={loading}>
-              Refresh
-            </button>
-            <button type="button" onClick={() => void runDaemonTick()}>
-              Daemon tick
-            </button>
-          </div>
         </div>
+        <div className="global-search" aria-label="Workbench context">
+          <span>API</span>
+          <strong>{apiBase}</strong>
+        </div>
+        <nav className="view-tabs" aria-label="Primary views">
+          <button type="button" className={viewMode === "workbench" ? "tab active" : "tab"} onClick={() => setViewMode("workbench")}>
+            Workbench
+          </button>
+          <button
+            type="button"
+            className={viewMode === "classic-debug" ? "tab active" : "tab"}
+            disabled={!detail}
+            onClick={() => setViewMode("classic-debug")}
+          >
+            Classic Debug
+          </button>
+          <button type="button" className="tab ghost" disabled title="Task Cockpit 会在后续迭代实现">
+            Cockpit
+          </button>
+          <button type="button" className="tab ghost" disabled title="Project Admin 会在后续迭代实现">
+            Projects
+          </button>
+        </nav>
+        <div className="actions">
+          <button type="button" onClick={() => void refresh()} disabled={loading}>
+            Refresh
+          </button>
+          <button type="button" onClick={() => void runDaemonTick()}>
+            Daemon tick
+          </button>
+        </div>
+      </header>
 
-        {flash ? <p className={`flash ${flash.tone}`}>{flash.message}</p> : null}
+      {flash ? <p className={`flash ${flash.tone}`}>{flash.message}</p> : null}
 
-        {detail ? (
+      {viewMode === "classic-debug" && detail ? (
+        <section className="workspace classic-shell">
+          <div className="topbar">
+            <div>
+              <p className="eyebrow">Classic Debug</p>
+              <h2>{detail.task.title}</h2>
+            </div>
+            <button type="button" onClick={() => setViewMode("workbench")}>
+              Back to Workbench
+            </button>
+          </div>
           <TaskDetailView
             detail={detail}
             onAnswer={answerHumanRequest}
@@ -403,11 +449,305 @@ function App() {
             onMerge={mergeAfterApproval}
             onTaskControl={controlTask}
           />
-        ) : (
-          <div className="empty-state">暂无 task。先注册 project 并创建 manual task。</div>
-        )}
-      </section>
+        </section>
+      ) : (
+        <DeveloperWorkbench
+          projects={projects}
+          selectedProjectId={selectedProjectId}
+          onSelectProject={setSelectedProjectId}
+          model={workbench}
+          selectedTaskId={selectedTaskId}
+          onOpenTask={(taskId) => void openTask(taskId, "classic-debug")}
+          onCreateTask={createTask}
+        />
+      )}
     </main>
+  );
+}
+
+function DeveloperWorkbench({
+  projects,
+  selectedProjectId,
+  onSelectProject,
+  model,
+  selectedTaskId,
+  onOpenTask,
+  onCreateTask
+}: {
+  projects: Project[];
+  selectedProjectId: string;
+  onSelectProject: (projectId: string) => void;
+  model: WorkbenchModel;
+  selectedTaskId?: string;
+  onOpenTask: (taskId: string) => void;
+  onCreateTask: (event: React.FormEvent<HTMLFormElement>) => void;
+}) {
+  return (
+    <div className="workbench-grid">
+      <ProjectRail
+        projects={projects}
+        items={model.projectRail}
+        selectedProjectId={selectedProjectId}
+        onSelectProject={onSelectProject}
+      />
+      <section className="workbench-main">
+        <MissionStrip metrics={model.metrics} />
+        <WorkbenchBoard cards={model.cards} selectedTaskId={selectedTaskId} onOpenTask={onOpenTask} />
+      </section>
+      <aside className="action-column">
+        <ActionInbox items={model.inbox} onOpenTask={onOpenTask} />
+        <QuickTaskComposer projects={projects} onCreateTask={onCreateTask} />
+      </aside>
+    </div>
+  );
+}
+
+function ProjectRail({
+  items,
+  selectedProjectId,
+  onSelectProject
+}: {
+  projects: Project[];
+  items: ProjectRailItem[];
+  selectedProjectId: string;
+  onSelectProject: (projectId: string) => void;
+}) {
+  const total = items.reduce(
+    (summary, item) => ({
+      total: summary.total + item.total,
+      attention: summary.attention + item.attention
+    }),
+    { total: 0, attention: 0 }
+  );
+
+  return (
+    <aside className="project-rail">
+      <div className="rail-header">
+        <p className="eyebrow">Projects</p>
+        <strong>{items.length}</strong>
+      </div>
+      <button
+        type="button"
+        className={selectedProjectId === "all" ? "project-pill active" : "project-pill"}
+        onClick={() => onSelectProject("all")}
+      >
+        <span>All projects</span>
+        <small>
+          {total.total} tasks · {total.attention} needs me
+        </small>
+      </button>
+      {items.map((item) => (
+        <button
+          key={item.id}
+          type="button"
+          className={selectedProjectId === item.id ? "project-pill active" : "project-pill"}
+          onClick={() => onSelectProject(item.id)}
+        >
+          <span>{item.name}</span>
+          <small>
+            {item.total} tasks · {item.attention} needs me
+          </small>
+        </button>
+      ))}
+      <button type="button" className="project-pill disabled" disabled title="Project Admin 会在后续迭代实现">
+        <span>Register project</span>
+        <small>planned in Slice 13.3</small>
+      </button>
+    </aside>
+  );
+}
+
+function MissionStrip({ metrics }: { metrics: MissionMetrics }) {
+  return (
+    <section className="mission-strip" aria-label="Mission summary">
+      <Metric label="Total" value={metrics.total} tone="neutral" />
+      <Metric label="Running" value={metrics.running} tone="running" />
+      <Metric label="Needs me" value={metrics.needsHuman} tone="waiting" />
+      <Metric label="Attention" value={metrics.attention} tone="attention" />
+      <Metric label="Review" value={metrics.review} tone="waiting" />
+      <Metric label="Done" value={metrics.done} tone="done" />
+    </section>
+  );
+}
+
+function Metric({ label, value, tone }: { label: string; value: number; tone: string }) {
+  return (
+    <div className={`metric ${tone}`}>
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  );
+}
+
+function WorkbenchBoard({
+  cards,
+  selectedTaskId,
+  onOpenTask
+}: {
+  cards: TaskCard[];
+  selectedTaskId?: string;
+  onOpenTask: (taskId: string) => void;
+}) {
+  const sections = [
+    {
+      id: "needs",
+      title: "Needs me",
+      cards: cards.filter((card) => card.needsHuman || card.needsMergeApproval || card.attentionRequired)
+    },
+    {
+      id: "running",
+      title: "Workflow active",
+      cards: cards.filter((card) => card.statusTone === "running" && !card.needsHuman && !card.needsMergeApproval && !card.attentionRequired)
+    },
+    {
+      id: "review",
+      title: "PR / Review",
+      cards: cards.filter((card) => card.hasPrAttention && card.statusTone !== "done")
+    },
+    {
+      id: "waiting",
+      title: "Waiting / Blocked",
+      // 等待态任务可能没有 detail hydration；单独 lane 保证 Workbench 不漏掉这些任务。
+      cards: cards.filter(
+        (card) =>
+          card.statusTone === "waiting" &&
+          !card.needsHuman &&
+          !card.needsMergeApproval &&
+          !card.attentionRequired &&
+          !card.hasPrAttention
+      )
+    },
+    {
+      id: "done",
+      title: "Done / Idle",
+      cards: cards.filter((card) => (card.statusTone === "done" || card.statusTone === "idle") && !card.hasPrAttention)
+    }
+  ];
+
+  return (
+    <section className="board" aria-label="Task board">
+      {sections.map((section) => (
+        <div key={section.id} className="board-section">
+          <div className="section-title">
+            <h2>{section.title}</h2>
+            <span>{section.cards.length}</span>
+          </div>
+          <div className="card-stack">
+            {section.cards.length === 0 ? <p className="muted empty-inline">No tasks in this lane.</p> : null}
+            {section.cards.map((card) => (
+              <TaskCardView
+                key={`${section.id}-${card.task.id}`}
+                card={card}
+                selected={selectedTaskId === card.task.id}
+                onOpenTask={onOpenTask}
+              />
+            ))}
+          </div>
+        </div>
+      ))}
+    </section>
+  );
+}
+
+function TaskCardView({
+  card,
+  selected,
+  onOpenTask
+}: {
+  card: TaskCard;
+  selected: boolean;
+  onOpenTask: (taskId: string) => void;
+}) {
+  return (
+    <article className={selected ? `task-card tone-${card.statusTone} selected` : `task-card tone-${card.statusTone}`}>
+      <div className="card-main">
+        <span className="card-topline">
+          <span>{card.task.projectName}</span>
+          <strong>{card.task.status}</strong>
+        </span>
+        <span className="card-subline">
+          autonomy: {card.task.autonomy} · source: {card.task.sourceKind}
+        </span>
+        <h3>{card.task.title}</h3>
+        <p>{card.blocker}</p>
+        <div className="signal-row">
+          <span>{card.nextOwner}</span>
+          <span>{card.workflowSummary}</span>
+        </div>
+        <div className="signal-row">
+          <span>{card.prSummary}</span>
+          <span>{card.artifactSummary}</span>
+        </div>
+      </div>
+      <div className="card-actions">
+        <small>{formatRelativeTime(card.task.updatedAt)}</small>
+        <button type="button" onClick={() => onOpenTask(card.task.id)}>
+          Debug
+        </button>
+      </div>
+    </article>
+  );
+}
+
+function ActionInbox({ items, onOpenTask }: { items: ActionInboxItem[]; onOpenTask: (taskId: string) => void }) {
+  return (
+    <section className="inbox-panel" aria-label="Action inbox">
+      <div className="panel-heading">
+        <p className="eyebrow">Action Inbox</p>
+        <strong>{items.length}</strong>
+      </div>
+      {items.length === 0 ? <p className="muted">当前没有需要人工处理的事项。</p> : null}
+      <div className="inbox-list">
+        {items.map((item) => (
+          <button key={item.id} type="button" className={`inbox-item ${item.tone}`} onClick={() => onOpenTask(item.taskId)}>
+            <span>{item.label}</span>
+            <strong>{item.title}</strong>
+            <small>
+              {item.projectName} · {item.summary}
+            </small>
+          </button>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function QuickTaskComposer({ projects, onCreateTask }: { projects: Project[]; onCreateTask: (event: React.FormEvent<HTMLFormElement>) => void }) {
+  return (
+    <form className="quick-task" onSubmit={onCreateTask}>
+      <div className="panel-heading">
+        <p className="eyebrow">New Task</p>
+        <strong>Manual</strong>
+      </div>
+      <label>
+        Project
+        <select name="projectId" required>
+          <option value="">选择工程</option>
+          {projects.map((project) => (
+            <option key={project.id} value={project.id}>
+              {project.name}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label>
+        Title
+        <input name="title" placeholder="新任务标题" required />
+      </label>
+      <label>
+        Description
+        <textarea name="description" rows={5} placeholder="任务背景、约束、验收标准" />
+      </label>
+      <label>
+        Autonomy
+        <select name="autonomy" defaultValue="balanced">
+          <option value="balanced">balanced</option>
+          <option value="conservative">conservative</option>
+          <option value="aggressive">aggressive</option>
+        </select>
+      </label>
+      <button type="submit">Create task</button>
+    </form>
   );
 }
 
@@ -708,6 +1048,193 @@ function canRetryTask(status: string): boolean {
 
 function isTerminalTaskStatus(status: string): boolean {
   return status === "completed" || status === "handoff" || status === "canceled" || status === "failed";
+}
+
+async function hydrateTaskDetails(tasks: TaskListItem[]): Promise<Record<string, TaskDetail>> {
+  const candidates = tasks;
+  const entries = await Promise.all(
+    candidates.map(async (task) => {
+      try {
+        return [task.id, await request<TaskDetail>(`/tasks/${task.id}`)] as const;
+      } catch {
+        return undefined;
+      }
+    })
+  );
+  return Object.fromEntries(entries.filter((entry): entry is readonly [string, TaskDetail] => Boolean(entry)));
+}
+
+function buildWorkbenchModel(
+  projects: Project[],
+  tasks: TaskListItem[],
+  details: Record<string, TaskDetail>,
+  selectedProjectId: string
+): WorkbenchModel {
+  const allCards = tasks.map((task) => buildTaskCard(task, details[task.id]));
+  const cards = selectedProjectId === "all" ? allCards : allCards.filter((card) => card.task.projectId === selectedProjectId);
+  const projectRail = projects.map((project) => {
+    const projectCards = allCards.filter((card) => card.task.projectId === project.id);
+    return {
+      id: project.id,
+      name: project.name,
+      total: projectCards.length,
+      attention: projectCards.filter((card) => card.needsHuman || card.needsMergeApproval || card.attentionRequired).length
+    };
+  });
+  return {
+    projectRail,
+    metrics: {
+      total: cards.length,
+      running: cards.filter((card) => card.statusTone === "running").length,
+      needsHuman: cards.filter((card) => card.needsHuman || card.needsMergeApproval).length,
+      attention: cards.filter((card) => card.attentionRequired).length,
+      review: cards.filter((card) => card.hasPrAttention).length,
+      done: cards.filter((card) => card.statusTone === "done").length
+    },
+    cards,
+    inbox: buildActionInbox(cards)
+  };
+}
+
+function buildTaskCard(task: TaskListItem, detail?: TaskDetail): TaskCard {
+  const pendingHuman = detail?.humanRequests.find((request) => request.status === "pending" && request.kind !== "merge_approval");
+  const pendingMerge = detail?.humanRequests.find((request) => request.status === "pending" && request.kind === "merge_approval");
+  const hasPrAttention = Boolean(detail?.latestPullRequest && detail.latestPullRequest.status !== "merged");
+  const attentionRequired = detail?.diagnosis.operatorAttention.required ?? isHighRiskStatus(task.status);
+  return {
+    task,
+    detail,
+    prSummary: prSummary(detail),
+    statusTone: taskTone(task.status, Boolean(pendingHuman || pendingMerge), attentionRequired),
+    nextOwner: nextOwner(task, detail, Boolean(pendingHuman), Boolean(pendingMerge), attentionRequired),
+    blocker: detail?.currentBlocker ?? task.status,
+    workflowSummary: workflowSummary(detail),
+    artifactSummary: artifactSummary(detail),
+    needsHuman: Boolean(pendingHuman),
+    needsMergeApproval: Boolean(pendingMerge),
+    attentionRequired,
+    hasPrAttention
+  };
+}
+
+function buildActionInbox(cards: TaskCard[]): ActionInboxItem[] {
+  return cards.flatMap((card) => {
+    const items: ActionInboxItem[] = [];
+    const pendingMerge = card.detail?.humanRequests.find((request) => request.status === "pending" && request.kind === "merge_approval");
+    const pendingHuman = card.detail?.humanRequests.find((request) => request.status === "pending" && request.kind !== "merge_approval");
+    if (pendingMerge) {
+      items.push({
+        id: `merge-${pendingMerge.id}`,
+        taskId: card.task.id,
+        projectName: card.task.projectName,
+        title: card.task.title,
+        kind: "merge",
+        tone: pendingMerge.approvalValid === false ? "danger" : "waiting",
+        label: "Merge approval",
+        summary: pendingMerge.approvalValid === false ? "snapshot invalid" : "waiting decision"
+      });
+    }
+    if (pendingHuman) {
+      items.push({
+        id: `human-${pendingHuman.id}`,
+        taskId: card.task.id,
+        projectName: card.task.projectName,
+        title: card.task.title,
+        kind: "human",
+        tone: "waiting",
+        label: "Human request",
+        summary: pendingHuman.questionArtifactPath ?? pendingHuman.blockedKey
+      });
+    }
+    if (card.attentionRequired) {
+      items.push({
+        id: `attention-${card.task.id}`,
+        taskId: card.task.id,
+        projectName: card.task.projectName,
+        title: card.task.title,
+        kind: isHighRiskStatus(card.task.status) ? "failed" : "attention",
+        tone: isHighRiskStatus(card.task.status) ? "danger" : "attention",
+        label: isHighRiskStatus(card.task.status) ? "High risk" : "Operator attention",
+        summary: card.detail?.diagnosis.operatorAttention.reasons[0] ?? card.blocker
+      });
+    }
+    if (card.hasPrAttention && card.detail?.latestPullRequest) {
+      items.push({
+        id: `pr-${card.detail.latestPullRequest.id}`,
+        taskId: card.task.id,
+        projectName: card.task.projectName,
+        title: card.task.title,
+        kind: "pr",
+        tone: "waiting",
+        label: "PR / MR review",
+        summary: `${card.detail.latestPullRequest.status} / review=${card.detail.latestPullRequest.reviewStatus}`
+      });
+    }
+    return items;
+  });
+}
+
+function taskTone(status: string, needsHuman: boolean, attentionRequired: boolean): TaskCard["statusTone"] {
+  if (attentionRequired || isHighRiskStatus(status)) return "attention";
+  if (needsHuman || status.includes("waiting") || status === "merge_waiting") return "waiting";
+  if (status === "completed" || status === "done") return "done";
+  if (status === "planning" || status === "running" || status === "resuming" || status === "human_answered") return "running";
+  return "idle";
+}
+
+function nextOwner(
+  task: TaskListItem,
+  detail: TaskDetail | undefined,
+  needsHuman: boolean,
+  needsMergeApproval: boolean,
+  attentionRequired: boolean
+): string {
+  if (needsMergeApproval) return "next: human approval";
+  if (needsHuman) return "next: human answer";
+  if (attentionRequired) return "next: operator review";
+  const workflow = detail?.workflowRuns[0];
+  if (workflow?.status === "running") return "next: workflow handoff";
+  if (detail?.latestPullRequest && detail.latestPullRequest.status !== "merged") return "next: PR/MR review";
+  if (task.status === "planning" || task.status === "resuming") return "next: daemon tick";
+  if (isTerminalTaskStatus(task.status)) return "next: none";
+  return `next: ${task.status}`;
+}
+
+function workflowSummary(detail?: TaskDetail): string {
+  const run = detail?.workflowRuns[0];
+  if (!run) return "Workflow: none";
+  return `Workflow: ${run.profileId || "auto"} / ${run.status} / handoff=${run.handoffKind ?? "none"}`;
+}
+
+function prSummary(detail?: TaskDetail): string {
+  if (!detail?.latestPullRequest) return "PR/MR: none";
+  return `PR/MR: ${detail.latestPullRequest.status} / review=${detail.latestPullRequest.reviewStatus}`;
+}
+
+function artifactSummary(detail?: TaskDetail): string {
+  const artifacts = [
+    detail?.executionPlan?.artifactPath,
+    detail?.agentSessions.find((session) => session.finalResponsePath)?.finalResponsePath,
+    detail?.latestPullRequest?.bodyArtifactPath
+  ].filter(Boolean);
+  if (artifacts.length === 0) return "artifacts: none";
+  return `artifacts: ${artifacts.slice(0, 2).join(", ")}`;
+}
+
+function isHighRiskStatus(status: string): boolean {
+  return status === "failed" || status === "unknown" || status === "blocked";
+}
+
+function formatRelativeTime(value: string): string {
+  const timestamp = Date.parse(value.replace(" ", "T"));
+  if (!Number.isFinite(timestamp)) return value;
+  const diffMs = Date.now() - timestamp;
+  const diffMinutes = Math.max(0, Math.round(diffMs / 60000));
+  if (diffMinutes < 1) return "just now";
+  if (diffMinutes < 60) return `${diffMinutes}m ago`;
+  const diffHours = Math.round(diffMinutes / 60);
+  if (diffHours < 48) return `${diffHours}h ago`;
+  return `${Math.round(diffHours / 24)}d ago`;
 }
 
 function Fact({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
