@@ -156,13 +156,13 @@ P2 只预留接口和规划，不进入 V1 完成标准：
 
 ### 当前进度
 
-- 当前阶段：`Iteration 13: Web Developer Workbench` 已完成 `Slice 13.1: Developer Workbench 信息架构与多任务入口`。
-- 当前 OpenSpec change：`improve-web-developer-workbench` 已完成实现、验证、独立 review 和归档；归档后位置为 `openspec/changes/archive/2026-05-21-improve-web-developer-workbench`。
+- 当前阶段：`Iteration 13: Web Developer Workbench` 已完成 `Slice 13.2: Task Cockpit 与 Workflow Lens`。
+- 当前 OpenSpec change：`add-task-cockpit-workflow-lens` 已完成实现、验证、独立 review 和归档；归档后位置为 `openspec/changes/archive/2026-05-21-add-task-cockpit-workflow-lens`。
 - 当前正式规格：已同步到 `openspec/specs/web-human-review-surface/spec.md` 和 `openspec/specs/observability/spec.md`；其他既有规格继续保持当前基线。
-- 当前已落地事实：Web 默认视图已从单任务 debug console 调整为多工程、多任务 Developer Workbench；任务详情仍可通过 Classic Debug 进入；Action Inbox 只从现有 task detail、human request、merge approval、diagnosis、PR/MR 和 task status 派生，不写 DB、不成为新的真相源、不扩大 Coordinator Agent Surface。
-- 当前验证结果：`pnpm --filter @coordinator/web build`、`pnpm typecheck`、`pnpm test -- apps/api/src/server.test.ts`、移动/桌面浏览器截图验证、`openspec validate improve-web-developer-workbench --strict` 和归档后的 `openspec validate --all --strict` 均已通过。
-- 下一阶段：经用户确认后进入 `Slice 13.2: Task Cockpit 与 Workflow Lens`。
-- 下一阶段重点：Task Cockpit 要把单任务外层流程与 workflow lens 分开展示，workflow 的 `stage/substate/gate/progress/actionInputs` 仍只能作为 operator-only 展示信息，不能驱动 daemon 自动 workflow action、Core 状态推断或 agent-facing surface。
+- 当前已落地事实：Web 默认视图已从单任务 debug console 调整为多工程、多任务 Developer Workbench；任务卡片默认通过 `Open` 进入 Task Cockpit，也可通过 `Debug` 进入 Classic Debug；Task Cockpit 已展示 Outer Flow、Workflow Lens、Evidence / Actions 和默认折叠 Debug Drawer；Workflow Lens 从现有 task detail/events/workflowRuns 做只读投影，缺少 stage/substate/progress/stageArtifacts 时使用 unknown/none/fallback，不读取 `.workflow` private state，不扩大 Coordinator Agent Surface。
+- 当前验证结果：`pnpm --filter @coordinator/web build`、`pnpm typecheck`、`pnpm test -- apps/api/src/server.test.ts`、`openspec validate add-task-cockpit-workflow-lens --strict`、`openspec validate --all --strict` 均已通过；本地 API/Web 基于 `.coordinator-smoke/actioninputs-0.6.9/coordinator.sqlite` 做了 PC 端浏览器验证，确认 Task Cockpit 能展示真实 running workflow 的 inspect-only 文案；窄屏只做基本兜底检查，交互与视觉细节留到后续统一设计调整。
+- 下一阶段：按用户确认后进入 `Slice 13.3: Task Creation、Project Admin 与 Run Until Blocked`。
+- 下一阶段重点：让 Web 支持更好的任务创建和工程管理入口，并保持 run-until-blocked 仍由 Core/daemon/workflow protocol 控制，不让前端直接执行 workflow action 或绕过人类确认边界。
 
 ### Iteration 12 后续切片顺序
 

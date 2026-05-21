@@ -176,7 +176,7 @@ type Flash = {
   message: string;
 };
 
-type ViewMode = "workbench" | "classic-debug";
+type ViewMode = "workbench" | "task-cockpit" | "classic-debug";
 
 type ProjectRailItem = {
   id: string;
@@ -225,6 +225,60 @@ type WorkbenchModel = {
   metrics: MissionMetrics;
   cards: TaskCard[];
   inbox: ActionInboxItem[];
+};
+
+type FlowTone = "done" | "active" | "waiting" | "attention" | "idle";
+
+type OuterFlowNode = {
+  id: string;
+  label: string;
+  tone: FlowTone;
+  summary: string;
+};
+
+type WorkflowActionHint = {
+  actionId: string;
+  requiredArgs: string[];
+  usage?: string;
+};
+
+type WorkflowArtifactRef = {
+  kind: string;
+  path: string;
+  label?: string;
+};
+
+type WorkflowLensModel = {
+  profile: string;
+  lifecycle: string;
+  stage: string;
+  substate: string;
+  gateState: string;
+  gateReason: string;
+  progressLabel: string;
+  progressSummary: string;
+  handoff: string;
+  allowedActions: string[];
+  deniedActions: string[];
+  actionHints: WorkflowActionHint[];
+  stageArtifacts: WorkflowArtifactRef[];
+  latestEvents: EventRecord[];
+  inspectOnlyReason: string;
+};
+
+type EvidenceItem = {
+  id: string;
+  kind: string;
+  title: string;
+  summary: string;
+  tone: "neutral" | "waiting" | "attention" | "danger";
+};
+
+type TaskCockpitModel = {
+  flow: OuterFlowNode[];
+  workflow: WorkflowLensModel;
+  evidence: EvidenceItem[];
+  keyArtifacts: string[];
 };
 
 const apiBase = import.meta.env.VITE_COORDINATOR_API_BASE ?? "http://127.0.0.1:4310";
@@ -406,14 +460,19 @@ function App() {
           </button>
           <button
             type="button"
+            className={viewMode === "task-cockpit" ? "tab active" : "tab"}
+            disabled={!detail}
+            onClick={() => setViewMode("task-cockpit")}
+          >
+            Cockpit
+          </button>
+          <button
+            type="button"
             className={viewMode === "classic-debug" ? "tab active" : "tab"}
             disabled={!detail}
             onClick={() => setViewMode("classic-debug")}
           >
             Classic Debug
-          </button>
-          <button type="button" className="tab ghost" disabled title="Task Cockpit 会在后续迭代实现">
-            Cockpit
           </button>
           <button type="button" className="tab ghost" disabled title="Project Admin 会在后续迭代实现">
             Projects
@@ -438,9 +497,14 @@ function App() {
               <p className="eyebrow">Classic Debug</p>
               <h2>{detail.task.title}</h2>
             </div>
-            <button type="button" onClick={() => setViewMode("workbench")}>
-              Back to Workbench
-            </button>
+            <div className="inline-actions">
+              <button type="button" onClick={() => setViewMode("task-cockpit")}>
+                Back to Cockpit
+              </button>
+              <button type="button" onClick={() => setViewMode("workbench")}>
+                Workbench
+              </button>
+            </div>
           </div>
           <TaskDetailView
             detail={detail}
@@ -450,6 +514,16 @@ function App() {
             onTaskControl={controlTask}
           />
         </section>
+      ) : viewMode === "task-cockpit" && detail ? (
+        <TaskCockpitView
+          detail={detail}
+          onBack={() => setViewMode("workbench")}
+          onClassicDebug={() => setViewMode("classic-debug")}
+          onAnswer={answerHumanRequest}
+          onDecideMerge={decideMerge}
+          onMerge={mergeAfterApproval}
+          onTaskControl={controlTask}
+        />
       ) : (
         <DeveloperWorkbench
           projects={projects}
@@ -457,7 +531,8 @@ function App() {
           onSelectProject={setSelectedProjectId}
           model={workbench}
           selectedTaskId={selectedTaskId}
-          onOpenTask={(taskId) => void openTask(taskId, "classic-debug")}
+          onOpenTask={(taskId) => void openTask(taskId, "task-cockpit")}
+          onOpenClassicDebug={(taskId) => void openTask(taskId, "classic-debug")}
           onCreateTask={createTask}
         />
       )}
@@ -472,6 +547,7 @@ function DeveloperWorkbench({
   model,
   selectedTaskId,
   onOpenTask,
+  onOpenClassicDebug,
   onCreateTask
 }: {
   projects: Project[];
@@ -480,6 +556,7 @@ function DeveloperWorkbench({
   model: WorkbenchModel;
   selectedTaskId?: string;
   onOpenTask: (taskId: string) => void;
+  onOpenClassicDebug: (taskId: string) => void;
   onCreateTask: (event: React.FormEvent<HTMLFormElement>) => void;
 }) {
   return (
@@ -492,7 +569,12 @@ function DeveloperWorkbench({
       />
       <section className="workbench-main">
         <MissionStrip metrics={model.metrics} />
-        <WorkbenchBoard cards={model.cards} selectedTaskId={selectedTaskId} onOpenTask={onOpenTask} />
+        <WorkbenchBoard
+          cards={model.cards}
+          selectedTaskId={selectedTaskId}
+          onOpenTask={onOpenTask}
+          onOpenClassicDebug={onOpenClassicDebug}
+        />
       </section>
       <aside className="action-column">
         <ActionInbox items={model.inbox} onOpenTask={onOpenTask} />
@@ -582,11 +664,13 @@ function Metric({ label, value, tone }: { label: string; value: number; tone: st
 function WorkbenchBoard({
   cards,
   selectedTaskId,
-  onOpenTask
+  onOpenTask,
+  onOpenClassicDebug
 }: {
   cards: TaskCard[];
   selectedTaskId?: string;
   onOpenTask: (taskId: string) => void;
+  onOpenClassicDebug: (taskId: string) => void;
 }) {
   const sections = [
     {
@@ -640,6 +724,7 @@ function WorkbenchBoard({
                 card={card}
                 selected={selectedTaskId === card.task.id}
                 onOpenTask={onOpenTask}
+                onOpenClassicDebug={onOpenClassicDebug}
               />
             ))}
           </div>
@@ -652,11 +737,13 @@ function WorkbenchBoard({
 function TaskCardView({
   card,
   selected,
-  onOpenTask
+  onOpenTask,
+  onOpenClassicDebug
 }: {
   card: TaskCard;
   selected: boolean;
   onOpenTask: (taskId: string) => void;
+  onOpenClassicDebug: (taskId: string) => void;
 }) {
   return (
     <article className={selected ? `task-card tone-${card.statusTone} selected` : `task-card tone-${card.statusTone}`}>
@@ -682,6 +769,9 @@ function TaskCardView({
       <div className="card-actions">
         <small>{formatRelativeTime(card.task.updatedAt)}</small>
         <button type="button" onClick={() => onOpenTask(card.task.id)}>
+          Open
+        </button>
+        <button type="button" onClick={() => onOpenClassicDebug(card.task.id)}>
           Debug
         </button>
       </div>
@@ -751,6 +841,338 @@ function QuickTaskComposer({ projects, onCreateTask }: { projects: Project[]; on
   );
 }
 
+function TaskCockpitView({
+  detail,
+  onBack,
+  onClassicDebug,
+  onAnswer,
+  onDecideMerge,
+  onMerge,
+  onTaskControl
+}: {
+  detail: TaskDetail;
+  onBack: () => void;
+  onClassicDebug: () => void;
+  onAnswer: (event: React.FormEvent<HTMLFormElement>, request: HumanRequest) => void;
+  onDecideMerge: (pr: PullRequest, request: HumanRequest, decision: "approve" | "reject") => void;
+  onMerge: (pr: PullRequest) => void;
+  onTaskControl: (action: "pause" | "resume" | "cancel" | "retry", reason: string) => void;
+}) {
+  const model = buildTaskCockpitModel(detail);
+
+  return (
+    <section className="cockpit-shell">
+      <header className="cockpit-header">
+        <div>
+          <p className="eyebrow">{detail.project.name} / Task Cockpit</p>
+          <h2>{detail.task.title}</h2>
+          <p>{detail.currentBlocker}</p>
+        </div>
+        <div className="inline-actions">
+          <button type="button" onClick={onBack}>
+            Workbench
+          </button>
+          <button type="button" onClick={onClassicDebug}>
+            Classic Debug
+          </button>
+        </div>
+      </header>
+
+      <section className="summary-band cockpit-facts">
+        <Fact label="Status" value={detail.task.status} />
+        <Fact label="Next owner" value={nextOwner(detail.task, detail, model.evidence.some((item) => item.kind === "human"), model.evidence.some((item) => item.kind === "merge"), detail.diagnosis.operatorAttention.required)} />
+        <Fact label="Surface" value={detail.surface.surfaceKind} />
+        <Fact label="Updated" value={formatRelativeTime(detail.task.updatedAt)} />
+      </section>
+
+      <OuterFlowMap nodes={model.flow} />
+
+      <div className="cockpit-grid">
+        <WorkflowLens model={model.workflow} />
+        <EvidenceActionsPanel
+          detail={detail}
+          evidence={model.evidence}
+          keyArtifacts={model.keyArtifacts}
+          onAnswer={onAnswer}
+          onDecideMerge={onDecideMerge}
+          onMerge={onMerge}
+          onTaskControl={onTaskControl}
+        />
+      </div>
+
+      <DebugDrawer detail={detail} />
+    </section>
+  );
+}
+
+function OuterFlowMap({ nodes }: { nodes: OuterFlowNode[] }) {
+  return (
+    <section className="outer-flow" aria-label="Outer flow map">
+      <div className="section-title">
+        <h2>Outer Flow</h2>
+        <span>{nodes.filter((node) => node.tone === "done").length}/{nodes.length}</span>
+      </div>
+      <div className="flow-rail">
+        {nodes.map((node) => (
+          <article key={node.id} className={`flow-node tone-${node.tone}`}>
+            <span>{node.label}</span>
+            <strong>{node.tone}</strong>
+            <p>{node.summary}</p>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function WorkflowLens({ model }: { model: WorkflowLensModel }) {
+  return (
+    <section className="workflow-lens">
+      <div className="panel-heading">
+        <div>
+          <p className="eyebrow">Workflow Lens</p>
+          <h3>{model.profile} / {model.lifecycle}</h3>
+        </div>
+        <span className={`attention ${model.gateState === "blocked" ? "warn" : "ok"}`}>{model.gateState}</span>
+      </div>
+      <div className="workflow-stage">
+        <div>
+          <span>stage</span>
+          <strong>{model.stage}</strong>
+        </div>
+        <div>
+          <span>substate</span>
+          <strong>{model.substate}</strong>
+        </div>
+        <div>
+          <span>handoff</span>
+          <strong>{model.handoff}</strong>
+        </div>
+      </div>
+      <div className="lens-callout">
+        <strong>{model.progressLabel}</strong>
+        <p>{model.progressSummary}</p>
+        <small>{model.inspectOnlyReason}</small>
+      </div>
+      <div className="lens-columns">
+        <LensList title="Allowed actions" empty="none" items={model.allowedActions} />
+        <LensList title="Denied actions" empty="none" items={model.deniedActions} />
+      </div>
+      <div className="lens-section">
+        <p className="field-label">Action input hints</p>
+        {model.actionHints.length === 0 ? <p className="muted">暂无 action input hint。</p> : null}
+        {model.actionHints.map((hint) => (
+          <div key={hint.actionId} className="hint-row">
+            <strong>{hint.actionId}</strong>
+            <span>args: {hint.requiredArgs.length > 0 ? hint.requiredArgs.join(", ") : "none"}</span>
+            {hint.usage ? <small>{hint.usage}</small> : null}
+          </div>
+        ))}
+      </div>
+      <div className="lens-section">
+        <p className="field-label">Stage artifacts</p>
+        {model.stageArtifacts.length === 0 ? <p className="muted">暂无 stage artifact；使用 task artifacts fallback。</p> : null}
+        <ul className="compact-list">
+          {model.stageArtifacts.map((artifact) => (
+            <li key={`${artifact.kind}-${artifact.path}`}>
+              <strong>{artifact.label ?? artifact.kind}</strong>
+              <span>{artifact.path}</span>
+            </li>
+          ))}
+        </ul>
+      </div>
+      <div className="lens-section">
+        <p className="field-label">Latest workflow events</p>
+        {model.latestEvents.length === 0 ? <p className="muted">暂无 workflow event 摘要。</p> : null}
+        <ul className="compact-list">
+          {model.latestEvents.map((event) => (
+            <li key={event.id}>
+              <strong>{event.type}</strong>
+              <span>{event.summary}</span>
+            </li>
+          ))}
+        </ul>
+      </div>
+    </section>
+  );
+}
+
+function LensList({ title, empty, items }: { title: string; empty: string; items: string[] }) {
+  return (
+    <div className="lens-section">
+      <p className="field-label">{title}</p>
+      {items.length === 0 ? <p className="muted">{empty}</p> : null}
+      <div className="chips">
+        {items.map((item) => (
+          <span key={item}>{item}</span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function EvidenceActionsPanel({
+  detail,
+  evidence,
+  keyArtifacts,
+  onAnswer,
+  onDecideMerge,
+  onMerge,
+  onTaskControl
+}: {
+  detail: TaskDetail;
+  evidence: EvidenceItem[];
+  keyArtifacts: string[];
+  onAnswer: (event: React.FormEvent<HTMLFormElement>, request: HumanRequest) => void;
+  onDecideMerge: (pr: PullRequest, request: HumanRequest, decision: "approve" | "reject") => void;
+  onMerge: (pr: PullRequest) => void;
+  onTaskControl: (action: "pause" | "resume" | "cancel" | "retry", reason: string) => void;
+}) {
+  const pendingMergeRequest = detail.humanRequests.find((request) => request.kind === "merge_approval" && request.status === "pending");
+  const pendingRequests = detail.humanRequests.filter((request) => request.status === "pending" && request.kind !== "merge_approval");
+  const surfaceTools = detail.surface.json.available_tools.map((tool) => tool.name);
+  const canMerge = detail.latestPullRequest && surfaceTools.includes("merge_after_approval");
+
+  return (
+    <aside className="evidence-panel">
+      <div className="panel-heading">
+        <div>
+          <p className="eyebrow">Evidence / Actions</p>
+          <h3>{evidence.length} items</h3>
+        </div>
+      </div>
+      <div className="evidence-list">
+        {evidence.length === 0 ? <p className="muted">暂无需要突出的 evidence 或 action。</p> : null}
+        {evidence.map((item) => (
+          <article key={item.id} className={`evidence-card ${item.tone}`}>
+            <span>{item.kind}</span>
+            <strong>{item.title}</strong>
+            <p>{item.summary}</p>
+          </article>
+        ))}
+      </div>
+      <section className="panel-lite">
+        <p className="field-label">Task controls</p>
+        <div className="control-grid compact">
+          <TaskControlButton label="Pause" disabled={!canPauseTask(detail.task.status)} onClick={() => onTaskControl("pause", "operator-paused-from-cockpit")} />
+          <TaskControlButton label="Resume" disabled={detail.task.status !== "paused"} onClick={() => onTaskControl("resume", "operator-resumed-from-cockpit")} />
+          <TaskControlButton label="Retry" disabled={!canRetryTask(detail.task.status)} onClick={() => onTaskControl("retry", "operator-retry-from-cockpit")} />
+          <TaskControlButton label="Cancel" danger disabled={isTerminalTaskStatus(detail.task.status)} onClick={() => onTaskControl("cancel", "operator-canceled-from-cockpit")} />
+        </div>
+      </section>
+      <section className="panel-lite">
+        <p className="field-label">Human requests</p>
+        {pendingRequests.length === 0 ? <p className="muted">没有待回答的 human request。</p> : null}
+        {pendingRequests.map((request) => (
+          <form key={request.id} className="answer-form" onSubmit={(event) => onAnswer(event, request)}>
+            <p className="muted">question: {request.questionArtifactPath ?? request.blockedKey}</p>
+            <textarea name="answer" rows={4} placeholder="回答会写入 human answer artifact" required />
+            <input name="answeredBy" defaultValue="web-operator" />
+            <button type="submit">Record answer</button>
+          </form>
+        ))}
+      </section>
+      <section className="panel-lite">
+        <p className="field-label">PR/MR</p>
+        {detail.latestPullRequest ? (
+          <>
+            <RecordTable
+              rows={[
+                ["Status", detail.latestPullRequest.status],
+                ["Review", detail.latestPullRequest.reviewStatus],
+                ["URL", detail.latestPullRequest.url ?? "none"]
+              ]}
+            />
+            {pendingMergeRequest || canMerge ? (
+              <div className="inline-actions">
+                {pendingMergeRequest ? (
+                  <>
+                    <button type="button" onClick={() => onDecideMerge(detail.latestPullRequest!, pendingMergeRequest, "approve")}>
+                      Approve
+                    </button>
+                    <button type="button" onClick={() => onDecideMerge(detail.latestPullRequest!, pendingMergeRequest, "reject")}>
+                      Reject
+                    </button>
+                  </>
+                ) : null}
+                <button type="button" disabled={!canMerge} onClick={() => onMerge(detail.latestPullRequest!)}>
+                  Merge
+                </button>
+              </div>
+            ) : null}
+          </>
+        ) : (
+          <p className="muted">尚无 PR/MR。</p>
+        )}
+      </section>
+      <section className="panel-lite">
+        <p className="field-label">Key artifacts</p>
+        <RecordList items={keyArtifacts} empty="暂无 artifact ref。" />
+      </section>
+    </aside>
+  );
+}
+
+function DebugDrawer({ detail }: { detail: TaskDetail }) {
+  return (
+    <details className="debug-drawer">
+      <summary>
+        <span>Debug Drawer</span>
+        <strong>surface / timeline / operations</strong>
+      </summary>
+      <div className="debug-grid">
+        <section className="panel-lite">
+          <p className="field-label">Coordinator Surface</p>
+          <p>{detail.surface.json.recommended_next_step}</p>
+          <div className="chips">
+            {detail.surface.json.available_tools.map((tool) => (
+              <span key={tool.name}>{tool.name}</span>
+            ))}
+          </div>
+        </section>
+        <DiagnosisList
+          title="Operation ledger"
+          empty="暂无 operation。"
+          items={detail.diagnosis.operationLedger.map((item) => [
+            `${item.kind} · ${item.status}`,
+            [item.failureCode ? `failure=${item.failureCode}` : undefined, item.lastDecision, item.lastObservedSummary]
+              .filter(Boolean)
+              .join(" · ")
+          ])}
+        />
+        <DiagnosisList
+          title="Recovery timeline"
+          empty="暂无 recovery decision。"
+          items={detail.diagnosis.recoveryTimeline.map((item) => [
+            item.reasonCode ?? item.decision ?? "recovery",
+            [item.createdAt, item.nextAction ? `next=${item.nextAction}` : undefined, item.observedSummary].filter(Boolean).join(" · ")
+          ])}
+        />
+        <DiagnosisList
+          title="Provider / protocol inspect"
+          empty="暂无 inspect 摘要。"
+          items={detail.diagnosis.providerProtocolInspections.map((item) => [
+            item.type,
+            [item.createdAt, item.resource, item.summary].filter(Boolean).join(" · ")
+          ])}
+        />
+      </div>
+      <ol className="timeline compact-timeline">
+        {detail.events.slice(-12).map((event) => (
+          <li key={event.id}>
+            <span className={`severity ${event.severity}`}>{event.severity}</span>
+            <div>
+              <strong>{event.type}</strong>
+              <p>{event.summary}</p>
+              <small>{event.createdAt}</small>
+            </div>
+          </li>
+        ))}
+      </ol>
+    </details>
+  );
+}
+
 function TaskDetailView({
   detail,
   onAnswer,
@@ -764,7 +1186,7 @@ function TaskDetailView({
   onMerge: (pr: PullRequest) => void;
   onTaskControl: (action: "pause" | "resume" | "cancel" | "retry", reason: string) => void;
 }) {
-  const mergeRequest = detail.humanRequests.find((request) => request.kind === "merge_approval");
+  const pendingMergeRequest = detail.humanRequests.find((request) => request.kind === "merge_approval" && request.status === "pending");
   const pendingRequests = detail.humanRequests.filter((request) => request.status === "pending" && request.kind !== "merge_approval");
   const surfaceTools = detail.surface.json.available_tools.map((tool) => tool.name);
   const canMerge = detail.latestPullRequest && surfaceTools.includes("merge_after_approval");
@@ -954,27 +1376,35 @@ function TaskDetailView({
                 ["URL", detail.latestPullRequest.url ?? "none"]
               ]}
             />
-            {mergeRequest ? (
+            {pendingMergeRequest || canMerge ? (
               <div className="merge-box">
-                <p className="field-label">Merge approval snapshot</p>
-                <RecordTable
-                  rows={[
-                    ["Request", mergeRequest.id],
-                    ["Status", mergeRequest.status],
-                    ["Valid", String(mergeRequest.approvalValid)],
-                    ["Head", mergeRequest.approvalPrHeadSha ?? "missing"],
-                    ["Base", mergeRequest.approvalPrBaseSha ?? "missing"],
-                    ["Validation", mergeRequest.approvalValidationRunId ?? "missing"],
-                    ["Strategy", mergeRequest.approvalMergeStrategy ?? "squash"]
-                  ]}
-                />
+                {pendingMergeRequest ? (
+                  <>
+                    <p className="field-label">Merge approval snapshot</p>
+                    <RecordTable
+                      rows={[
+                        ["Request", pendingMergeRequest.id],
+                        ["Status", pendingMergeRequest.status],
+                        ["Valid", String(pendingMergeRequest.approvalValid)],
+                        ["Head", pendingMergeRequest.approvalPrHeadSha ?? "missing"],
+                        ["Base", pendingMergeRequest.approvalPrBaseSha ?? "missing"],
+                        ["Validation", pendingMergeRequest.approvalValidationRunId ?? "missing"],
+                        ["Strategy", pendingMergeRequest.approvalMergeStrategy ?? "squash"]
+                      ]}
+                    />
+                  </>
+                ) : null}
                 <div className="inline-actions">
-                  <button type="button" onClick={() => onDecideMerge(detail.latestPullRequest!, mergeRequest, "approve")}>
-                    Approve
-                  </button>
-                  <button type="button" onClick={() => onDecideMerge(detail.latestPullRequest!, mergeRequest, "reject")}>
-                    Reject
-                  </button>
+                  {pendingMergeRequest ? (
+                    <>
+                      <button type="button" onClick={() => onDecideMerge(detail.latestPullRequest!, pendingMergeRequest, "approve")}>
+                        Approve
+                      </button>
+                      <button type="button" onClick={() => onDecideMerge(detail.latestPullRequest!, pendingMergeRequest, "reject")}>
+                        Reject
+                      </button>
+                    </>
+                  ) : null}
                   <button type="button" disabled={!canMerge} onClick={() => onMerge(detail.latestPullRequest!)}>
                     Merge
                   </button>
@@ -1174,6 +1604,222 @@ function buildActionInbox(cards: TaskCard[]): ActionInboxItem[] {
   });
 }
 
+function buildTaskCockpitModel(detail: TaskDetail): TaskCockpitModel {
+  const workflow = buildWorkflowLensModel(detail);
+  return {
+    flow: buildOuterFlow(detail),
+    workflow,
+    evidence: buildEvidenceItems(detail),
+    keyArtifacts: collectKeyArtifacts(detail, workflow)
+  };
+}
+
+function buildOuterFlow(detail: TaskDetail): OuterFlowNode[] {
+  // 这里故意只构建 Web display model：节点状态不写回 Core，也不参与 daemon 决策。
+  const latestWorkflow = detail.workflowRuns[0];
+  const latestPr = detail.latestPullRequest;
+  const pendingHuman = detail.humanRequests.some((request) => request.status === "pending" && request.kind !== "merge_approval");
+  const pendingMerge = detail.humanRequests.some((request) => request.status === "pending" && request.kind === "merge_approval");
+  const done = isTerminalTaskStatus(detail.task.status) && detail.task.status !== "failed";
+  const failed = isHighRiskStatus(detail.task.status) || detail.diagnosis.operatorAttention.required;
+
+  return [
+    { id: "task", label: "Task", tone: done ? "done" : failed ? "attention" : "active", summary: detail.task.status },
+    {
+      id: "plan",
+      label: "Plan",
+      tone: detail.executionPlan ? "done" : detail.task.status === "planning" ? "active" : "idle",
+      summary: detail.executionPlan?.artifactPath ?? "waiting plan"
+    },
+    {
+      id: "attempt",
+      label: "Attempt",
+      tone: detail.attempt ? "done" : "idle",
+      summary: detail.attempt ? `${detail.attempt.status} / ${detail.attempt.reason}` : "none"
+    },
+    {
+      id: "workspace",
+      label: "Workspace",
+      tone: detail.workspace?.status === "ready" ? "done" : detail.workspace ? "waiting" : "idle",
+      summary: detail.workspace?.branch ?? detail.workspace?.status ?? "none"
+    },
+    {
+      id: "workflow",
+      label: "Workflow",
+      tone: latestWorkflow?.status === "running" ? "active" : latestWorkflow?.handoffKind ? "done" : latestWorkflow ? "waiting" : "idle",
+      summary: latestWorkflow ? `${latestWorkflow.profileId || "auto"} / ${latestWorkflow.status}` : "none"
+    },
+    {
+      id: "pr",
+      label: "PR/MR",
+      tone: latestPr ? (latestPr.status === "merged" ? "done" : "waiting") : "idle",
+      summary: latestPr ? `${latestPr.status} / ${latestPr.reviewStatus}` : "none"
+    },
+    {
+      id: "review",
+      label: "Review",
+      tone: pendingHuman ? "waiting" : latestPr?.reviewStatus === "approved" ? "done" : latestPr ? "active" : "idle",
+      summary: pendingHuman ? "human request pending" : latestPr?.reviewStatus ?? "none"
+    },
+    {
+      id: "merge",
+      label: "Merge",
+      tone: latestPr?.status === "merged" ? "done" : pendingMerge ? "waiting" : latestPr ? "active" : "idle",
+      summary: pendingMerge ? "approval pending" : latestPr?.mergedAt ?? latestPr?.status ?? "none"
+    },
+    {
+      id: "done",
+      label: "Done",
+      tone: done ? "done" : failed ? "attention" : "idle",
+      summary: done ? detail.task.status : failed ? "operator attention" : "not yet"
+    }
+  ];
+}
+
+function buildWorkflowLensModel(detail: TaskDetail): WorkflowLensModel {
+  const run = detail.workflowRuns[0];
+  const projection = extractWorkflowProjection(detail);
+  const lifecycle = projection.lifecycle ?? run?.status ?? "none";
+  const handoff = projection.handoff ?? run?.handoffKind ?? "none";
+  const stage = projection.stage ?? "unknown";
+  const substate = projection.substate ?? "none";
+  const gateState = projection.gateState ?? "unknown";
+  const progressLabel = projection.progressLabel ?? (stage === "unknown" ? "Workflow status" : stage);
+  const progressSummary = projection.progressSummary ?? workflowSummary(detail);
+  const latestEvents = detail.events.filter((event) => event.type.startsWith("workflow.")).slice(-5);
+  const inspectOnlyReason =
+    run?.status === "running" && !run.handoffKind
+      ? "workflow 正在运行且尚未 handoff；Coordinator 只读 inspect / 等待 handoff，不自动执行 workflow action。"
+      : "Workflow debug 字段只用于 operator 展示，不驱动外层状态。";
+
+  return {
+    profile: projection.profile ?? run?.profileId ?? "none",
+    lifecycle,
+    stage,
+    substate,
+    gateState,
+    gateReason: projection.gateReason ?? "none",
+    progressLabel,
+    progressSummary,
+    handoff,
+    allowedActions: projection.allowedActions,
+    deniedActions: projection.deniedActions,
+    actionHints: projection.actionHints,
+    stageArtifacts: projection.stageArtifacts,
+    latestEvents,
+    inspectOnlyReason
+  };
+}
+
+function buildEvidenceItems(detail: TaskDetail): EvidenceItem[] {
+  const items: EvidenceItem[] = [];
+  for (const request of detail.humanRequests.filter((item) => item.status === "pending")) {
+    items.push({
+      id: `request-${request.id}`,
+      kind: request.kind === "merge_approval" ? "merge" : "human",
+      title: request.kind === "merge_approval" ? "Merge approval pending" : "Human request pending",
+      summary: request.questionArtifactPath ?? request.blockedKey,
+      tone: request.kind === "merge_approval" && request.approvalValid === false ? "danger" : "waiting"
+    });
+  }
+  if (detail.latestPullRequest) {
+    items.push({
+      id: `pr-${detail.latestPullRequest.id}`,
+      kind: "pr/mr",
+      title: detail.latestPullRequest.title ?? detail.latestPullRequest.id,
+      summary: `${detail.latestPullRequest.status} / review=${detail.latestPullRequest.reviewStatus}`,
+      tone: detail.latestPullRequest.status === "conflict" ? "danger" : "neutral"
+    });
+  }
+  if (detail.diagnosis.operatorAttention.required) {
+    items.push({
+      id: "operator-attention",
+      kind: "attention",
+      title: "Operator attention required",
+      summary: detail.diagnosis.operatorAttention.reasons[0] ?? detail.currentBlocker,
+      tone: "attention"
+    });
+  }
+  return items;
+}
+
+function collectKeyArtifacts(detail: TaskDetail, workflow: WorkflowLensModel): string[] {
+  return [
+    detail.executionPlan?.artifactPath,
+    detail.agentSessions.find((session) => session.finalResponsePath)?.finalResponsePath,
+    detail.latestPullRequest?.bodyArtifactPath,
+    ...workflow.stageArtifacts.map((artifact) => artifact.path),
+    ...detail.events.flatMap((event) => event.artifactRefs)
+  ]
+    .filter((item): item is string => Boolean(item))
+    .filter((item, index, list) => list.indexOf(item) === index)
+    .slice(0, 12);
+}
+
+function extractWorkflowProjection(detail: TaskDetail): {
+  profile?: string;
+  lifecycle?: string;
+  stage?: string;
+  substate?: string;
+  gateState?: string;
+  gateReason?: string;
+  progressLabel?: string;
+  progressSummary?: string;
+  handoff?: string;
+  allowedActions: string[];
+  deniedActions: string[];
+  actionHints: WorkflowActionHint[];
+  stageArtifacts: WorkflowArtifactRef[];
+} {
+  // Workflow protocol 字段只来自公开 event payload；缺字段时宁可 fallback，也不读取 .workflow private state。
+  const workflowEvents = [...detail.events].reverse().filter((event) => event.type.startsWith("workflow."));
+  for (const event of workflowEvents) {
+    const payload = isRecord(event.payload) ? event.payload : undefined;
+    const status = isRecord(payload?.status) ? payload.status : payload;
+    const debug = isRecord(status?.debug) ? status.debug : isRecord(payload?.debug) ? payload.debug : undefined;
+    const gate = isRecord(status?.gate) ? status.gate : isRecord(debug?.gate) ? debug.gate : undefined;
+    const progress = isRecord(status?.progress) ? status.progress : isRecord(debug?.progress) ? debug.progress : undefined;
+    const handoff = isRecord(status?.handoff) ? status.handoff : isRecord(payload?.handoff) ? payload.handoff : undefined;
+    const stageArtifacts = readArtifactRefs(status?.stageArtifacts ?? debug?.stageArtifacts);
+    const actionHints = readActionHints(status?.actionInputHints ?? status?.actionInputs ?? debug?.actionInputHints ?? debug?.actionInputs);
+    const allowedActions = readStringArray(status?.allowedActions ?? debug?.allowedActions);
+    const deniedActions = readStringArray(status?.deniedActions ?? debug?.deniedActions);
+    const stage = readString(status?.stage ?? debug?.stage);
+    const substate = readString(status?.substate ?? debug?.substate);
+
+    if (
+      readString(status?.profile ?? payload?.profile) ||
+      readString(status?.lifecycle ?? payload?.lifecycle) ||
+      stage ||
+      substate ||
+      gate ||
+      progress ||
+      handoff ||
+      allowedActions.length > 0 ||
+      deniedActions.length > 0 ||
+      actionHints.length > 0 ||
+      stageArtifacts.length > 0
+    ) {
+      return {
+        profile: readString(status?.profile ?? payload?.profile),
+        lifecycle: readString(status?.lifecycle ?? payload?.lifecycle),
+        stage,
+        substate,
+        gateState: readString(gate?.state),
+        gateReason: readString(gate?.reason),
+        progressLabel: readString(progress?.label),
+        progressSummary: readString(progress?.summary ?? status?.summary ?? payload?.summary),
+        handoff: readHandoffSummary(handoff),
+        allowedActions,
+        deniedActions,
+        actionHints,
+        stageArtifacts
+      };
+    }
+  }
+  return { allowedActions: [], deniedActions: [], actionHints: [], stageArtifacts: [] };
+}
+
 function taskTone(status: string, needsHuman: boolean, attentionRequired: boolean): TaskCard["statusTone"] {
   if (attentionRequired || isHighRiskStatus(status)) return "attention";
   if (needsHuman || status.includes("waiting") || status === "merge_waiting") return "waiting";
@@ -1225,7 +1871,59 @@ function isHighRiskStatus(status: string): boolean {
   return status === "failed" || status === "unknown" || status === "blocked";
 }
 
-function formatRelativeTime(value: string): string {
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function readString(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function readStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.length > 0) : [];
+}
+
+function readActionHints(value: unknown): WorkflowActionHint[] {
+  if (!isRecord(value)) return [];
+  return Object.entries(value).flatMap(([actionId, rawHint]) => {
+    if (!isRecord(rawHint)) return [];
+    return [
+      {
+        actionId,
+        requiredArgs: readStringArray(rawHint.requiredArgs),
+        usage: readString(rawHint.usage)
+      }
+    ];
+  });
+}
+
+function readArtifactRefs(value: unknown): WorkflowArtifactRef[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    if (!isRecord(item)) return [];
+    const path = readString(item.path);
+    if (!path) return [];
+    return [
+      {
+        kind: readString(item.kind) ?? "artifact",
+        path,
+        label: readString(item.label)
+      }
+    ];
+  });
+}
+
+function readHandoffSummary(value: unknown): string | undefined {
+  if (!isRecord(value)) return undefined;
+  const available = typeof value.available === "boolean" ? value.available : undefined;
+  const kind = readString(value.kind);
+  if (available === false) return "none";
+  if (available === true) return kind ?? "available";
+  return kind;
+}
+
+function formatRelativeTime(value: string | undefined): string {
+  if (!value) return "unknown";
   const timestamp = Date.parse(value.replace(" ", "T"));
   if (!Number.isFinite(timestamp)) return value;
   const diffMs = Date.now() - timestamp;

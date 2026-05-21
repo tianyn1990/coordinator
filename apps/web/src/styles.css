@@ -499,6 +499,337 @@ textarea {
   padding: 18px;
 }
 
+.cockpit-shell {
+  display: grid;
+  max-width: 1520px;
+  gap: 14px;
+  margin: 14px auto 0;
+}
+
+.cockpit-header,
+.outer-flow,
+.workflow-lens,
+.evidence-panel,
+.debug-drawer {
+  min-width: 0;
+  border: 1px solid #223940;
+  border-radius: 10px;
+  background: rgba(10, 20, 24, 0.94);
+}
+
+.cockpit-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: start;
+  padding: 18px;
+}
+
+.cockpit-header h2 {
+  margin: 0;
+  font-size: 28px;
+  overflow-wrap: anywhere;
+}
+
+.cockpit-header p:last-child {
+  max-width: 920px;
+  margin: 8px 0 0;
+  color: #9eb5ba;
+  overflow-wrap: anywhere;
+}
+
+.cockpit-facts {
+  overflow: hidden;
+}
+
+.outer-flow {
+  padding: 14px;
+}
+
+.flow-rail {
+  display: grid;
+  grid-template-columns: repeat(9, minmax(120px, 1fr));
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.flow-node {
+  position: relative;
+  display: grid;
+  min-height: 124px;
+  min-width: 120px;
+  align-content: start;
+  gap: 8px;
+  border: 1px solid #2a464e;
+  background: #0b1519;
+  padding: 12px;
+}
+
+.flow-node::after {
+  position: absolute;
+  top: 22px;
+  right: -10px;
+  width: 12px;
+  height: 1px;
+  background: #355960;
+  content: "";
+}
+
+.flow-node:last-child::after {
+  display: none;
+}
+
+.flow-node span {
+  color: #dce7e8;
+  font-weight: 900;
+}
+
+.flow-node strong {
+  width: fit-content;
+  border-radius: 999px;
+  padding: 3px 7px;
+  background: #13252b;
+  color: #9eb5ba;
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.flow-node p {
+  margin: 0;
+  color: #8da7ad;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.flow-node.tone-done {
+  border-color: #2f7f68;
+}
+
+.flow-node.tone-done strong {
+  background: #113325;
+  color: #8ef0bd;
+}
+
+.flow-node.tone-active {
+  border-color: #48aeba;
+  box-shadow: inset 0 0 0 1px rgba(72, 174, 186, 0.22);
+}
+
+.flow-node.tone-active strong {
+  background: #12363e;
+  color: #7ee7ef;
+}
+
+.flow-node.tone-waiting {
+  border-color: #7b5b20;
+}
+
+.flow-node.tone-waiting strong {
+  background: #3b2b0e;
+  color: #ffc766;
+}
+
+.flow-node.tone-attention {
+  border-color: #944436;
+}
+
+.flow-node.tone-attention strong {
+  background: #3a1813;
+  color: #ff9d8c;
+}
+
+.cockpit-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(340px, 0.7fr);
+  gap: 14px;
+}
+
+.workflow-lens,
+.evidence-panel,
+.debug-drawer {
+  padding: 16px;
+}
+
+.workflow-lens h3,
+.evidence-panel h3 {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.workflow-stage {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin: 14px 0;
+}
+
+.workflow-stage div,
+.lens-callout,
+.lens-section,
+.panel-lite {
+  min-width: 0;
+  border: 1px solid #223940;
+  border-radius: 8px;
+  background: #0d171b;
+  padding: 12px;
+}
+
+.workflow-stage span {
+  display: block;
+  color: #7f9aa0;
+  font-size: 11px;
+  font-weight: 900;
+  margin-bottom: 5px;
+  text-transform: uppercase;
+}
+
+.workflow-stage strong {
+  display: block;
+  color: #e6f1f2;
+  overflow-wrap: anywhere;
+}
+
+.lens-callout {
+  border-color: #2f5962;
+  background: #0c1d22;
+  margin-bottom: 12px;
+}
+
+.lens-callout strong {
+  color: #7ee7ef;
+}
+
+.lens-callout p,
+.lens-callout small {
+  display: block;
+  margin: 6px 0 0;
+  color: #9eb5ba;
+  overflow-wrap: anywhere;
+}
+
+.lens-columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.lens-section {
+  margin-top: 10px;
+}
+
+.hint-row {
+  display: grid;
+  gap: 5px;
+  border-top: 1px solid #223940;
+  padding: 9px 0 0;
+  margin-top: 9px;
+}
+
+.hint-row strong {
+  color: #ffc766;
+}
+
+.hint-row span,
+.hint-row small {
+  color: #9eb5ba;
+  overflow-wrap: anywhere;
+}
+
+.evidence-panel {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+}
+
+.evidence-list {
+  display: grid;
+  gap: 10px;
+}
+
+.evidence-card {
+  display: grid;
+  gap: 5px;
+  border: 1px solid #2a464e;
+  border-radius: 8px;
+  background: #0d171b;
+  padding: 12px;
+}
+
+.evidence-card span {
+  color: #7ee7ef;
+  font-size: 11px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.evidence-card strong,
+.evidence-card p {
+  overflow-wrap: anywhere;
+}
+
+.evidence-card p {
+  color: #9eb5ba;
+  margin: 0;
+}
+
+.evidence-card.waiting {
+  border-color: #7b5b20;
+}
+
+.evidence-card.waiting span {
+  color: #ffc766;
+}
+
+.evidence-card.attention,
+.evidence-card.danger {
+  border-color: #944436;
+}
+
+.evidence-card.attention span,
+.evidence-card.danger span {
+  color: #ff9d8c;
+}
+
+.panel-lite {
+  display: grid;
+  gap: 10px;
+}
+
+.control-grid.compact {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-bottom: 0;
+}
+
+.debug-drawer {
+  color: #dce7e8;
+}
+
+.debug-drawer summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  cursor: pointer;
+  font-weight: 900;
+}
+
+.debug-drawer summary strong {
+  color: #8da7ad;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.debug-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.compact-timeline {
+  margin-top: 14px;
+}
+
 .workspace {
   min-width: 0;
   overflow: auto;
@@ -785,6 +1116,12 @@ textarea {
     grid-template-columns: 1fr;
   }
 
+  .cockpit-header,
+  .cockpit-grid,
+  .debug-grid {
+    grid-template-columns: 1fr;
+  }
+
   .mission-strip,
   .board {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -817,6 +1154,11 @@ textarea {
 
   .mission-strip,
   .board,
+  .cockpit-header,
+  .cockpit-grid,
+  .workflow-stage,
+  .lens-columns,
+  .debug-grid,
   .detail-grid,
   .surface-grid,
   .summary-band,
@@ -837,7 +1179,27 @@ textarea {
   .record-table div,
   .timeline li,
   .tool-trace,
-  .control-grid {
+  .control-grid,
+  .control-grid.compact {
     grid-template-columns: 1fr;
+  }
+
+  .flow-rail {
+    grid-template-columns: 1fr;
+    overflow-x: visible;
+  }
+
+  .flow-node {
+    min-width: 0;
+    min-height: auto;
+  }
+
+  .flow-node::after {
+    top: auto;
+    right: auto;
+    bottom: -10px;
+    left: 18px;
+    width: 1px;
+    height: 12px;
   }
 }
