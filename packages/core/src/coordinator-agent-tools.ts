@@ -284,6 +284,7 @@ function startWorkflowRunFromTool(
   input: ExecuteCoordinatorAgentToolInput & { args: CoordinatorAgentToolArgs; actor: string }
 ): WorkflowRunResult {
   const attemptId = requireCurrentAttempt(surface);
+  const task = requireTaskForSurface(context, surface);
   if (input.args.profile !== undefined) {
     throw new CoordinatorAgentToolError("start_workflow_run 不接受 outer Agent 传入的 profile；profile 只能来自人类显式选择或 workflow runtime 自主选择", "invalid_argument");
   }
@@ -293,6 +294,7 @@ function startWorkflowRunFromTool(
   return startWorkflowRun(context, {
     attemptId,
     owner: input.actor,
+    profileId: task.requestedWorkflowProfile,
     ttlMs: input.workflowStart?.ttlMs,
     now: input.workflowStart?.now,
     runner: input.workflowStart?.runner

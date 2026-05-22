@@ -84,7 +84,8 @@ export function buildServer(): FastifyInstance {
             projectId: { type: "string", minLength: 1 },
             title: { type: "string", minLength: 1 },
             description: { type: "string" },
-            autonomy: { type: "string", enum: ["conservative", "balanced", "aggressive"] }
+            autonomy: { type: "string", enum: ["conservative", "balanced", "aggressive"] },
+            requestedWorkflowProfile: { type: "string", minLength: 1 }
           }
         }
       }
@@ -881,6 +882,7 @@ type CreateTaskBody = {
   title: string;
   description?: string;
   autonomy?: "conservative" | "balanced" | "aggressive";
+  requestedWorkflowProfile?: string;
 };
 
 type TaskControlBody = {

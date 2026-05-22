@@ -139,6 +139,7 @@ describe("operator surface", () => {
         lastObservedState: {
           decision: "operator_attention",
           reasonCode: "workflow-run-id-mismatch",
+          error: "workflow protocol runId mismatch",
           observedSummary: "protocol mismatch with raw secret token should be truncated",
           lockToken: "must-not-leak",
           raw: { stdout: "provider raw output" }
@@ -216,7 +217,8 @@ describe("operator surface", () => {
       status: "unknown",
       failureCode: "auth_missing",
       lastDecision: "operator_attention",
-      lastReasonCode: "workflow-run-id-mismatch"
+      lastReasonCode: "workflow-run-id-mismatch",
+      lastError: "workflow protocol runId mismatch"
     });
     expect(detail.diagnosis.providerProtocolInspections.map((item) => item.type)).toEqual(
       expect.arrayContaining(["daemon.recovery_decision", "workflow.status_inspected"])

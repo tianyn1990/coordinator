@@ -245,6 +245,64 @@ describe("coordinator agent tools executor", () => {
     expect(JSON.stringify(result.result)).not.toContain("allowedActions");
   });
 
+  it("start_workflow_run 使用 task 上的人类显式 workflow 选择，不接受 outer Agent 传参", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createTaskFixture(databasePath);
+    const workspacePath = mkdtempSync(join(tmpdir(), "coordinator-agent-tools-wf-start-workspace-"));
+    const repoPath = join(workspacePath, "repo");
+    mkdirSync(join(repoPath, ".git"), { recursive: true });
+    const observedArgs: string[][] = [];
+    const runner: WorkflowProtocolRunner = (args) => {
+      observedArgs.push(args);
+      if (args[1] === "capabilities") {
+        return JSON.stringify({
+          ok: true,
+          protocolVersion: "1",
+          profiles: [{ id: "feature", purpose: "feature", implemented: true }],
+          commands: ["start", "status", "action"]
+        });
+      }
+      return JSON.stringify({
+        runId: "inner-run-feature",
+        profile: "feature",
+        lifecycle: "active",
+        handoff: { available: false, artifacts: [], deniedActions: [] },
+        summary: "started"
+      });
+    };
+
+    const result = withDatabase(databasePath, (context) => {
+      context.db.prepare("UPDATE projects SET repo_path = ? WHERE id = ?").run(repoPath, fixture.projectId);
+      const task = createTask(context, {
+        id: "task-wf-start-selected",
+        projectId: fixture.projectId,
+        title: "wf start",
+        requestedWorkflowProfile: "feature"
+      });
+      createExecutionPlanForTest(context, fixture.projectId, task.id);
+      const attempt = createAttempt(context, { id: "attempt-wf-start-selected", projectId: fixture.projectId, taskId: task.id });
+      createWorkspace(context, {
+        projectId: fixture.projectId,
+        taskId: task.id,
+        attemptId: attempt.id,
+        status: "ready",
+        workspacePath,
+        repoPath,
+        branch: "coordinator/task-wf-start-selected/attempt-wf-start-selected",
+        baseBranch: "main"
+      });
+      return executeCoordinatorAgentTool(context, {
+        taskId: task.id,
+        toolName: "start_workflow_run",
+        args: {},
+        workflowStart: { runner }
+      });
+    });
+
+    expect(result.result).toMatchObject({ kind: "workflow_run", status: "running" });
+    expect(observedArgs).toContainEqual(["protocol", "start", "--workflow", "feature"]);
+  });
+
   it("inspect_workflow_run 失败 tool event 不记录 workflow protocol 原始 mismatch 细节", () => {
     const databasePath = createMigratedDatabase();
     const fixture = createTaskFixture(databasePath);

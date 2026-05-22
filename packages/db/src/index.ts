@@ -61,6 +61,7 @@ export type CreateTaskInput = {
   description?: string;
   sourceKind?: string;
   autonomy?: string;
+  requestedWorkflowProfile?: string;
 };
 
 export type TaskRecord = {
@@ -70,6 +71,7 @@ export type TaskRecord = {
   title: string;
   description: string;
   autonomy: string;
+  requestedWorkflowProfile?: string;
   status: string;
   stateVersion: number;
 };
@@ -1612,8 +1614,8 @@ function insertTask(context: DbContext, input: CreateTaskInput): TaskRecord {
   const id = input.id ?? randomUUID();
   context.db
     .prepare(
-      `INSERT INTO tasks (id, project_id, source_kind, title, description, autonomy)
-       VALUES (?, ?, ?, ?, ?, ?)`
+      `INSERT INTO tasks (id, project_id, source_kind, title, description, autonomy, requested_workflow_profile)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       id,
@@ -1621,7 +1623,8 @@ function insertTask(context: DbContext, input: CreateTaskInput): TaskRecord {
       input.sourceKind ?? "manual",
       input.title,
       input.description ?? "",
-      input.autonomy ?? "balanced"
+      input.autonomy ?? "balanced",
+      input.requestedWorkflowProfile ?? null
     );
 
   appendEvent(context, {
@@ -2076,6 +2079,7 @@ function mapTaskRow(row: unknown): TaskRecord {
     title: string;
     description: string;
     autonomy: string;
+    requested_workflow_profile?: string | null;
     status: string;
     state_version: number;
   };
@@ -2086,6 +2090,7 @@ function mapTaskRow(row: unknown): TaskRecord {
     title: value.title,
     description: value.description,
     autonomy: value.autonomy,
+    requestedWorkflowProfile: value.requested_workflow_profile ?? undefined,
     status: value.status,
     stateVersion: value.state_version
   };

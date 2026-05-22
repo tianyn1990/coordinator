@@ -370,6 +370,49 @@ describe("workflow protocol adapter", () => {
     expect(persisted.workflowRun).toMatchObject({ status: "starting", profileId: "feature" });
   });
 
+  it("start 返回 protocol failure envelope 时保留可诊断错误摘要", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createAttemptWithReadyWorkspace(databasePath);
+    const protocol = createProtocolRunner();
+    const runner: WorkflowProtocolRunner = (args, options) => {
+      if (args[1] === "start") {
+        return JSON.stringify({
+          ok: false,
+          protocolVersion: "1",
+          runId: null,
+          error: {
+            code: "WORKFLOW_PROFILE_REQUIRED",
+            message: "workflow protocol start requires --workflow <profile>",
+            recoverable: true
+          }
+        });
+      }
+      return protocol.runner(args, options);
+    };
+
+    expect(() =>
+      withDatabase(databasePath, (context) =>
+        startWorkflowRun(context, {
+          attemptId: fixture.attemptId,
+          runner
+        })
+      )
+    ).toThrow(/WORKFLOW_PROFILE_REQUIRED/);
+
+    const persisted = withDatabase(databasePath, (context) => ({
+      operation: getOperationByIdempotencyKey(context, "workflow:start:attempt-workflow:auto"),
+      workflowRun: getActiveWorkflowRunByAttempt(context, fixture.attemptId)
+    }));
+    expect(persisted.operation).toMatchObject({
+      status: "unknown",
+      failureCode: "WorkflowProtocolError",
+      lastObservedState: expect.objectContaining({
+        error: "WORKFLOW_PROFILE_REQUIRED: workflow protocol start requires --workflow <profile>"
+      })
+    });
+    expect(persisted.workflowRun).toMatchObject({ status: "starting", profileId: "unknown" });
+  });
+
   it("status 不把 stage/substate 当成 handoff 或完成语义", () => {
     const databasePath = createMigratedDatabase();
     const fixture = createAttemptWithReadyWorkspace(databasePath);

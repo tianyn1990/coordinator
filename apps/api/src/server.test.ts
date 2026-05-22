@@ -171,24 +171,25 @@ describe("API health", () => {
           projectId: "project-api-web",
           title: "Web manual task",
           description: "from UI",
-          autonomy: "balanced"
+          autonomy: "balanced",
+          requestedWorkflowProfile: "feature"
         }
       });
       expect(created.statusCode).toBe(200);
       expect(created.json()).toMatchObject({
-        task: { sourceKind: "manual", title: "Web manual task" }
+        task: { sourceKind: "manual", title: "Web manual task", requestedWorkflowProfile: "feature" }
       });
 
       const listed = await server.inject({ method: "GET", url: "/tasks" });
       expect(listed.statusCode).toBe(200);
       expect(listed.json()).toMatchObject({
-        tasks: [{ title: "Web manual task", projectName: "web" }]
+        tasks: [{ title: "Web manual task", projectName: "web", requestedWorkflowProfile: "feature" }]
       });
 
       const detail = await server.inject({ method: "GET", url: `/tasks/${created.json().task.id}` });
       expect(detail.statusCode).toBe(200);
       expect(detail.json()).toMatchObject({
-        task: { title: "Web manual task" },
+        task: { title: "Web manual task", requestedWorkflowProfile: "feature" },
         diagnosis: {
           currentBlocker: "created",
           operatorAttention: { required: false }

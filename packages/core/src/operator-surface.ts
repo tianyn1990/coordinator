@@ -84,6 +84,7 @@ export type OperatorOperationSummary = {
   externalId?: string;
   lastDecision?: string;
   lastReasonCode?: string;
+  lastError?: string;
   lastObservedSummary?: string;
 };
 
@@ -181,6 +182,7 @@ export type CreateManualTaskInput = {
   title: string;
   description?: string;
   autonomy?: string;
+  requestedWorkflowProfile?: string;
 };
 
 export type RecordHumanAnswerInput = {
@@ -230,6 +232,7 @@ export function createManualTask(context: DbContext, input: CreateManualTaskInpu
   const title = normalizeRequiredText(input.title, "title", 200);
   const description = normalizeOptionalText(input.description, 20_000);
   const autonomy = normalizeAutonomy(input.autonomy);
+  const requestedWorkflowProfile = normalizeWorkflowProfile(input.requestedWorkflowProfile);
   const project = getProject(context, input.projectId);
   if (!project) {
     throw new OperatorSurfaceError(`project not found: ${input.projectId}`);
@@ -239,6 +242,7 @@ export function createManualTask(context: DbContext, input: CreateManualTaskInpu
     title,
     description,
     autonomy,
+    requestedWorkflowProfile,
     sourceKind: "manual"
   });
 }
@@ -615,6 +619,7 @@ function mapOperationSummary(operation: OperationRecord): OperatorOperationSumma
     externalId: truncateText(operation.externalId, 160),
     lastDecision: readString(observed, "decision"),
     lastReasonCode: readString(observed, "reasonCode"),
+    lastError: truncateText(readString(observed, "error"), 240),
     lastObservedSummary: truncateText(readString(observed, "observedSummary"), 240)
   };
 }
@@ -943,6 +948,17 @@ function normalizeAutonomy(value: string | undefined): string {
     return normalized;
   }
   throw new OperatorSurfaceError(`不支持的 autonomy：${value}`);
+}
+
+function normalizeWorkflowProfile(value: string | undefined): string | undefined {
+  const normalized = value?.trim();
+  if (!normalized || normalized === "auto" || normalized === "default") {
+    return undefined;
+  }
+  if (/^[a-z0-9][a-z0-9-]{0,79}$/.test(normalized)) {
+    return normalized;
+  }
+  throw new OperatorSurfaceError(`不支持的 workflow profile：${value}`);
 }
 
 function normalizeRequiredText(value: string, fieldName: string, maxLength: number): string {

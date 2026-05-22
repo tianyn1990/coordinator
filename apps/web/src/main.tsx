@@ -29,6 +29,7 @@ type TaskListItem = {
   title: string;
   description: string;
   autonomy: string;
+  requestedWorkflowProfile?: string;
   status: string;
   stateVersion: number;
   updatedAt: string;
@@ -153,6 +154,7 @@ type OperatorTaskDiagnosis = {
     externalId?: string;
     lastDecision?: string;
     lastReasonCode?: string;
+    lastError?: string;
     lastObservedSummary?: string;
   }>;
   recoveryTimeline: Array<{
@@ -344,6 +346,7 @@ type TaskCockpitModel = {
 
 const apiBase = import.meta.env.VITE_COORDINATOR_API_BASE ?? "http://127.0.0.1:4310";
 const RUN_UNTIL_BLOCKED_MAX_TICKS = 8;
+const WORKFLOW_RUNTIME_REQUIRES_EXPLICIT_PROFILE = true;
 
 function App() {
   const [projects, setProjects] = useState<Project[]>([]);
@@ -418,7 +421,9 @@ function App() {
     acceptanceCriteria: string;
     constraints: string;
     workflowHint: string;
+    requestedWorkflowProfile?: string;
   } {
+    const workflowProfile = String(form.get("requestedWorkflowProfile") ?? "").trim();
     const description = [
       String(form.get("description") ?? "").trim(),
       String(form.get("background") ?? "").trim() ? `\n\n背景\n${String(form.get("background") ?? "").trim()}` : "",
@@ -436,14 +441,23 @@ function App() {
       background: String(form.get("background") ?? ""),
       acceptanceCriteria: String(form.get("acceptanceCriteria") ?? ""),
       constraints: String(form.get("constraints") ?? ""),
-      workflowHint: String(form.get("workflowHint") ?? "")
+      workflowHint: String(form.get("workflowHint") ?? ""),
+      requestedWorkflowProfile: workflowProfile || undefined
     };
   }
 
   async function createTask(event: React.FormEvent<HTMLFormElement>, options?: { runUntilBlocked?: boolean }) {
     event.preventDefault();
-    const form = new FormData(event.currentTarget);
+    const formElement = event.currentTarget;
+    const form = new FormData(formElement);
     const payload = extractTaskPayload(form);
+    if (options?.runUntilBlocked && !payload.requestedWorkflowProfile && WORKFLOW_RUNTIME_REQUIRES_EXPLICIT_PROFILE) {
+      setFlash({
+        tone: "error",
+        message: "当前 workflow runtime 启动时需要人类显式选择 workflow；请选择 feature / bugfix / micro-change 后再创建并自动推进"
+      });
+      return;
+    }
     try {
       const result = await request<{ task: TaskListItem }>("/tasks", {
         method: "POST",
@@ -451,10 +465,12 @@ function App() {
           projectId: payload.projectId,
           title: payload.title,
           description: payload.description,
-          autonomy: payload.autonomy
+          autonomy: payload.autonomy,
+          requestedWorkflowProfile: payload.requestedWorkflowProfile
         })
       });
-      event.currentTarget.reset();
+      // React synthetic event 在 async 边界后不再适合作为 DOM 引用来源；提前保存 form 可避免创建后自动推进路径失效。
+      formElement.reset();
       setFlash({
         tone: "ok",
         message: options?.runUntilBlocked ? "manual task 已创建，准备进入 run until blocked" : "manual task 已创建"
@@ -505,6 +521,13 @@ function App() {
     const seedDetail = initialDetail ?? (taskId ? taskDetails[taskId] ?? (await request<TaskDetail>(`/tasks/${taskId}`)) : undefined);
     if (!taskId && !seedDetail) {
       setFlash({ tone: "error", message: "没有可推进的 task" });
+      return;
+    }
+    if (seedDetail && requiresWorkflowSelectionBeforeAutoRun(seedDetail)) {
+      setFlash({
+        tone: "error",
+        message: "当前 task 尚未启动 workflow，且没有人类显式选择 workflow；请用 New Task 选择 workflow 后再自动推进"
+      });
       return;
     }
     setRunState({
@@ -1456,7 +1479,7 @@ function DebugDrawer({ detail }: { detail: TaskDetail }) {
           empty="暂无 operation。"
           items={detail.diagnosis.operationLedger.map((item) => [
             `${item.kind} · ${item.status}`,
-            [item.failureCode ? `failure=${item.failureCode}` : undefined, item.lastDecision, item.lastObservedSummary]
+            [item.failureCode ? `failure=${item.failureCode}` : undefined, item.lastDecision, item.lastReasonCode, item.lastError, item.lastObservedSummary]
               .filter(Boolean)
               .join(" · ")
           ])}
@@ -1607,6 +1630,7 @@ function TaskDetailView({
                 item.failureCode ? `failure=${item.failureCode}` : undefined,
                 item.lastDecision ? `decision=${item.lastDecision}` : undefined,
                 item.lastReasonCode,
+                item.lastError,
                 item.lastObservedSummary
               ]
                 .filter(Boolean)
@@ -1972,10 +1996,19 @@ function NewTaskView({
               </select>
             </label>
             <label>
-              Workflow hint
-              <input name="workflowHint" placeholder="default / auto / explicit hint" />
+              Workflow selection
+              <select name="requestedWorkflowProfile" defaultValue="">
+                <option value="">auto / runtime decides</option>
+                <option value="feature">feature</option>
+                <option value="bugfix">bugfix</option>
+                <option value="micro-change">micro-change</option>
+              </select>
             </label>
           </div>
+          <label>
+            Workflow hint
+            <input name="workflowHint" placeholder="可选：在任务文本中补充 workflow 倾向或上下文" />
+          </label>
           <label>
             Description
             <textarea name="description" rows={8} placeholder="核心需求描述" />
@@ -2137,6 +2170,11 @@ function describeRunStopReason(
     return { stop: true, reason: "已停止：没有可安全推进的 action" };
   }
   return { stop: false, reason: "继续推进" };
+}
+
+function requiresWorkflowSelectionBeforeAutoRun(detail: TaskDetail): boolean {
+  // 当前 workflow@0.6.10 的 machine-facing start 仍要求 --workflow；Web 只阻止自动推进，不替用户选择 profile。
+  return WORKFLOW_RUNTIME_REQUIRES_EXPLICIT_PROFILE && detail.workflowRuns.length === 0 && !detail.task.requestedWorkflowProfile;
 }
 
 function canPauseTask(status: string): boolean {

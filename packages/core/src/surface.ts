@@ -91,6 +91,7 @@ export type TaskSnapshot = {
   title: string;
   description: string;
   autonomy: string;
+  requestedWorkflowProfile?: string;
   sourceKind: string;
   status: string;
   stateVersion: number;
@@ -101,6 +102,7 @@ type TaskSurfaceJson = {
   title: string;
   description: string;
   autonomy: string;
+  requested_workflow_profile?: string;
   source_kind: string;
   status: string;
   state_version: number;
@@ -340,6 +342,7 @@ export function buildCoordinatorSurface(snapshot: SurfaceSnapshot): SurfaceEnvel
       title: snapshot.task.title,
       description: snapshot.task.description,
       autonomy: snapshot.task.autonomy,
+      requested_workflow_profile: snapshot.task.requestedWorkflowProfile,
       source_kind: snapshot.task.sourceKind,
       status: snapshot.task.status,
       state_version: snapshot.task.stateVersion
@@ -535,6 +538,9 @@ export function renderSurfaceMarkdown(
   }
   lines.push(`- status: ${json.task.status}`);
   lines.push(`- autonomy: ${json.task.autonomy}`);
+  if (json.task.requested_workflow_profile) {
+    lines.push(`- requested_workflow_profile: ${json.task.requested_workflow_profile} (human explicit selection)`);
+  }
   lines.push(`- source_kind: ${json.task.source_kind}`);
   lines.push(``);
   lines.push(`## Project`);
@@ -1001,6 +1007,7 @@ function toTaskSnapshot(task: TaskRecord): TaskSnapshot {
     title: task.title,
     description: task.description,
     autonomy: task.autonomy,
+    requestedWorkflowProfile: task.requestedWorkflowProfile,
     sourceKind: task.sourceKind,
     status: task.status,
     stateVersion: task.stateVersion

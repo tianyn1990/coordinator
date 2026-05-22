@@ -167,7 +167,7 @@ export type ListWorkflowEventsInput = {
 };
 
 export class WorkflowProtocolError extends Error {
-  constructor(message: string) {
+  constructor(message: string, public readonly protocolCode?: string) {
     super(message);
     this.name = "WorkflowProtocolError";
   }
@@ -632,6 +632,7 @@ function parseWorkflowCapabilities(value: unknown): WorkflowCapabilities {
 
 function parseWorkflowStatus(value: unknown, options: { fallbackLifecycle?: WorkflowLifecycle } = {}): WorkflowStatus {
   const object = requireObject(value, "status");
+  assertProtocolSuccess(object);
   const runId = requireString(object.runId, "runId");
   const lifecycle = parseLifecycle(optionalString(object.lifecycle), options.fallbackLifecycle ?? "active");
   const handoff = parseHandoff(object.handoff);
@@ -792,6 +793,19 @@ function normalizeStartedStatus(status: WorkflowStatus): WorkflowStatus {
   };
 }
 
+function assertProtocolSuccess(object: Record<string, unknown>): void {
+  if (object.ok !== false) {
+    return;
+  }
+  const errorObject = typeof object.error === "object" && object.error !== null ? (object.error as Record<string, unknown>) : undefined;
+  const code = typeof errorObject?.code === "string" ? errorObject.code : "WORKFLOW_PROTOCOL_ERROR";
+  const message =
+    typeof errorObject?.message === "string" && errorObject.message.trim()
+      ? errorObject.message.trim()
+      : "workflow protocol returned ok=false";
+  throw new WorkflowProtocolError(`${code}: ${message}`, code);
+}
+
 function coarseWorkflowStatus(status: WorkflowStatus): string {
   if (status.handoff.available) {
     return "handoff";
@@ -844,11 +858,43 @@ function runProtocolJson(
 }
 
 function runWorkflowProtocol(args: string[], options: { cwd: string; launcher: string; timeoutMs: number }): string {
-  return execFileSync(options.launcher, args, {
-    cwd: options.cwd,
-    encoding: "utf8",
-    timeout: options.timeoutMs
-  });
+  try {
+    return execFileSync(options.launcher, args, {
+      cwd: options.cwd,
+      encoding: "utf8",
+      timeout: options.timeoutMs
+    });
+  } catch (error) {
+    // 只把 protocol 的短错误摘要带回 Core，避免泄露完整 stdout/stderr 或本地环境细节。
+    throw new WorkflowProtocolError(shortProtocolProcessError(error));
+  }
+}
+
+function shortProtocolProcessError(error: unknown): string {
+  if (typeof error === "object" && error !== null) {
+    const record = error as { message?: unknown; stderr?: unknown; stdout?: unknown };
+    const stderr = bufferLikeToString(record.stderr);
+    const stdout = bufferLikeToString(record.stdout);
+    const detail = stderr || stdout;
+    if (detail) {
+      return detail.slice(0, 500);
+    }
+    if (typeof record.message === "string" && record.message.trim()) {
+      return record.message.slice(0, 500);
+    }
+  }
+  return "workflow protocol command failed";
+}
+
+function bufferLikeToString(value: unknown): string | undefined {
+  if (typeof value === "string") {
+    return value.trim() || undefined;
+  }
+  if (Buffer.isBuffer(value)) {
+    const text = value.toString("utf8").trim();
+    return text || undefined;
+  }
+  return undefined;
 }
 
 function assertImplementedProfile(capabilities: WorkflowCapabilities, profileId: string): void {
