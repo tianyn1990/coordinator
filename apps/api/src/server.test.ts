@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { execFileSync } from "node:child_process";
 import {
   createAttempt,
   createHumanRequest,
@@ -89,6 +90,55 @@ describe("API health", () => {
       expect(response.statusCode).toBe(200);
       expect(response.json()).toMatchObject({
         projects: [{ id: "project-api", defaultBranch: "main" }]
+      });
+    } finally {
+      if (previous === undefined) {
+        delete process.env.COORDINATOR_DB_PATH;
+      } else {
+        process.env.COORDINATOR_DB_PATH = previous;
+      }
+    }
+  });
+
+  it("Web API 可注册 project registry 并返回工程配置", async () => {
+    const databasePath = join(mkdtempSync(join(tmpdir(), "coordinator-api-register-project-")), "api.sqlite");
+    const repoPath = mkdtempSync(join(tmpdir(), "coordinator-api-register-repo-"));
+    runMigrations(databasePath);
+    execFileSync("git", ["init"], { cwd: repoPath });
+    execFileSync("git", ["remote", "add", "origin", "git@github.com:example/project.git"], { cwd: repoPath });
+
+    const previous = process.env.COORDINATOR_DB_PATH;
+    process.env.COORDINATOR_DB_PATH = databasePath;
+    try {
+      const server = buildServer();
+      const response = await server.inject({
+        method: "POST",
+        url: "/projects/register",
+        payload: {
+          repoPath,
+          name: "registered-web-project",
+          confirmedDefaultBranch: "main",
+          workflowLauncher: "workflow",
+          outerAgentDefaultProvider: "codex",
+          innerAgentDefaultProvider: "codex",
+          workspaceRoot: mkdtempSync(join(tmpdir(), "coordinator-api-register-workspaces-"))
+        }
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({
+        blocked: false,
+        project: {
+          name: "registered-web-project",
+          gitProviderKind: "github",
+          defaultBranch: "main",
+          registrationStatus: "registered"
+        }
+      });
+
+      const listed = await server.inject({ method: "GET", url: "/projects" });
+      expect(listed.json()).toMatchObject({
+        projects: [expect.objectContaining({ name: "registered-web-project", workflowLauncher: "workflow" })]
       });
     } finally {
       if (previous === undefined) {
@@ -697,6 +747,43 @@ exit 1
 
       const surface = await server.inject({ method: "GET", url: "/tasks/task-api-daemon/surface" });
       expect(surface.json().json.available_tools.map((tool: { name: string }) => tool.name)).not.toContain("daemon tick");
+    } finally {
+      if (previous === undefined) {
+        delete process.env.COORDINATOR_DB_PATH;
+      } else {
+        process.env.COORDINATOR_DB_PATH = previous;
+      }
+    }
+  });
+
+  it("daemon tick API 支持 task-scoped operator 推进", async () => {
+    const databasePath = join(mkdtempSync(join(tmpdir(), "coordinator-api-daemon-scope-")), "daemon.sqlite");
+    runMigrations(databasePath);
+    withDatabase(databasePath, (context) => {
+      const project = createProject(context, {
+        id: "project-api-daemon-scope",
+        name: "daemon-scope",
+        outerAgentDefaultProvider: "fake"
+      });
+      createTask(context, { id: "task-api-daemon-scope-a", projectId: project.id, title: "scope a" });
+      createTask(context, { id: "task-api-daemon-scope-b", projectId: project.id, title: "scope b" });
+    });
+
+    const previous = process.env.COORDINATOR_DB_PATH;
+    process.env.COORDINATOR_DB_PATH = databasePath;
+    try {
+      const server = buildServer();
+      const response = await server.inject({
+        method: "POST",
+        url: "/daemon/tick",
+        payload: { owner: "api-test", taskId: "task-api-daemon-scope-b" }
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({
+        status: "acted",
+        actions: [expect.objectContaining({ kind: "agent_tool_skipped", taskId: "task-api-daemon-scope-b" })]
+      });
     } finally {
       if (previous === undefined) {
         delete process.env.COORDINATOR_DB_PATH;

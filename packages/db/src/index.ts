@@ -738,6 +738,27 @@ export function listHumanRequestsByStatus(context: DbContext, statuses: string[]
     .map(mapHumanRequestRow);
 }
 
+export function listHumanRequestsByTaskAndStatus(
+  context: DbContext,
+  taskId: string,
+  statuses: string[],
+  limit = 50
+): HumanRequestRecord[] {
+  if (statuses.length === 0) {
+    return [];
+  }
+  const placeholders = statuses.map(() => "?").join(", ");
+  return context.db
+    .prepare(
+      `SELECT * FROM human_requests
+       WHERE task_id = ? AND status IN (${placeholders})
+       ORDER BY updated_at ASC, created_at ASC, id ASC
+       LIMIT ?`
+    )
+    .all(taskId, ...statuses, limit)
+    .map(mapHumanRequestRow);
+}
+
 export function createWorkspace(context: DbContext, input: CreateWorkspaceInput): WorkspaceRecord {
   return withTransaction(context, () => insertWorkspace(context, input));
 }
@@ -784,6 +805,27 @@ export function listWorkspacesByStatus(context: DbContext, statuses: string[], l
        LIMIT ?`
     )
     .all(...statuses, limit)
+    .map(mapWorkspaceRow);
+}
+
+export function listWorkspacesByTaskAndStatus(
+  context: DbContext,
+  taskId: string,
+  statuses: string[],
+  limit = 50
+): WorkspaceRecord[] {
+  if (statuses.length === 0) {
+    return [];
+  }
+  const placeholders = statuses.map(() => "?").join(", ");
+  return context.db
+    .prepare(
+      `SELECT * FROM workspaces
+       WHERE task_id = ? AND status IN (${placeholders})
+       ORDER BY updated_at ASC, created_at ASC, id ASC
+       LIMIT ?`
+    )
+    .all(taskId, ...statuses, limit)
     .map(mapWorkspaceRow);
 }
 
@@ -953,6 +995,27 @@ export function listWorkflowRunsByStatus(context: DbContext, statuses: string[],
        LIMIT ?`
     )
     .all(...statuses, limit)
+    .map(mapWorkflowRunRow);
+}
+
+export function listWorkflowRunsByTaskAndStatus(
+  context: DbContext,
+  taskId: string,
+  statuses: string[],
+  limit = 50
+): WorkflowRunRecord[] {
+  if (statuses.length === 0) {
+    return [];
+  }
+  const placeholders = statuses.map(() => "?").join(", ");
+  return context.db
+    .prepare(
+      `SELECT * FROM workflow_runs
+       WHERE task_id = ? AND status IN (${placeholders})
+       ORDER BY updated_at ASC, created_at ASC, id ASC
+       LIMIT ?`
+    )
+    .all(taskId, ...statuses, limit)
     .map(mapWorkflowRunRow);
 }
 
@@ -1313,6 +1376,33 @@ export function listOperationsByStatusAndKindPrefix(
     .map(mapOperationRow);
 }
 
+export function listOperationsByTaskStatusAndKindPrefix(
+  context: DbContext,
+  taskId: string,
+  statuses: string[],
+  kindPrefix: string,
+  limit = 50
+): OperationRecord[] {
+  if (statuses.length === 0) {
+    return [];
+  }
+  const placeholders = statuses.map(() => "?").join(", ");
+  return context.db
+    .prepare(
+      `SELECT * FROM operations
+       WHERE task_id = ? AND status IN (${placeholders}) AND kind LIKE ?
+         AND (
+           last_observed_state IS NULL
+           OR json_extract(last_observed_state, '$.decision') IS NULL
+           OR json_extract(last_observed_state, '$.reasonCode') IS NULL
+         )
+       ORDER BY updated_at ASC, created_at ASC, id ASC
+       LIMIT ?`
+    )
+    .all(taskId, ...statuses, `${kindPrefix}%`, limit)
+    .map(mapOperationRow);
+}
+
 export function listOperationsByTask(context: DbContext, taskId: string, limit = 10): OperationRecord[] {
   return context.db
     .prepare(
@@ -1431,6 +1521,31 @@ export function listExpiredLocks(context: DbContext, now = new Date(), limit = 5
        LIMIT ?`
     )
     .all(now.toISOString(), limit)
+    .map(mapLockRow);
+}
+
+export function listExpiredLocksByTask(context: DbContext, taskId: string, now = new Date(), limit = 50): LockRecord[] {
+  return context.db
+    .prepare(
+      `SELECT * FROM (
+         SELECT locks.*
+         FROM locks
+         JOIN workspaces ON workspaces.id = locks.resource_id
+         WHERE locks.resource_kind = 'workspace'
+           AND workspaces.task_id = ?
+           AND locks.expires_at <= ?
+         UNION ALL
+         SELECT locks.*
+         FROM locks
+         JOIN pull_requests ON pull_requests.id = locks.resource_id
+         WHERE locks.resource_kind = 'pr-merge'
+           AND pull_requests.task_id = ?
+           AND locks.expires_at <= ?
+       )
+       ORDER BY expires_at ASC, updated_at ASC, id ASC
+       LIMIT ?`
+    )
+    .all(taskId, now.toISOString(), taskId, now.toISOString(), limit)
     .map(mapLockRow);
 }
 

@@ -16,10 +16,15 @@ import {
   getTask,
   getWorkspace,
   listExpiredLocks,
+  listExpiredLocksByTask,
+  listHumanRequestsByTaskAndStatus,
   listOperationsByStatusAndKindPrefix,
+  listOperationsByTaskStatusAndKindPrefix,
   listHumanRequestsByStatus,
   listTasks,
+  listWorkspacesByTaskAndStatus,
   listWorkspacesByStatus,
+  listWorkflowRunsByTaskAndStatus,
   listWorkflowRunsByStatus,
   updateHumanRequest,
   updateAgentSession,
@@ -75,6 +80,7 @@ const MAX_DAEMON_ARTIFACT_BYTES = 256 * 1024;
 
 export type DaemonRuntimeInput = {
   owner?: string;
+  taskId?: string;
   candidateLimit?: number;
   retryBudget?: number;
   now?: Date;
@@ -137,7 +143,7 @@ function reconcileActiveOperations(
   input: DaemonRuntimeInput,
   touchedWorkflowRunIds: Set<string>
 ): DaemonActionResult[] {
-  const operations = listOperationsByStatusAndKindPrefix(context, ["running", "failed", "unknown"], "daemon:", input.candidateLimit ?? 5)
+  const operations = listDaemonOperations(context, input, "daemon:")
     .filter((operation) => !hasPersistedRecoveryDecision(operation.lastObservedState));
   const actions: DaemonActionResult[] = [];
   for (const operation of operations) {
@@ -317,6 +323,9 @@ function persistOperationRetryDecision(
 export function runDaemonTick(context: DbContext, input: DaemonRuntimeInput = {}): DaemonTickResult {
   const tickId = randomUUID();
   const owner = normalizeOwner(input.owner ?? "daemon");
+  if (input.taskId) {
+    requireTask(context, input.taskId);
+  }
   const now = input.now ?? new Date();
   const actions: DaemonActionResult[] = [];
   const touchedTaskIds = new Set<string>();
@@ -325,7 +334,7 @@ export function runDaemonTick(context: DbContext, input: DaemonRuntimeInput = {}
   appendEvent(context, {
     type: "daemon.tick_started",
     summary: `daemon tick started: ${tickId}`,
-    payload: { tickId, owner },
+    payload: { tickId, owner, taskId: input.taskId },
     severity: "debug"
   });
 
@@ -334,7 +343,7 @@ export function runDaemonTick(context: DbContext, input: DaemonRuntimeInput = {}
   actions.push(...reconcileExpiredLocks(context, tickId, now, input));
   actions.push(...reconcilePullRequestOperations(context, tickId, input, touchedTaskIds));
   actions.push(...reconcileWorkflowActionOperations(context, tickId, input, touchedWorkflowRunIds, touchedTaskIds));
-  actions.push(...watchActiveAgentSessions(context, tickId, owner, now));
+  actions.push(...watchActiveAgentSessions(context, tickId, owner, now, input));
   actions.push(...reconcileWorkflowRuns(context, tickId, owner, input, touchedWorkflowRunIds, touchedTaskIds));
   actions.push(...wakeAnsweredHumanRequests(context, tickId, owner, now, input, touchedTaskIds));
   actions.push(...advanceCandidateTasks(context, tickId, owner, now, input, touchedTaskIds));
@@ -368,7 +377,9 @@ function reconcileWorkspaces(
   input: DaemonRuntimeInput,
   touchedTaskIds: Set<string>
 ): DaemonActionResult[] {
-  const workspaces = listWorkspacesByStatus(context, ["creating", "ready", "dirty"], input.candidateLimit ?? 5);
+  const workspaces = input.taskId
+    ? listWorkspacesByTaskAndStatus(context, input.taskId, ["creating", "ready", "dirty"], input.candidateLimit ?? 5)
+    : listWorkspacesByStatus(context, ["creating", "ready", "dirty"], input.candidateLimit ?? 5);
   const actions: DaemonActionResult[] = [];
   for (const workspace of workspaces) {
     const observation = inspectWorkspaceRecovery(context, {
@@ -397,7 +408,9 @@ function reconcileWorkspaces(
 }
 
 function reconcileExpiredLocks(context: DbContext, tickId: string, now: Date, input: DaemonRuntimeInput): DaemonActionResult[] {
-  const locks = listExpiredLocks(context, now, input.candidateLimit ?? 5)
+  const locks = (input.taskId
+    ? listExpiredLocksByTask(context, input.taskId, now, input.candidateLimit ?? 5)
+    : listExpiredLocks(context, now, input.candidateLimit ?? 5))
     .filter((lock) => (lock.resourceKind === "workspace" || lock.resourceKind === "pr-merge") && !isTerminalLockResource(lock.resourceKind, lock.resourceId));
   const actions: DaemonActionResult[] = [];
   for (const lock of locks) {
@@ -468,7 +481,7 @@ function reconcilePullRequestOperations(
   if (!input.pullRequestProvider) {
     return [];
   }
-  const operations = listOperationsByStatusAndKindPrefix(context, ["running", "failed", "unknown"], "merge", input.candidateLimit ?? 5)
+  const operations = listDaemonOperations(context, input, "merge")
     .filter((operation) => operation.kind === "merge" && operation.prId && !hasPersistedRecoveryDecision(operation.lastObservedState));
   const actions: DaemonActionResult[] = [];
   for (const operation of operations) {
@@ -522,12 +535,15 @@ function reconcileWorkflowActionOperations(
   touchedWorkflowRunIds: Set<string>,
   touchedTaskIds: Set<string>
 ): DaemonActionResult[] {
-  const operations = listOperationsByStatusAndKindPrefix(context, ["running", "failed", "unknown"], "workflow:action", input.candidateLimit ?? 5)
+  const operations = listDaemonOperations(context, input, "workflow:action")
     .filter((operation) => operation.kind === "workflow:action" && !hasPersistedRecoveryDecision(operation.lastObservedState));
   const actions: DaemonActionResult[] = [];
   const inspectedRuns = new Map<string, { observedSummary: string } | { error: Error }>();
   for (const operation of operations) {
     const run = workflowRunFromActionOperation(context, operation);
+    if (run && !isTaskInScope(input, run.taskId)) {
+      continue;
+    }
     if (!run) {
       const decision = decideOperationInspectFailure({
         operation,
@@ -711,7 +727,9 @@ function reconcileWorkflowRuns(
   skippedWorkflowRunIds: Set<string>,
   touchedTaskIds: Set<string>
 ): DaemonActionResult[] {
-  const runs = listWorkflowRunsByStatus(context, ["starting", "running", "blocked", "unknown"], input.candidateLimit ?? 5);
+  const runs = input.taskId
+    ? listWorkflowRunsByTaskAndStatus(context, input.taskId, ["starting", "running", "blocked", "unknown"], input.candidateLimit ?? 5)
+    : listWorkflowRunsByStatus(context, ["starting", "running", "blocked", "unknown"], input.candidateLimit ?? 5);
   const actions: DaemonActionResult[] = [];
   for (const run of runs) {
     if (skippedWorkflowRunIds.has(run.id)) {
@@ -727,7 +745,13 @@ function reconcileWorkflowRuns(
   return actions;
 }
 
-function watchActiveAgentSessions(context: DbContext, tickId: string, owner: string, now: Date): DaemonActionResult[] {
+function watchActiveAgentSessions(
+  context: DbContext,
+  tickId: string,
+  owner: string,
+  now: Date,
+  input: DaemonRuntimeInput
+): DaemonActionResult[] {
   const rows = context.db
     .prepare(
       `SELECT id, project_id, task_id, attempt_id, provider_kind, role, status, updated_at
@@ -747,6 +771,9 @@ function watchActiveAgentSessions(context: DbContext, tickId: string, owner: str
   }>;
   const actions: DaemonActionResult[] = [];
   for (const row of rows) {
+    if (!isTaskInScope(input, row.task_id ?? undefined)) {
+      continue;
+    }
     const ageMs = now.getTime() - Date.parse(row.updated_at);
     if (Number.isNaN(ageMs) || ageMs < DEFAULT_AGENT_STALLED_MS) {
       continue;
@@ -935,7 +962,9 @@ function wakeAnsweredHumanRequests(
   input: DaemonRuntimeInput,
   touchedTaskIds: Set<string>
 ): DaemonActionResult[] {
-  const requests = listHumanRequestsByStatus(context, ["answered"], input.candidateLimit ?? 5);
+  const requests = input.taskId
+    ? listHumanRequestsByTaskAndStatus(context, input.taskId, ["answered"], input.candidateLimit ?? 5)
+    : listHumanRequestsByStatus(context, ["answered"], input.candidateLimit ?? 5);
   return requests.flatMap((request) => {
     const actions = wakeAnsweredHumanRequest(context, request, tickId, owner, now, input);
     touchedTaskIds.add(request.taskId);
@@ -1059,10 +1088,12 @@ function advanceCandidateTasks(
   input: DaemonRuntimeInput,
   touchedTaskIds: Set<string>
 ): DaemonActionResult[] {
-  const tasks = listTasks(context, {
-    statuses: ["created", "planning", "human_answered", "running", "resuming"],
-    limit: input.candidateLimit ?? DEFAULT_DAEMON_CANDIDATE_LIMIT
-  });
+  const tasks = input.taskId
+    ? [requireTask(context, input.taskId)].filter((task) => ["created", "planning", "human_answered", "running", "resuming"].includes(task.status))
+    : listTasks(context, {
+        statuses: ["created", "planning", "human_answered", "running", "resuming"],
+        limit: input.candidateLimit ?? DEFAULT_DAEMON_CANDIDATE_LIMIT
+      });
   const actions: DaemonActionResult[] = [];
   for (const task of tasks) {
     if (touchedTaskIds.has(task.id)) {
@@ -1075,6 +1106,19 @@ function advanceCandidateTasks(
     }
   }
   return actions;
+}
+
+function isTaskInScope(input: DaemonRuntimeInput, taskId: string | undefined): boolean {
+  return !input.taskId || taskId === input.taskId;
+}
+
+function listDaemonOperations(context: DbContext, input: DaemonRuntimeInput, kindPrefix: string): OperationRecord[] {
+  const statuses = ["running", "failed", "unknown"];
+  const limit = input.candidateLimit ?? 5;
+  // 单任务 operator run 需要先按 task 过滤再 LIMIT，避免目标 task 被全局候选窗口饿死。
+  return input.taskId
+    ? listOperationsByTaskStatusAndKindPrefix(context, input.taskId, statuses, kindPrefix, limit)
+    : listOperationsByStatusAndKindPrefix(context, statuses, kindPrefix, limit);
 }
 
 function advanceTaskWithAgent(

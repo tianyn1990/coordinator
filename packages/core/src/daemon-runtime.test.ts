@@ -564,6 +564,52 @@ describe("daemon runtime", () => {
     expect(payloadText).not.toContain("redacted-token");
   });
 
+  it("task-scoped expired lock 先按 task 过滤再 LIMIT", () => {
+    const databasePath = createMigratedDatabase();
+    const target = createReadyWorkspaceFixture(databasePath, "lock-target-scope");
+    const now = new Date("2026-05-03T00:00:10.000Z");
+
+    withDatabase(databasePath, (context) => {
+      for (let index = 0; index < 6; index += 1) {
+        const other = createReadyWorkspaceFixture(databasePath, `lock-other-${index}`);
+        acquireLock(context, {
+          resourceKind: "workspace",
+          resourceId: other.workspaceId,
+          owner: "old-owner",
+          ttlMs: 1000,
+          now: new Date(`2026-05-03T00:00:0${index}.000Z`)
+        });
+      }
+      acquireLock(context, {
+        resourceKind: "workspace",
+        resourceId: target.workspaceId,
+        owner: "old-owner",
+        ttlMs: 1000,
+        now: new Date("2026-05-03T00:00:07.000Z")
+      });
+    });
+
+    const result = withDatabase(databasePath, (context) =>
+      runDaemonTick(context, {
+        taskId: target.taskId,
+        candidateLimit: 1,
+        now,
+        provider: new FakeAgentProvider("no-op"),
+        workspaceGitRunner: target.workspaceGitRunner
+      })
+    );
+
+    expect(result.actions).toContainEqual(
+      expect.objectContaining({
+        kind: "lock_reconciled",
+        taskId: target.taskId,
+        workspaceId: target.workspaceId
+      })
+    );
+    const lock = withDatabase(databasePath, (context) => getLock(context, "workspace", target.workspaceId));
+    expect(lock).toBeUndefined();
+  });
+
   it("daemon 对 owner active 的 expired workspace lock 不释放", () => {
     const databasePath = createMigratedDatabase();
     const fixture = createReadyWorkspaceFixture(databasePath, "lock-owner-active");
@@ -900,6 +946,35 @@ describe("daemon runtime", () => {
       reasonCode: "operation-matches-intent",
       resourceKind: "operation"
     });
+  });
+
+  it("task-scoped daemon tick 只推进指定 task", () => {
+    const databasePath = createMigratedDatabase();
+    withDatabase(databasePath, (context) => {
+      const project = createProject(context, {
+        id: "project-daemon-scoped",
+        name: "daemon-scoped",
+        workspaceRoot: mkdtempSync(join(tmpdir(), "coordinator-daemon-scoped-workspaces-")),
+        outerAgentDefaultProvider: "fake"
+      });
+      createTask(context, { id: "task-daemon-scope-a", projectId: project.id, title: "scope a" });
+      createTask(context, { id: "task-daemon-scope-b", projectId: project.id, title: "scope b" });
+    });
+
+    const result = withDatabase(databasePath, (context) =>
+      runDaemonTick(context, {
+        taskId: "task-daemon-scope-b",
+        provider: new FakeAgentProvider("只输出建议，不请求工具。"),
+        candidateLimit: 10
+      })
+    );
+
+    expect(result.actions).toEqual([
+      expect.objectContaining({
+        kind: "agent_tool_skipped",
+        taskId: "task-daemon-scope-b"
+      })
+    ]);
   });
 
   it("daemon operation replay 不会被已处理 daemon operation 挤出候选窗口", () => {
@@ -1624,6 +1699,86 @@ describe("daemon runtime", () => {
     expect(JSON.stringify(events)).not.toContain("lockToken");
     expect(JSON.stringify(events)).not.toContain("completeOperationJson");
     expect(operation.last_observed_state).not.toContain("secret-provider-output");
+  });
+
+  it("task-scoped workflow inspect 先按 task 过滤再 LIMIT", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createTaskFixture(databasePath);
+    const runner: WorkflowProtocolRunner = () =>
+      JSON.stringify({
+        runId: "inner-target-scope",
+        profile: "feature",
+        lifecycle: "active",
+        summary: "scoped workflow inspected",
+        handoff: { available: false, artifacts: [] }
+      });
+    let targetBranch = "";
+
+    withDatabase(databasePath, (context) => {
+      for (let index = 0; index < 6; index += 1) {
+        createTask(context, {
+          id: `task-daemon-other-${index}`,
+          projectId: fixture.projectId,
+          title: `other ${index}`
+        });
+        const otherWorkspace = createWorkflowWorkspaceFixture(
+          context,
+          { ...fixture, taskId: `task-daemon-other-${index}` },
+          `workflow-run-other-${index}`
+        );
+        context.db
+          .prepare(
+            `INSERT INTO workflow_runs (id, project_id, task_id, attempt_id, profile_id, status, external_id, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          )
+          .run(
+            `workflow-run-other-${index}`,
+            fixture.projectId,
+            `task-daemon-other-${index}`,
+            otherWorkspace.attempt.id,
+            "feature",
+            "running",
+            `inner-other-${index}`,
+            `2026-05-01T00:00:0${index}.000Z`,
+            `2026-05-01T00:00:0${index}.000Z`
+          );
+      }
+      const targetWorkspace = createWorkflowWorkspaceFixture(context, fixture, "workflow-run-target-scope");
+      targetBranch = targetWorkspace.branch;
+      context.db
+        .prepare(
+          `INSERT INTO workflow_runs (id, project_id, task_id, attempt_id, profile_id, status, external_id, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          "workflow-run-target-scope",
+          fixture.projectId,
+          fixture.taskId,
+          targetWorkspace.attempt.id,
+          "feature",
+          "running",
+          "inner-target-scope",
+          "2026-05-01T00:01:00.000Z",
+          "2026-05-01T00:01:00.000Z"
+        );
+    });
+
+    const result = withDatabase(databasePath, (context) =>
+      runDaemonTick(context, {
+        taskId: fixture.taskId,
+        candidateLimit: 1,
+        workflowInspectRunner: runner,
+        workspaceGitRunner: createWorkflowWorkspaceGitRunner(targetBranch)
+      })
+    );
+
+    expect(result.actions).toContainEqual(
+      expect.objectContaining({
+        kind: "workflow_inspected",
+        taskId: fixture.taskId,
+        workflowRunId: "workflow-run-target-scope"
+      })
+    );
   });
 
   it("workflow runId mismatch 进入 recovery decision，不推进 completed 或 pr_ready", () => {

@@ -83,7 +83,7 @@ textarea {
 
 .global-bar {
   display: grid;
-  grid-template-columns: minmax(240px, 1.2fr) minmax(180px, 1fr) auto auto;
+  grid-template-columns: minmax(300px, 1.2fr) minmax(180px, 1fr) auto auto;
   align-items: center;
   gap: 14px;
   border: 1px solid #223940;
@@ -127,7 +127,8 @@ textarea {
 
 .brand-mark h1 {
   font-size: 24px;
-  overflow-wrap: anywhere;
+  line-height: 1.05;
+  overflow-wrap: normal;
 }
 
 .brand-mark span,
@@ -242,7 +243,9 @@ textarea {
 .board-section,
 .classic-shell,
 .panel,
-.summary-band {
+.summary-band,
+.run-banner,
+.page-hero {
   border: 1px solid #223940;
   border-radius: 10px;
   background: rgba(10, 20, 24, 0.94);
@@ -453,7 +456,14 @@ textarea {
 
 .inbox-list,
 .quick-task,
-.quick-task label {
+.quick-task label,
+.shortcut-stack,
+.new-task-form,
+.new-task-form label,
+.admin-form,
+.admin-form label,
+.pr-form,
+.project-admin-list {
   display: grid;
   gap: 10px;
 }
@@ -491,6 +501,116 @@ textarea {
   color: #a8bdc2;
   font-size: 13px;
   font-weight: 800;
+}
+
+.run-banner,
+.page-hero {
+  max-width: 1520px;
+  margin: 14px auto 0;
+  padding: 16px;
+}
+
+.run-log {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.run-log-item,
+.admin-card,
+.attachment-placeholder {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+  border: 1px solid #223940;
+  border-radius: 8px;
+  background: #0d171b;
+  padding: 12px;
+}
+
+.run-log-item strong,
+.admin-card strong {
+  color: #7ee7ef;
+}
+
+.run-log-item span {
+  color: #ffc766;
+  font-size: 12px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.run-log-item small,
+.admin-card small,
+.admin-card p,
+.page-hero p {
+  color: #9eb5ba;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.page-hero {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.page-hero h2 {
+  font-size: 28px;
+  margin: 0 0 8px;
+}
+
+.new-task-shell,
+.admin-shell {
+  display: grid;
+  max-width: 1520px;
+  gap: 14px;
+  margin: 0 auto;
+}
+
+.new-task-grid,
+.admin-grid {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.42fr) minmax(0, 1fr);
+  gap: 14px;
+}
+
+.new-task-form label,
+.admin-form label,
+.pr-form {
+  color: #a8bdc2;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.new-task-form textarea {
+  min-height: 0;
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.new-task-sidebar {
+  align-content: start;
+}
+
+.attachment-placeholder {
+  border-style: dashed;
+}
+
+.pr-panel,
+.merge-box {
+  display: grid;
+  gap: 10px;
+}
+
+.pr-panel.compact {
+  padding: 0;
+  border: 0;
+  background: transparent;
 }
 
 .classic-shell {
@@ -1112,13 +1232,16 @@ textarea {
 
 @media (max-width: 1180px) {
   .global-bar,
-  .workbench-grid {
+  .workbench-grid,
+  .new-task-grid,
+  .admin-grid {
     grid-template-columns: 1fr;
   }
 
   .cockpit-header,
   .cockpit-grid,
-  .debug-grid {
+  .debug-grid,
+  .run-log {
     grid-template-columns: 1fr;
   }
 
@@ -1147,6 +1270,10 @@ textarea {
     justify-content: flex-start;
   }
 
+  .page-hero {
+    flex-direction: column;
+  }
+
   .brand-mark span {
     max-width: 100%;
     overflow-wrap: anywhere;
@@ -1162,6 +1289,7 @@ textarea {
   .detail-grid,
   .surface-grid,
   .summary-band,
+  .form-grid,
   .diagnosis-grid,
   .diagnosis-columns {
     grid-template-columns: 1fr;

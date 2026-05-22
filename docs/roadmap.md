@@ -156,13 +156,15 @@ P2 只预留接口和规划，不进入 V1 完成标准：
 
 ### 当前进度
 
-- 当前阶段：`Iteration 13: Web Developer Workbench` 已完成 `Slice 13.2: Task Cockpit 与 Workflow Lens`。
-- 当前 OpenSpec change：`add-task-cockpit-workflow-lens` 已完成实现、验证、独立 review 和归档；归档后位置为 `openspec/changes/archive/2026-05-21-add-task-cockpit-workflow-lens`。
-- 当前正式规格：已同步到 `openspec/specs/web-human-review-surface/spec.md` 和 `openspec/specs/observability/spec.md`；其他既有规格继续保持当前基线。
-- 当前已落地事实：Web 默认视图已从单任务 debug console 调整为多工程、多任务 Developer Workbench；任务卡片默认通过 `Open` 进入 Task Cockpit，也可通过 `Debug` 进入 Classic Debug；Task Cockpit 已展示 Outer Flow、Workflow Lens、Evidence / Actions 和默认折叠 Debug Drawer；Workflow Lens 从现有 task detail/events/workflowRuns 做只读投影，缺少 stage/substate/progress/stageArtifacts 时使用 unknown/none/fallback，不读取 `.workflow` private state，不扩大 Coordinator Agent Surface。
-- 当前验证结果：`pnpm --filter @coordinator/web build`、`pnpm typecheck`、`pnpm test -- apps/api/src/server.test.ts`、`openspec validate add-task-cockpit-workflow-lens --strict`、`openspec validate --all --strict` 均已通过；本地 API/Web 基于 `.coordinator-smoke/actioninputs-0.6.9/coordinator.sqlite` 做了 PC 端浏览器验证，确认 Task Cockpit 能展示真实 running workflow 的 inspect-only 文案；窄屏只做基本兜底检查，交互与视觉细节留到后续统一设计调整。
-- 下一阶段：按用户确认后进入 `Slice 13.3: Task Creation、Project Admin 与 Run Until Blocked`。
-- 下一阶段重点：让 Web 支持更好的任务创建和工程管理入口，并保持 run-until-blocked 仍由 Core/daemon/workflow protocol 控制，不让前端直接执行 workflow action 或绕过人类确认边界。
+- 当前阶段：`Iteration 13: Web Developer Workbench` 已完成 `Slice 13.3: Task Creation、Project Admin 与 Run Until Blocked`。
+- 当前 OpenSpec change：`complete-web-task-project-operations` 已完成实现、验证、独立 review 和归档；归档后位置为 `openspec/changes/archive/2026-05-22-complete-web-task-project-operations`。
+- 当前正式规格：已同步到 `openspec/specs/web-human-review-surface/spec.md`、`openspec/specs/project-registry/spec.md` 和 `openspec/specs/operator-task-controls/spec.md`；其他既有规格继续保持当前基线。
+- 当前已落地事实：Web 已将 New Task 从侧栏小表单提升为完整任务下达页面，支持更长文本编辑、acceptance criteria、constraints、autonomy、workflow hint/default 说明和附件占位；Project Admin 已支持查看 project registry 摘要和注册 project，并明确 workspace init/cleanup hook 与 retention policy 仍是 disabled 预留，不执行脚本副作用；Task Cockpit 和 Workbench 已支持 `Run until blocked` operator loop，只循环调用 Core API 的 daemon tick 与 refresh/inspect，不自动执行 workflow action；Task Cockpit 和 Classic Debug 已补齐 create/update PR/MR、inspect review、request merge approval 的 operator actions，approve/reject/merge 仍由 Core gate 校验。
+- 当前可靠性补强：`/daemon/tick` 支持 operator-only task scope；Core daemon runtime 在 task scope 下先按 task 过滤 operations、workspaces、workflow runs、human requests 和 expired workspace/pr-merge locks，再应用 candidate limit，避免单任务 run-until-blocked 被其它任务的全局候选窗口 starvation；全局 run-until-blocked 仍是 operator convenience，不成为 Core 状态机。
+- 当前验证结果：`pnpm test -- packages/core/src/daemon-runtime.test.ts apps/api/src/server.test.ts`、`pnpm typecheck`、`pnpm --filter @coordinator/db build`、`pnpm --filter @coordinator/core build`、`pnpm --filter @coordinator/api build`、`pnpm --filter @coordinator/web build`、`openspec validate complete-web-task-project-operations --strict` 和 `openspec validate --all --strict` 均已通过；本地 API/Web 基于 `.coordinator-smoke/actioninputs-0.6.9/coordinator.sqlite` 做了 PC 端浏览器验证，确认 New Task、Project Admin、Run Until Blocked、Task Cockpit PR/MR actions 的主要布局和交互无明显阻断；移动端和 PC 细节视觉留到后续统一设计调整。
+- 当前 review 结论：独立 `gpt-5.5 high` subagent 已确认无 must-fix，未发现 workflow action 自动执行、Web 成为 truth source、Web/Core/daemon 分层污染、Coordinator Agent Surface 扩大、复杂 workflow JSON 暴露或明显过度设计问题；残留风险是全局 run-until-blocked 的停止解释仍偏向当前 detail 聚合精度，不影响 task-scoped 安全性。
+- 下一阶段：暂停等待用户确认后，再进入下一轮 Web 体验细调或后续 P1/P2 hardening 切片。
+- 下一阶段重点：优先按 PC 端真实使用流程检查任务管理、任务详情、确认操作和 PR/MR 操作的交互质量；视觉细节可集中到单独样式迭代处理，不把移动端深度适配作为当前主线。
 
 ### Iteration 12 后续切片顺序
 

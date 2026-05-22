@@ -6,8 +6,19 @@ import "./styles.css";
 type Project = {
   id: string;
   name: string;
+  repoPath?: string;
+  repoUrl?: string;
+  gitProviderKind?: string;
+  gitProviderHost?: string;
   defaultBranch?: string;
+  prProviderKind?: string;
+  workspaceRoot?: string;
+  workflowLauncher?: string;
+  outerAgentDefaultProvider?: string;
+  innerAgentDefaultProvider?: string;
   registrationStatus?: string;
+  registryNotes?: unknown;
+  stateVersion?: number;
 };
 
 type TaskListItem = {
@@ -176,7 +187,56 @@ type Flash = {
   message: string;
 };
 
-type ViewMode = "workbench" | "task-cockpit" | "classic-debug";
+type ProjectRegistrationResponse = {
+  project?: Project;
+  blocked: boolean;
+  blockers: string[];
+  detected?: {
+    repoUrl?: string;
+    gitProviderKind?: string;
+    gitProviderHost?: string;
+    remoteHeadBranch?: string;
+  };
+};
+
+type ViewMode = "workbench" | "task-cockpit" | "classic-debug" | "new-task" | "project-admin";
+
+type DaemonTickAction = {
+  kind: string;
+  taskId?: string;
+  workflowRunId?: string;
+  status: string;
+  summary: string;
+};
+
+type DaemonTickResult = {
+  tickId: string;
+  status: string;
+  actions: DaemonTickAction[];
+};
+
+type RunTickLog = {
+  index: number;
+  status: string;
+  actions: DaemonTickAction[];
+};
+
+type RunUntilBlockedState = {
+  running: boolean;
+  scope: "global" | "task";
+  taskId?: string;
+  tickCount: number;
+  maxTicks: number;
+  logs: RunTickLog[];
+  stopReason?: string;
+};
+
+type RefreshSnapshot = {
+  projects: Project[];
+  tasks: TaskListItem[];
+  details: Record<string, TaskDetail>;
+  detail?: TaskDetail;
+};
 
 type ProjectRailItem = {
   id: string;
@@ -282,6 +342,7 @@ type TaskCockpitModel = {
 };
 
 const apiBase = import.meta.env.VITE_COORDINATOR_API_BASE ?? "http://127.0.0.1:4310";
+const RUN_UNTIL_BLOCKED_MAX_TICKS = 8;
 
 function App() {
   const [projects, setProjects] = useState<Project[]>([]);
@@ -293,8 +354,9 @@ function App() {
   const [detail, setDetail] = useState<TaskDetail | undefined>();
   const [loading, setLoading] = useState(false);
   const [flash, setFlash] = useState<Flash | undefined>();
+  const [runState, setRunState] = useState<RunUntilBlockedState | undefined>();
 
-  async function refresh(nextTaskId = selectedTaskId) {
+  async function refresh(nextTaskId = selectedTaskId): Promise<RefreshSnapshot | undefined> {
     setLoading(true);
     try {
       const [projectResult, taskResult] = await Promise.all([
@@ -307,9 +369,17 @@ function App() {
       setSelectedTaskId(taskId);
       const hydratedDetails = await hydrateTaskDetails(taskResult.tasks);
       setTaskDetails(hydratedDetails);
-      setDetail(taskId ? hydratedDetails[taskId] ?? (await request<TaskDetail>(`/tasks/${taskId}`)) : undefined);
+      const nextDetail = taskId ? hydratedDetails[taskId] ?? (await request<TaskDetail>(`/tasks/${taskId}`)) : undefined;
+      setDetail(nextDetail);
+      return {
+        projects: projectResult.projects,
+        tasks: taskResult.tasks,
+        details: hydratedDetails,
+        detail: nextDetail
+      };
     } catch (error) {
       setFlash({ tone: "error", message: error instanceof Error ? error.message : String(error) });
+      return undefined;
     } finally {
       setLoading(false);
     }
@@ -338,22 +408,61 @@ function App() {
     await selectTask(taskId);
   }
 
-  async function createTask(event: React.FormEvent<HTMLFormElement>) {
+  function extractTaskPayload(form: FormData): {
+    projectId: string;
+    title: string;
+    description: string;
+    autonomy: "conservative" | "balanced" | "aggressive";
+    background: string;
+    acceptanceCriteria: string;
+    constraints: string;
+    workflowHint: string;
+  } {
+    const description = [
+      String(form.get("description") ?? "").trim(),
+      String(form.get("background") ?? "").trim() ? `\n\n背景\n${String(form.get("background") ?? "").trim()}` : "",
+      String(form.get("acceptanceCriteria") ?? "").trim() ? `\n\n验收标准\n${String(form.get("acceptanceCriteria") ?? "").trim()}` : "",
+      String(form.get("constraints") ?? "").trim() ? `\n\n约束\n${String(form.get("constraints") ?? "").trim()}` : "",
+      String(form.get("workflowHint") ?? "").trim() ? `\n\nworkflow hint\n${String(form.get("workflowHint") ?? "").trim()}` : ""
+    ]
+      .filter((segment) => segment.length > 0)
+      .join("");
+    return {
+      projectId: String(form.get("projectId") ?? ""),
+      title: String(form.get("title") ?? ""),
+      description,
+      autonomy: (String(form.get("autonomy") ?? "balanced") as "conservative" | "balanced" | "aggressive") ?? "balanced",
+      background: String(form.get("background") ?? ""),
+      acceptanceCriteria: String(form.get("acceptanceCriteria") ?? ""),
+      constraints: String(form.get("constraints") ?? ""),
+      workflowHint: String(form.get("workflowHint") ?? "")
+    };
+  }
+
+  async function createTask(event: React.FormEvent<HTMLFormElement>, options?: { runUntilBlocked?: boolean }) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
+    const payload = extractTaskPayload(form);
     try {
       const result = await request<{ task: TaskListItem }>("/tasks", {
         method: "POST",
         body: JSON.stringify({
-          projectId: String(form.get("projectId") ?? ""),
-          title: String(form.get("title") ?? ""),
-          description: String(form.get("description") ?? ""),
-          autonomy: String(form.get("autonomy") ?? "balanced")
+          projectId: payload.projectId,
+          title: payload.title,
+          description: payload.description,
+          autonomy: payload.autonomy
         })
       });
       event.currentTarget.reset();
-      setFlash({ tone: "ok", message: "manual task 已创建" });
-      await refresh(result.task.id);
+      setFlash({
+        tone: "ok",
+        message: options?.runUntilBlocked ? "manual task 已创建，准备进入 run until blocked" : "manual task 已创建"
+      });
+      const snapshot = await refresh(result.task.id);
+      if (options?.runUntilBlocked && snapshot?.detail) {
+        setViewMode("task-cockpit");
+        await runUntilBlockedForTask(snapshot.detail.task.id, snapshot.detail);
+      }
     } catch (error) {
       setFlash({ tone: "error", message: error instanceof Error ? error.message : String(error) });
     }
@@ -386,6 +495,180 @@ function App() {
       });
       setFlash({ tone: "ok", message: `daemon tick: ${result.status}, actions=${result.actions.length}` });
       await refresh();
+    } catch (error) {
+      setFlash({ tone: "error", message: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  async function runUntilBlockedForTask(taskId?: string, initialDetail?: TaskDetail) {
+    const seedDetail = initialDetail ?? (taskId ? taskDetails[taskId] ?? (await request<TaskDetail>(`/tasks/${taskId}`)) : undefined);
+    if (!taskId && !seedDetail) {
+      setFlash({ tone: "error", message: "没有可推进的 task" });
+      return;
+    }
+    setRunState({
+      running: true,
+      scope: taskId ? "task" : "global",
+      taskId,
+      tickCount: 0,
+      maxTicks: RUN_UNTIL_BLOCKED_MAX_TICKS,
+      logs: [],
+      stopReason: undefined
+    });
+
+    let currentDetail = seedDetail;
+    let logs: RunTickLog[] = [];
+    let stopReason = "未达到停止条件";
+    try {
+      for (let index = 1; index <= RUN_UNTIL_BLOCKED_MAX_TICKS; index += 1) {
+        const tick = await request<DaemonTickResult>("/daemon/tick", {
+          method: "POST",
+          body: JSON.stringify({ owner: "web-operator", candidateLimit: 5, taskId })
+        });
+        logs = [...logs, { index, status: tick.status, actions: tick.actions }];
+        const snapshot = await refresh(taskId ?? currentDetail?.task.id);
+        currentDetail = taskId ? snapshot?.detail : snapshot?.detail ?? currentDetail;
+        const stop = describeRunStopReason(currentDetail, tick, index, RUN_UNTIL_BLOCKED_MAX_TICKS, taskId ? "task" : "global");
+        if (stop.stop) {
+          stopReason = stop.reason;
+          setRunState({
+            running: false,
+            scope: taskId ? "task" : "global",
+            taskId,
+            tickCount: index,
+            maxTicks: RUN_UNTIL_BLOCKED_MAX_TICKS,
+            logs,
+            stopReason
+          });
+          setFlash({ tone: "ok", message: stopReason });
+          return;
+        }
+      }
+      stopReason = `已达到最大轮数 ${RUN_UNTIL_BLOCKED_MAX_TICKS}，停止继续推进`;
+      setRunState({
+        running: false,
+        scope: taskId ? "task" : "global",
+        taskId,
+        tickCount: RUN_UNTIL_BLOCKED_MAX_TICKS,
+        maxTicks: RUN_UNTIL_BLOCKED_MAX_TICKS,
+        logs,
+        stopReason
+      });
+      setFlash({ tone: "ok", message: stopReason });
+    } catch (error) {
+      stopReason = `已停止：run until blocked 执行失败 - ${error instanceof Error ? error.message : String(error)}`;
+      setRunState({
+        running: false,
+        scope: taskId ? "task" : "global",
+        taskId,
+        tickCount: logs.length,
+        maxTicks: RUN_UNTIL_BLOCKED_MAX_TICKS,
+        logs,
+        stopReason
+      });
+      setFlash({ tone: "error", message: stopReason });
+    }
+  }
+
+  async function runUntilBlockedGlobal() {
+    await runUntilBlockedForTask(undefined, detail);
+  }
+
+  async function runUntilBlockedCurrent() {
+    if (!detail) return;
+    await runUntilBlockedForTask(detail.task.id, detail);
+  }
+
+  async function createProject(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    try {
+      const result = await request<ProjectRegistrationResponse>(
+        "/projects/register",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            repoPath: String(form.get("repoPath") ?? ""),
+            name: String(form.get("name") ?? ""),
+            providerOverride: String(form.get("providerOverride") ?? "") || undefined,
+            confirmedDefaultBranch: String(form.get("confirmedDefaultBranch") ?? "") || undefined,
+            workflowLauncher: String(form.get("workflowLauncher") ?? "") || undefined,
+            outerAgentDefaultProvider: String(form.get("outerAgentDefaultProvider") ?? "") || undefined,
+            innerAgentDefaultProvider: String(form.get("innerAgentDefaultProvider") ?? "") || undefined,
+            workspaceRoot: String(form.get("workspaceRoot") ?? "") || undefined
+          })
+        }
+      );
+      if (result.blocked) {
+        const detectedBranch = result.detected?.remoteHeadBranch ? `；检测到 remote HEAD: ${result.detected.remoteHeadBranch}` : "";
+        setFlash({ tone: "error", message: `project registry 未保存：${result.blockers.join(", ")}${detectedBranch}` });
+        return result;
+      }
+      setFlash({ tone: "ok", message: "project registry 已更新" });
+      event.currentTarget.reset();
+      await refresh();
+      return result;
+    } catch (error) {
+      setFlash({ tone: "error", message: error instanceof Error ? error.message : String(error) });
+      return undefined;
+    }
+  }
+
+  async function createPullRequest(taskId: string, form: FormData) {
+    try {
+      await request(`/tasks/${taskId}/pull-requests`, {
+        method: "POST",
+        body: JSON.stringify({
+          title: String(form.get("title") ?? ""),
+          bodyArtifact: String(form.get("bodyArtifact") ?? ""),
+          actor: String(form.get("actor") ?? "web-operator")
+        })
+      });
+      setFlash({ tone: "ok", message: "PR/MR create 已触发，结果以 Core/provider 返回为准" });
+      await refresh(taskId);
+    } catch (error) {
+      setFlash({ tone: "error", message: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  async function updatePullRequest(taskId: string, prId: string, form: FormData) {
+    try {
+      await request(`/tasks/${taskId}/pull-requests/${prId}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          title: String(form.get("title") ?? "") || undefined,
+          bodyArtifact: String(form.get("bodyArtifact") ?? "") || undefined,
+          actor: String(form.get("actor") ?? "web-operator")
+        })
+      });
+      setFlash({ tone: "ok", message: "PR/MR update 已触发" });
+      await refresh(taskId);
+    } catch (error) {
+      setFlash({ tone: "error", message: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  async function inspectReview(taskId: string, prId: string) {
+    try {
+      await request(`/tasks/${taskId}/pull-requests/${prId}/inspect-review`, { method: "POST" });
+      setFlash({ tone: "ok", message: "PR/MR review inspect 已触发" });
+      await refresh(taskId);
+    } catch (error) {
+      setFlash({ tone: "error", message: error instanceof Error ? error.message : String(error) });
+    }
+  }
+
+  async function requestApproval(taskId: string, prId: string, form: FormData) {
+    try {
+      await request(`/tasks/${taskId}/pull-requests/${prId}/request-merge-approval`, {
+        method: "POST",
+        body: JSON.stringify({
+          artifact: String(form.get("artifact") ?? ""),
+          actor: String(form.get("actor") ?? "web-operator")
+        })
+      });
+      setFlash({ tone: "ok", message: "merge approval request 已触发" });
+      await refresh(taskId);
     } catch (error) {
       setFlash({ tone: "error", message: error instanceof Error ? error.message : String(error) });
     }
@@ -458,6 +741,12 @@ function App() {
           <button type="button" className={viewMode === "workbench" ? "tab active" : "tab"} onClick={() => setViewMode("workbench")}>
             Workbench
           </button>
+          <button type="button" className={viewMode === "new-task" ? "tab active" : "tab"} onClick={() => setViewMode("new-task")}>
+            New Task
+          </button>
+          <button type="button" className={viewMode === "project-admin" ? "tab active" : "tab"} onClick={() => setViewMode("project-admin")}>
+            Projects
+          </button>
           <button
             type="button"
             className={viewMode === "task-cockpit" ? "tab active" : "tab"}
@@ -474,15 +763,15 @@ function App() {
           >
             Classic Debug
           </button>
-          <button type="button" className="tab ghost" disabled title="Project Admin 会在后续迭代实现">
-            Projects
-          </button>
         </nav>
         <div className="actions">
           <button type="button" onClick={() => void refresh()} disabled={loading}>
             Refresh
           </button>
-          <button type="button" onClick={() => void runDaemonTick()}>
+          <button type="button" onClick={() => void runUntilBlockedGlobal()} disabled={runState?.running}>
+            Run until blocked
+          </button>
+          <button type="button" onClick={() => void runDaemonTick()} disabled={runState?.running}>
             Daemon tick
           </button>
         </div>
@@ -490,7 +779,18 @@ function App() {
 
       {flash ? <p className={`flash ${flash.tone}`}>{flash.message}</p> : null}
 
-      {viewMode === "classic-debug" && detail ? (
+      {runState ? <RunUntilBlockedBanner state={runState} /> : null}
+
+      {viewMode === "project-admin" ? (
+        <ProjectAdminView projects={projects} onRegisterProject={createProject} />
+      ) : viewMode === "new-task" ? (
+        <NewTaskView
+          projects={projects}
+          onCreateTask={(event) => void createTask(event)}
+          onCreateAndRun={(event) => void createTask(event, { runUntilBlocked: true })}
+          onRunUntilBlocked={() => void runUntilBlockedGlobal()}
+        />
+      ) : viewMode === "classic-debug" && detail ? (
         <section className="workspace classic-shell">
           <div className="topbar">
             <div>
@@ -512,6 +812,10 @@ function App() {
             onDecideMerge={decideMerge}
             onMerge={mergeAfterApproval}
             onTaskControl={controlTask}
+            onCreatePullRequest={createPullRequest}
+            onUpdatePullRequest={updatePullRequest}
+            onInspectReview={inspectReview}
+            onRequestApproval={requestApproval}
           />
         </section>
       ) : viewMode === "task-cockpit" && detail ? (
@@ -523,6 +827,11 @@ function App() {
           onDecideMerge={decideMerge}
           onMerge={mergeAfterApproval}
           onTaskControl={controlTask}
+          onRunUntilBlocked={() => void runUntilBlockedCurrent()}
+          onCreatePullRequest={createPullRequest}
+          onUpdatePullRequest={updatePullRequest}
+          onInspectReview={inspectReview}
+          onRequestApproval={requestApproval}
         />
       ) : (
         <DeveloperWorkbench
@@ -533,7 +842,9 @@ function App() {
           selectedTaskId={selectedTaskId}
           onOpenTask={(taskId) => void openTask(taskId, "task-cockpit")}
           onOpenClassicDebug={(taskId) => void openTask(taskId, "classic-debug")}
-          onCreateTask={createTask}
+          onOpenNewTask={() => setViewMode("new-task")}
+          onOpenProjectAdmin={() => setViewMode("project-admin")}
+          onRunUntilBlocked={() => void runUntilBlockedGlobal()}
         />
       )}
     </main>
@@ -548,7 +859,9 @@ function DeveloperWorkbench({
   selectedTaskId,
   onOpenTask,
   onOpenClassicDebug,
-  onCreateTask
+  onOpenNewTask,
+  onOpenProjectAdmin,
+  onRunUntilBlocked
 }: {
   projects: Project[];
   selectedProjectId: string;
@@ -557,7 +870,9 @@ function DeveloperWorkbench({
   selectedTaskId?: string;
   onOpenTask: (taskId: string) => void;
   onOpenClassicDebug: (taskId: string) => void;
-  onCreateTask: (event: React.FormEvent<HTMLFormElement>) => void;
+  onOpenNewTask: () => void;
+  onOpenProjectAdmin: () => void;
+  onRunUntilBlocked: () => void;
 }) {
   return (
     <div className="workbench-grid">
@@ -578,7 +893,12 @@ function DeveloperWorkbench({
       </section>
       <aside className="action-column">
         <ActionInbox items={model.inbox} onOpenTask={onOpenTask} />
-        <QuickTaskComposer projects={projects} onCreateTask={onCreateTask} />
+        <QuickTaskLauncher
+          projects={projects}
+          onOpenNewTask={onOpenNewTask}
+          onOpenProjectAdmin={onOpenProjectAdmin}
+          onRunUntilBlocked={onRunUntilBlocked}
+        />
       </aside>
     </div>
   );
@@ -631,9 +951,9 @@ function ProjectRail({
           </small>
         </button>
       ))}
-      <button type="button" className="project-pill disabled" disabled title="Project Admin 会在后续迭代实现">
+      <button type="button" className="project-pill disabled" disabled title="Project Admin 已迁移到顶层导航">
         <span>Register project</span>
-        <small>planned in Slice 13.3</small>
+        <small>use Projects tab</small>
       </button>
     </aside>
   );
@@ -802,42 +1122,36 @@ function ActionInbox({ items, onOpenTask }: { items: ActionInboxItem[]; onOpenTa
   );
 }
 
-function QuickTaskComposer({ projects, onCreateTask }: { projects: Project[]; onCreateTask: (event: React.FormEvent<HTMLFormElement>) => void }) {
+function QuickTaskLauncher({
+  projects,
+  onOpenNewTask,
+  onOpenProjectAdmin,
+  onRunUntilBlocked
+}: {
+  projects: Project[];
+  onOpenNewTask: () => void;
+  onOpenProjectAdmin: () => void;
+  onRunUntilBlocked: () => void;
+}) {
   return (
-    <form className="quick-task" onSubmit={onCreateTask}>
+    <section className="quick-task">
       <div className="panel-heading">
-        <p className="eyebrow">New Task</p>
-        <strong>Manual</strong>
+        <p className="eyebrow">Shortcuts</p>
+        <strong>{projects.length} projects</strong>
       </div>
-      <label>
-        Project
-        <select name="projectId" required>
-          <option value="">选择工程</option>
-          {projects.map((project) => (
-            <option key={project.id} value={project.id}>
-              {project.name}
-            </option>
-          ))}
-        </select>
-      </label>
-      <label>
-        Title
-        <input name="title" placeholder="新任务标题" required />
-      </label>
-      <label>
-        Description
-        <textarea name="description" rows={5} placeholder="任务背景、约束、验收标准" />
-      </label>
-      <label>
-        Autonomy
-        <select name="autonomy" defaultValue="balanced">
-          <option value="balanced">balanced</option>
-          <option value="conservative">conservative</option>
-          <option value="aggressive">aggressive</option>
-        </select>
-      </label>
-      <button type="submit">Create task</button>
-    </form>
+      <p className="muted">完整任务编辑与工程注册已移动到独立页面。</p>
+      <div className="shortcut-stack">
+        <button type="button" onClick={onOpenNewTask}>
+          New Task
+        </button>
+        <button type="button" onClick={onOpenProjectAdmin}>
+          Projects
+        </button>
+        <button type="button" onClick={onRunUntilBlocked}>
+          Run until blocked
+        </button>
+      </div>
+    </section>
   );
 }
 
@@ -848,7 +1162,12 @@ function TaskCockpitView({
   onAnswer,
   onDecideMerge,
   onMerge,
-  onTaskControl
+  onTaskControl,
+  onRunUntilBlocked,
+  onCreatePullRequest,
+  onUpdatePullRequest,
+  onInspectReview,
+  onRequestApproval
 }: {
   detail: TaskDetail;
   onBack: () => void;
@@ -857,6 +1176,11 @@ function TaskCockpitView({
   onDecideMerge: (pr: PullRequest, request: HumanRequest, decision: "approve" | "reject") => void;
   onMerge: (pr: PullRequest) => void;
   onTaskControl: (action: "pause" | "resume" | "cancel" | "retry", reason: string) => void;
+  onRunUntilBlocked: () => void;
+  onCreatePullRequest: (taskId: string, form: FormData) => Promise<void>;
+  onUpdatePullRequest: (taskId: string, prId: string, form: FormData) => Promise<void>;
+  onInspectReview: (taskId: string, prId: string) => Promise<void>;
+  onRequestApproval: (taskId: string, prId: string, form: FormData) => Promise<void>;
 }) {
   const model = buildTaskCockpitModel(detail);
 
@@ -874,6 +1198,9 @@ function TaskCockpitView({
           </button>
           <button type="button" onClick={onClassicDebug}>
             Classic Debug
+          </button>
+          <button type="button" onClick={onRunUntilBlocked}>
+            Run until blocked
           </button>
         </div>
       </header>
@@ -897,6 +1224,10 @@ function TaskCockpitView({
           onDecideMerge={onDecideMerge}
           onMerge={onMerge}
           onTaskControl={onTaskControl}
+          onCreatePullRequest={onCreatePullRequest}
+          onUpdatePullRequest={onUpdatePullRequest}
+          onInspectReview={onInspectReview}
+          onRequestApproval={onRequestApproval}
         />
       </div>
 
@@ -1018,7 +1349,11 @@ function EvidenceActionsPanel({
   onAnswer,
   onDecideMerge,
   onMerge,
-  onTaskControl
+  onTaskControl,
+  onCreatePullRequest,
+  onUpdatePullRequest,
+  onInspectReview,
+  onRequestApproval
 }: {
   detail: TaskDetail;
   evidence: EvidenceItem[];
@@ -1027,6 +1362,10 @@ function EvidenceActionsPanel({
   onDecideMerge: (pr: PullRequest, request: HumanRequest, decision: "approve" | "reject") => void;
   onMerge: (pr: PullRequest) => void;
   onTaskControl: (action: "pause" | "resume" | "cancel" | "retry", reason: string) => void;
+  onCreatePullRequest: (taskId: string, form: FormData) => Promise<void>;
+  onUpdatePullRequest: (taskId: string, prId: string, form: FormData) => Promise<void>;
+  onInspectReview: (taskId: string, prId: string) => Promise<void>;
+  onRequestApproval: (taskId: string, prId: string, form: FormData) => Promise<void>;
 }) {
   const pendingMergeRequest = detail.humanRequests.find((request) => request.kind === "merge_approval" && request.status === "pending");
   const pendingRequests = detail.humanRequests.filter((request) => request.status === "pending" && request.kind !== "merge_approval");
@@ -1073,37 +1412,18 @@ function EvidenceActionsPanel({
         ))}
       </section>
       <section className="panel-lite">
-        <p className="field-label">PR/MR</p>
-        {detail.latestPullRequest ? (
-          <>
-            <RecordTable
-              rows={[
-                ["Status", detail.latestPullRequest.status],
-                ["Review", detail.latestPullRequest.reviewStatus],
-                ["URL", detail.latestPullRequest.url ?? "none"]
-              ]}
-            />
-            {pendingMergeRequest || canMerge ? (
-              <div className="inline-actions">
-                {pendingMergeRequest ? (
-                  <>
-                    <button type="button" onClick={() => onDecideMerge(detail.latestPullRequest!, pendingMergeRequest, "approve")}>
-                      Approve
-                    </button>
-                    <button type="button" onClick={() => onDecideMerge(detail.latestPullRequest!, pendingMergeRequest, "reject")}>
-                      Reject
-                    </button>
-                  </>
-                ) : null}
-                <button type="button" disabled={!canMerge} onClick={() => onMerge(detail.latestPullRequest!)}>
-                  Merge
-                </button>
-              </div>
-            ) : null}
-          </>
-        ) : (
-          <p className="muted">尚无 PR/MR。</p>
-        )}
+        <PrOperatorPanel
+          detail={detail}
+          compact
+          canMerge={Boolean(canMerge)}
+          pendingMergeRequest={pendingMergeRequest}
+          onDecideMerge={onDecideMerge}
+          onMerge={onMerge}
+          onCreatePullRequest={onCreatePullRequest}
+          onUpdatePullRequest={onUpdatePullRequest}
+          onInspectReview={onInspectReview}
+          onRequestApproval={onRequestApproval}
+        />
       </section>
       <section className="panel-lite">
         <p className="field-label">Key artifacts</p>
@@ -1178,13 +1498,21 @@ function TaskDetailView({
   onAnswer,
   onDecideMerge,
   onMerge,
-  onTaskControl
+  onTaskControl,
+  onCreatePullRequest,
+  onUpdatePullRequest,
+  onInspectReview,
+  onRequestApproval
 }: {
   detail: TaskDetail;
   onAnswer: (event: React.FormEvent<HTMLFormElement>, request: HumanRequest) => void;
   onDecideMerge: (pr: PullRequest, request: HumanRequest, decision: "approve" | "reject") => void;
   onMerge: (pr: PullRequest) => void;
   onTaskControl: (action: "pause" | "resume" | "cancel" | "retry", reason: string) => void;
+  onCreatePullRequest: (taskId: string, form: FormData) => Promise<void>;
+  onUpdatePullRequest: (taskId: string, prId: string, form: FormData) => Promise<void>;
+  onInspectReview: (taskId: string, prId: string) => Promise<void>;
+  onRequestApproval: (taskId: string, prId: string, form: FormData) => Promise<void>;
 }) {
   const pendingMergeRequest = detail.humanRequests.find((request) => request.kind === "merge_approval" && request.status === "pending");
   const pendingRequests = detail.humanRequests.filter((request) => request.status === "pending" && request.kind !== "merge_approval");
@@ -1362,61 +1690,18 @@ function TaskDetailView({
       </section>
 
       <section className="panel">
-        <h3>PR/MR</h3>
-        {detail.latestPullRequest ? (
-          <>
-            <RecordTable
-              rows={[
-                ["PR", detail.latestPullRequest.id],
-                ["Status", detail.latestPullRequest.status],
-                ["Review", detail.latestPullRequest.reviewStatus],
-                ["Head", detail.latestPullRequest.headSha ?? "missing"],
-                ["Base", detail.latestPullRequest.baseSha ?? "missing"],
-                ["Validation", detail.latestPullRequest.validationRunId ?? "missing"],
-                ["URL", detail.latestPullRequest.url ?? "none"]
-              ]}
-            />
-            {pendingMergeRequest || canMerge ? (
-              <div className="merge-box">
-                {pendingMergeRequest ? (
-                  <>
-                    <p className="field-label">Merge approval snapshot</p>
-                    <RecordTable
-                      rows={[
-                        ["Request", pendingMergeRequest.id],
-                        ["Status", pendingMergeRequest.status],
-                        ["Valid", String(pendingMergeRequest.approvalValid)],
-                        ["Head", pendingMergeRequest.approvalPrHeadSha ?? "missing"],
-                        ["Base", pendingMergeRequest.approvalPrBaseSha ?? "missing"],
-                        ["Validation", pendingMergeRequest.approvalValidationRunId ?? "missing"],
-                        ["Strategy", pendingMergeRequest.approvalMergeStrategy ?? "squash"]
-                      ]}
-                    />
-                  </>
-                ) : null}
-                <div className="inline-actions">
-                  {pendingMergeRequest ? (
-                    <>
-                      <button type="button" onClick={() => onDecideMerge(detail.latestPullRequest!, pendingMergeRequest, "approve")}>
-                        Approve
-                      </button>
-                      <button type="button" onClick={() => onDecideMerge(detail.latestPullRequest!, pendingMergeRequest, "reject")}>
-                        Reject
-                      </button>
-                    </>
-                  ) : null}
-                  <button type="button" disabled={!canMerge} onClick={() => onMerge(detail.latestPullRequest!)}>
-                    Merge
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <p className="muted">尚无 merge approval request。</p>
-            )}
-          </>
-        ) : (
-          <p className="muted">尚无 PR/MR。</p>
-        )}
+        <PrOperatorPanel
+          detail={detail}
+          compact={false}
+          canMerge={Boolean(canMerge)}
+          pendingMergeRequest={pendingMergeRequest}
+          onDecideMerge={onDecideMerge}
+          onMerge={onMerge}
+          onCreatePullRequest={onCreatePullRequest}
+          onUpdatePullRequest={onUpdatePullRequest}
+          onInspectReview={onInspectReview}
+          onRequestApproval={onRequestApproval}
+        />
       </section>
 
       <section className="panel wide">
@@ -1459,6 +1744,398 @@ function TaskControlButton({
       {label}
     </button>
   );
+}
+
+function PrOperatorPanel({
+  detail,
+  compact = false,
+  canMerge,
+  pendingMergeRequest,
+  onDecideMerge,
+  onMerge,
+  onCreatePullRequest,
+  onUpdatePullRequest,
+  onInspectReview,
+  onRequestApproval
+}: {
+  detail: TaskDetail;
+  compact?: boolean;
+  canMerge: boolean;
+  pendingMergeRequest?: HumanRequest;
+  onDecideMerge: (pr: PullRequest, request: HumanRequest, decision: "approve" | "reject") => void;
+  onMerge: (pr: PullRequest) => void;
+  onCreatePullRequest: (taskId: string, form: FormData) => Promise<void>;
+  onUpdatePullRequest: (taskId: string, prId: string, form: FormData) => Promise<void>;
+  onInspectReview: (taskId: string, prId: string) => Promise<void>;
+  onRequestApproval: (taskId: string, prId: string, form: FormData) => Promise<void>;
+}) {
+  const latestPr = detail.latestPullRequest;
+  const body = latestPr ? (
+    <>
+      <RecordTable
+        rows={[
+          ["PR", latestPr.id],
+          ["Status", latestPr.status],
+          ["Review", latestPr.reviewStatus],
+          ["Head", latestPr.headSha ?? "missing"],
+          ["Base", latestPr.baseSha ?? "missing"],
+          ["Validation", latestPr.validationRunId ?? "missing"],
+          ["URL", latestPr.url ?? "none"]
+        ]}
+      />
+      <form
+        className={compact ? "pr-form compact" : "pr-form"}
+        onSubmit={(event) => {
+          event.preventDefault();
+          const form = new FormData(event.currentTarget);
+          void onUpdatePullRequest(detail.task.id, latestPr.id, form);
+        }}
+      >
+        <p className="field-label">Update PR/MR</p>
+        <input name="title" defaultValue={latestPr.title ?? ""} placeholder="title" />
+        <input name="bodyArtifact" defaultValue={latestPr.bodyArtifactPath ?? ""} placeholder="body artifact path" />
+        <input name="actor" defaultValue="web-operator" placeholder="actor" />
+        <div className="inline-actions">
+          <button type="submit">Update</button>
+          <button type="button" onClick={() => void onInspectReview(detail.task.id, latestPr.id)}>
+            Inspect review
+          </button>
+        </div>
+      </form>
+      {pendingMergeRequest || canMerge ? (
+        <div className="merge-box">
+          {pendingMergeRequest ? (
+            <>
+              <p className="field-label">Merge approval snapshot</p>
+              <RecordTable
+                rows={[
+                  ["Request", pendingMergeRequest.id],
+                  ["Status", pendingMergeRequest.status],
+                  ["Valid", String(pendingMergeRequest.approvalValid)],
+                  ["Head", pendingMergeRequest.approvalPrHeadSha ?? "missing"],
+                  ["Base", pendingMergeRequest.approvalPrBaseSha ?? "missing"],
+                  ["Validation", pendingMergeRequest.approvalValidationRunId ?? "missing"],
+                  ["Strategy", pendingMergeRequest.approvalMergeStrategy ?? "squash"]
+                ]}
+              />
+            </>
+          ) : null}
+          <div className="inline-actions">
+            {pendingMergeRequest ? (
+              <>
+                <button type="button" onClick={() => onDecideMerge(latestPr, pendingMergeRequest, "approve")}>
+                  Approve
+                </button>
+                <button type="button" onClick={() => onDecideMerge(latestPr, pendingMergeRequest, "reject")}>
+                  Reject
+                </button>
+              </>
+            ) : null}
+            <button type="button" disabled={!canMerge} onClick={() => onMerge(latestPr)}>
+              Merge
+            </button>
+          </div>
+        </div>
+      ) : (
+        <form
+          className="answer-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            const form = new FormData(event.currentTarget);
+            void onRequestApproval(detail.task.id, latestPr.id, form);
+          }}
+        >
+          <p className="field-label">Request merge approval</p>
+          <input name="artifact" placeholder="merge approval artifact path" required />
+          <input name="actor" defaultValue="web-operator" />
+          <button type="submit">Request approval</button>
+        </form>
+      )}
+    </>
+  ) : (
+    <form
+      className="answer-form"
+      onSubmit={(event) => {
+        event.preventDefault();
+        const form = new FormData(event.currentTarget);
+        void onCreatePullRequest(detail.task.id, form);
+      }}
+    >
+      <p className="field-label">Create PR/MR</p>
+      <input name="title" placeholder="PR title" required />
+      <input name="bodyArtifact" placeholder="body artifact path" required />
+      <input name="actor" defaultValue="web-operator" />
+      <button type="submit">Create PR/MR</button>
+    </form>
+  );
+
+  return (
+    <section className={compact ? "panel-lite pr-panel compact" : "panel-lite pr-panel"}>
+      <p className="field-label">PR/MR</p>
+      {body}
+    </section>
+  );
+}
+
+function RunUntilBlockedBanner({ state }: { state: RunUntilBlockedState }) {
+  return (
+    <section className="run-banner">
+      <div className="panel-heading">
+        <div>
+          <p className="eyebrow">Run until blocked</p>
+          <strong>{state.running ? "running" : "stopped"}</strong>
+        </div>
+        <span>
+          {state.tickCount}/{state.maxTicks}
+        </span>
+      </div>
+      <p className="muted">{state.stopReason ?? "正在推进"}</p>
+      <div className="run-log">
+        {state.logs.slice(-3).map((log) => (
+          <article key={log.index} className="run-log-item">
+            <strong>tick {log.index}</strong>
+            <span>{log.status}</span>
+            <small>{log.actions.map((action) => `${action.kind}:${action.status}`).join(" · ")}</small>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function NewTaskView({
+  projects,
+  onCreateTask,
+  onCreateAndRun,
+  onRunUntilBlocked
+}: {
+  projects: Project[];
+  onCreateTask: (event: React.FormEvent<HTMLFormElement>) => void;
+  onCreateAndRun: (event: React.FormEvent<HTMLFormElement>) => void;
+  onRunUntilBlocked: () => void;
+}) {
+  return (
+    <section className="new-task-shell">
+      <header className="page-hero">
+        <div>
+          <p className="eyebrow">New Task</p>
+          <h2>Task Brief Editor</h2>
+          <p>把完整需求、背景、验收标准和约束放在这里，再决定是否立即推进到阻塞点。</p>
+        </div>
+        <div className="inline-actions">
+          <button type="button" onClick={onRunUntilBlocked}>
+            Run until blocked
+          </button>
+        </div>
+      </header>
+      <div className="new-task-grid">
+        <section className="panel new-task-sidebar">
+          <h3>Context</h3>
+          <p className="muted">workflow hint 默认交给 runtime，自主选择仍然是默认路径。</p>
+          <p className="muted">附件/图片区域目前只做占位，不产生副作用。</p>
+          <RecordList empty="暂无 project。" items={projects.map((project) => `${project.name} · ${project.registrationStatus ?? "unknown"}`)} />
+        </section>
+        <form
+          className="panel new-task-form"
+          onSubmit={(event) => {
+            const submitter = (event.nativeEvent as SubmitEvent).submitter;
+            if (submitter instanceof HTMLButtonElement && submitter.value === "create-and-run") {
+              onCreateAndRun(event);
+              return;
+            }
+            onCreateTask(event);
+          }}
+        >
+          <div className="form-grid">
+            <label>
+              Project
+              <select name="projectId" required>
+                <option value="">选择工程</option>
+                {projects.map((project) => (
+                  <option key={project.id} value={project.id}>
+                    {project.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Title
+              <input name="title" placeholder="任务标题" required />
+            </label>
+            <label>
+              Autonomy
+              <select name="autonomy" defaultValue="balanced">
+                <option value="balanced">balanced</option>
+                <option value="conservative">conservative</option>
+                <option value="aggressive">aggressive</option>
+              </select>
+            </label>
+            <label>
+              Workflow hint
+              <input name="workflowHint" placeholder="default / auto / explicit hint" />
+            </label>
+          </div>
+          <label>
+            Description
+            <textarea name="description" rows={8} placeholder="核心需求描述" />
+          </label>
+          <div className="form-grid">
+            <label>
+              Background
+              <textarea name="background" rows={6} placeholder="背景、上下文、为什么现在要做" />
+            </label>
+            <label>
+              Acceptance criteria
+              <textarea name="acceptanceCriteria" rows={6} placeholder="完成标准" />
+            </label>
+          </div>
+          <label>
+            Constraints
+            <textarea name="constraints" rows={5} placeholder="边界、禁止项、风险约束" />
+          </label>
+          <section className="attachment-placeholder">
+            <p className="field-label">Attachments</p>
+            <p className="muted">图片/文件 drop zone 预留，不执行上传。</p>
+          </section>
+          <div className="inline-actions">
+            <button type="submit" value="create">
+              Create task
+            </button>
+            <button type="submit" value="create-and-run">
+              Create and run until blocked
+            </button>
+          </div>
+        </form>
+      </div>
+    </section>
+  );
+}
+
+function ProjectAdminView({
+  projects,
+  onRegisterProject
+}: {
+  projects: Project[];
+  onRegisterProject: (event: React.FormEvent<HTMLFormElement>) => Promise<ProjectRegistrationResponse | undefined>;
+}) {
+  return (
+    <section className="admin-shell">
+      <header className="page-hero">
+        <div>
+          <p className="eyebrow">Project Admin</p>
+          <h2>Project Registry</h2>
+          <p>在这里查看工程注册状态、默认分支、provider、workflow launcher 和 workspace policy 预留。</p>
+        </div>
+      </header>
+      <div className="admin-grid">
+        <section className="panel">
+          <h3>Registered projects</h3>
+          <div className="project-admin-list">
+            {projects.length === 0 ? <p className="muted">暂无 project。</p> : null}
+            {projects.map((project) => (
+              <article key={project.id} className="admin-card">
+                <strong>{project.name}</strong>
+                <p>{project.repoPath ?? "repo path unknown"}</p>
+                <small>
+                  default: {project.defaultBranch ?? "unknown"} · registry: {project.registrationStatus ?? "unknown"}
+                </small>
+                <small>
+                  provider: {project.gitProviderKind ?? "unknown"} · pr: {project.prProviderKind ?? "unknown"}
+                </small>
+              </article>
+            ))}
+          </div>
+        </section>
+        <form className="panel admin-form" onSubmit={onRegisterProject}>
+          <h3>Register project</h3>
+          <div className="form-grid">
+            <label>
+              Repo path
+              <input name="repoPath" required />
+            </label>
+            <label>
+              Name
+              <input name="name" />
+            </label>
+            <label>
+              Provider override
+              <select name="providerOverride" defaultValue="">
+                <option value="">auto</option>
+                <option value="github">github</option>
+                <option value="gitlab">gitlab</option>
+              </select>
+            </label>
+            <label>
+              Confirmed default branch
+              <input name="confirmedDefaultBranch" placeholder="main / master / custom" />
+            </label>
+            <label>
+              Workflow launcher
+              <input name="workflowLauncher" placeholder="workflow launcher path" />
+            </label>
+            <label>
+              Workspace root
+              <input name="workspaceRoot" placeholder="workspace root" />
+            </label>
+            <label>
+              Outer agent default
+              <input name="outerAgentDefaultProvider" placeholder="codex" />
+            </label>
+            <label>
+              Inner agent default
+              <input name="innerAgentDefaultProvider" placeholder="codex" />
+            </label>
+          </div>
+          <section className="attachment-placeholder">
+            <p className="field-label">Workspace policy</p>
+            <p className="muted">init / cleanup hook 与 retention policy 仅占位，不执行脚本。</p>
+          </section>
+          <button type="submit">Register project</button>
+        </form>
+      </div>
+    </section>
+  );
+}
+
+function describeRunStopReason(
+  detail: TaskDetail | undefined,
+  tick: DaemonTickResult,
+  tickIndex: number,
+  maxTicks: number,
+  scope: "global" | "task"
+): { stop: boolean; reason: string } {
+  if (!detail) {
+    return { stop: true, reason: "没有可推进的 task，停止 run until blocked" };
+  }
+  if (isTerminalTaskStatus(detail.task.status)) {
+    return { stop: true, reason: `已停止：task 进入 terminal 状态 ${detail.task.status}` };
+  }
+  if (detail.diagnosis.operatorAttention.required) {
+    return { stop: true, reason: `已停止：需要 operator 介入 - ${detail.diagnosis.operatorAttention.reasons[0] ?? detail.currentBlocker}` };
+  }
+  if (detail.humanRequests.some((request) => request.status === "pending")) {
+    return { stop: true, reason: "已停止：存在 pending human request 或 merge approval，需要人工确认" };
+  }
+  if (detail.latestPullRequest && detail.latestPullRequest.status !== "merged" && detail.latestPullRequest.reviewStatus !== "approved") {
+    return { stop: true, reason: `已停止：PR/MR 仍在等待 review 或 merge - ${detail.latestPullRequest.status}` };
+  }
+  const latestWorkflow = detail.workflowRuns[0];
+  if (latestWorkflow?.status === "running" && !latestWorkflow.handoffKind) {
+    return {
+      stop: true,
+      reason: "已停止：workflow 正在运行且尚未 handoff，Coordinator 只读 inspect，不自动执行 workflow action"
+    };
+  }
+  if (tick.status === "failed") {
+    return { stop: true, reason: "已停止：daemon tick 返回 failed" };
+  }
+  if (tickIndex >= maxTicks) {
+    return { stop: true, reason: `已停止：达到最大轮数 ${maxTicks}` };
+  }
+  if (scope === "global" && tick.actions.length === 0) {
+    return { stop: true, reason: "已停止：没有可安全推进的 action" };
+  }
+  return { stop: false, reason: "继续推进" };
 }
 
 function canPauseTask(status: string): boolean {

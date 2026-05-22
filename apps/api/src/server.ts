@@ -638,6 +638,7 @@ export function buildServer(): FastifyInstance {
           additionalProperties: false,
           properties: {
             owner: { type: "string", minLength: 1 },
+            taskId: { type: "string", minLength: 1 },
             retryBudget: { type: "integer", minimum: 0 },
             candidateLimit: { type: "integer", minimum: 1 }
           }
@@ -654,6 +655,7 @@ export function buildServer(): FastifyInstance {
         return withDatabase(databasePath, (context) =>
           runDaemonTick(context, {
             owner: request.body.owner ?? "api",
+            taskId: request.body.taskId,
             retryBudget: request.body.retryBudget,
             candidateLimit: request.body.candidateLimit
           })
@@ -919,6 +921,7 @@ type ExecuteAgentToolBody = {
 
 type DaemonTickBody = {
   owner?: string;
+  taskId?: string;
   retryBudget?: number;
   candidateLimit?: number;
 };
