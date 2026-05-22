@@ -156,15 +156,15 @@ P2 只预留接口和规划，不进入 V1 完成标准：
 
 ### 当前进度
 
-- 当前阶段：`Iteration 13: Web Developer Workbench` 已完成 `Slice 13.3: Task Creation、Project Admin 与 Run Until Blocked`。
-- 当前 OpenSpec change：`complete-web-task-project-operations` 已完成实现、验证、独立 review 和归档；归档后位置为 `openspec/changes/archive/2026-05-22-complete-web-task-project-operations`。
-- 当前正式规格：已同步到 `openspec/specs/web-human-review-surface/spec.md`、`openspec/specs/project-registry/spec.md` 和 `openspec/specs/operator-task-controls/spec.md`；其他既有规格继续保持当前基线。
-- 当前已落地事实：Web 已将 New Task 从侧栏小表单提升为完整任务下达页面，支持更长文本编辑、acceptance criteria、constraints、autonomy、workflow hint/default 说明和附件占位；Project Admin 已支持查看 project registry 摘要和注册 project，并明确 workspace init/cleanup hook 与 retention policy 仍是 disabled 预留，不执行脚本副作用；Task Cockpit 和 Workbench 已支持 `Run until blocked` operator loop，只循环调用 Core API 的 daemon tick 与 refresh/inspect，不自动执行 workflow action；Task Cockpit 和 Classic Debug 已补齐 create/update PR/MR、inspect review、request merge approval 的 operator actions，approve/reject/merge 仍由 Core gate 校验。
+- 当前阶段：`Iteration 13: Web Developer Workbench` 已完成 `Slice 13.4A: Adopt workflow 0.6.10 projection`。
+- 当前 OpenSpec change：`adopt-workflow-0610-projection` 已完成实现、验证、独立 review 和归档；归档后位置为 `openspec/changes/archive/2026-05-22-adopt-workflow-0610-projection`。
+- 当前正式规格：已同步到 `openspec/specs/web-human-review-surface/spec.md`、`openspec/specs/project-registry/spec.md`、`openspec/specs/operator-task-controls/spec.md`、`openspec/specs/workflow-protocol-adapter/spec.md` 和 `openspec/specs/observability/spec.md`；其他既有规格继续保持当前基线。
+- 当前已落地事实：Web 已将 New Task 从侧栏小表单提升为完整任务下达页面，支持更长文本编辑、acceptance criteria、constraints、autonomy、workflow hint/default 说明和附件占位；Project Admin 已支持查看 project registry 摘要和注册 project，并明确 workspace init/cleanup hook 与 retention policy 仍是 disabled 预留，不执行脚本副作用；Task Cockpit 和 Workbench 已支持 `Run until blocked` operator loop，只循环调用 Core API 的 daemon tick 与 refresh/inspect，不自动执行 workflow action；Task Cockpit 和 Classic Debug 已补齐 create/update PR/MR、inspect review、request merge approval 的 operator actions，approve/reject/merge 仍由 Core gate 校验；Workflow Protocol Adapter 已适配 `@hetao-ai/workflow@0.6.10` 的 `progress` 与 `stageArtifacts` display projection，并把它们持久化到 workflow event payload，供 Web Workflow Lens 展示。
 - 当前可靠性补强：`/daemon/tick` 支持 operator-only task scope；Core daemon runtime 在 task scope 下先按 task 过滤 operations、workspaces、workflow runs、human requests 和 expired workspace/pr-merge locks，再应用 candidate limit，避免单任务 run-until-blocked 被其它任务的全局候选窗口 starvation；全局 run-until-blocked 仍是 operator convenience，不成为 Core 状态机。
-- 当前验证结果：`pnpm test -- packages/core/src/daemon-runtime.test.ts apps/api/src/server.test.ts`、`pnpm typecheck`、`pnpm --filter @coordinator/db build`、`pnpm --filter @coordinator/core build`、`pnpm --filter @coordinator/api build`、`pnpm --filter @coordinator/web build`、`openspec validate complete-web-task-project-operations --strict` 和 `openspec validate --all --strict` 均已通过；本地 API/Web 基于 `.coordinator-smoke/actioninputs-0.6.9/coordinator.sqlite` 做了 PC 端浏览器验证，确认 New Task、Project Admin、Run Until Blocked、Task Cockpit PR/MR actions 的主要布局和交互无明显阻断；移动端和 PC 细节视觉留到后续统一设计调整。
-- 当前 review 结论：独立 `gpt-5.5 high` subagent 已确认无 must-fix，未发现 workflow action 自动执行、Web 成为 truth source、Web/Core/daemon 分层污染、Coordinator Agent Surface 扩大、复杂 workflow JSON 暴露或明显过度设计问题；残留风险是全局 run-until-blocked 的停止解释仍偏向当前 detail 聚合精度，不影响 task-scoped 安全性。
-- 下一阶段：暂停等待用户确认后，再进入下一轮 Web 体验细调或后续 P1/P2 hardening 切片。
-- 下一阶段重点：优先按 PC 端真实使用流程检查任务管理、任务详情、确认操作和 PR/MR 操作的交互质量；视觉细节可集中到单独样式迭代处理，不把移动端深度适配作为当前主线。
+- 当前验证结果：`pnpm test -- packages/core/src/workflow-protocol-adapter.test.ts packages/core/src/surface.test.ts`、`pnpm typecheck`、`pnpm --filter @coordinator/core build`、`pnpm --filter @coordinator/web build`、`openspec validate adopt-workflow-0610-projection --strict` 和 `openspec validate --all --strict` 均已通过；上一切片的 Web PC 端浏览器验收仍作为当前 UI 基线。
+- 当前 review 结论：独立 `gpt-5.5 high` subagent 已确认无 must-fix，未发现 workflow action 自动执行、Web 成为 truth source、Web/Core/daemon 分层污染、Coordinator Agent Surface 扩大、复杂 workflow JSON 暴露或明显过度设计问题；残留风险是 `stageArtifacts.path` 当前只按 workflow protocol contract 信任并展示字符串，未来若做点击读取，需要另加 path containment 与 artifact contract 校验。
+- 下一阶段：暂停等待用户确认后，进入 `Slice 13.4B: Web-driven E2E validation & blocker fixing`。
+- 下一阶段重点：基于 `@hetao-ai/workflow@0.6.10` 从 Web UI 真实创建任务并 `Run until blocked` 到最远安全阶段，验证 Workflow Lens 能展示 `progress/stageArtifacts`，只修复阻断流程推进或明显影响 PC 端理解的问题；移动端深度适配和细节视觉仍留到后续统一设计调整。
 
 ### Iteration 12 后续切片顺序
 

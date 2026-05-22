@@ -116,8 +116,10 @@ export type {
   WorkflowHandoffKind,
   WorkflowLifecycle,
   WorkflowProfileCapability,
+  WorkflowProgress,
   WorkflowProtocolRunner,
   WorkflowRunResult,
+  WorkflowStageArtifact,
   WorkflowStatus
 } from "./workflow-protocol-adapter.js";
 export type {

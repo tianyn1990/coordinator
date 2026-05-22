@@ -72,6 +72,20 @@ export type WorkflowActionInputHint = {
   usage?: string;
 };
 
+export type WorkflowProgress = {
+  label?: string;
+  summary?: string;
+  ordinal?: number;
+  total?: number;
+};
+
+export type WorkflowStageArtifact = {
+  kind?: string;
+  path: string;
+  label?: string;
+  requiredForHandoff?: boolean;
+};
+
 export type WorkflowStatus = {
   runId: string;
   profile?: string;
@@ -80,6 +94,8 @@ export type WorkflowStatus = {
   handoff: WorkflowHandoff;
   artifactRoot?: string;
   actionInputHints: Record<string, WorkflowActionInputHint>;
+  progress?: WorkflowProgress;
+  stageArtifacts: WorkflowStageArtifact[];
   debug: {
     stage?: string;
     substate?: string;
@@ -627,6 +643,8 @@ function parseWorkflowStatus(value: unknown, options: { fallbackLifecycle?: Work
     handoff,
     artifactRoot: optionalString(object.artifactRoot),
     actionInputHints: parseActionInputHints(object.actionInputs),
+    progress: parseWorkflowProgress(object.progress),
+    stageArtifacts: parseStageArtifacts(object.stageArtifacts),
     debug: {
       stage: optionalString(object.stage),
       substate: optionalString(object.substate),
@@ -657,6 +675,38 @@ function parseActionInputHints(value: unknown): Record<string, WorkflowActionInp
     };
   }
   return hints;
+}
+
+function parseWorkflowProgress(value: unknown): WorkflowProgress | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  const object = requireObject(value, "progress");
+  const progress = {
+    label: optionalString(object.label),
+    summary: optionalString(object.summary),
+    ordinal: optionalNumber(object.ordinal, "progress.ordinal"),
+    total: optionalNumber(object.total, "progress.total")
+  };
+  return progress.label || progress.summary || progress.ordinal !== undefined || progress.total !== undefined ? progress : undefined;
+}
+
+function parseStageArtifacts(value: unknown): WorkflowStageArtifact[] {
+  if (value === undefined || value === null) {
+    return [];
+  }
+  return requireArray(value, "stageArtifacts").map((artifact, index) => {
+    const artifactObject = requireObject(artifact, `stageArtifacts[${index}]`);
+    return {
+      kind: optionalString(artifactObject.kind),
+      path: requireString(artifactObject.path, `stageArtifacts[${index}].path`),
+      label: optionalString(artifactObject.label),
+      requiredForHandoff:
+        artifactObject.requiredForHandoff === undefined
+          ? undefined
+          : requireBoolean(artifactObject.requiredForHandoff, `stageArtifacts[${index}].requiredForHandoff`)
+    };
+  });
 }
 
 function parseWorkflowArtifacts(value: unknown): WorkflowArtifacts {
@@ -768,6 +818,8 @@ function protocolStatusEventPayload(status: WorkflowStatus, command: string): un
     handoff: status.handoff,
     artifactRoot: status.artifactRoot,
     actionInputHints: status.actionInputHints,
+    progress: status.progress,
+    stageArtifacts: status.stageArtifacts,
     // debug 字段只服务观测和排查，不能被外层状态机当成完成语义。
     debug: status.debug
   };
@@ -970,6 +1022,16 @@ function optionalBoundedString(value: unknown, maxLength: number): string | unde
     return undefined;
   }
   return normalized.length > maxLength ? `${normalized.slice(0, maxLength)}...` : normalized;
+}
+
+function optionalNumber(value: unknown, fieldName: string): number | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new WorkflowProtocolError(`${fieldName} 必须是 finite number`);
+  }
+  return value;
 }
 
 function requireBoolean(value: unknown, fieldName: string): boolean {

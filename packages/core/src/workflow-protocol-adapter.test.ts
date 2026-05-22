@@ -107,6 +107,15 @@ function createProtocolRunner() {
         stage: "review",
         substate: "complete-looking-debug-only",
         gate: { state: "open" },
+        progress: { label: "Review", summary: "正在等待 materialize-change 参数", ordinal: 3, total: 4 },
+        stageArtifacts: [
+          {
+            kind: "plan",
+            label: "Review notes",
+            path: "artifacts/review-notes.md",
+            requiredForHandoff: false
+          }
+        ],
         allowedActions: ["debug-only"],
         actionInputs: {
           "debug-only": {
@@ -130,6 +139,15 @@ function createProtocolRunner() {
           artifacts: [{ kind: "summary", path: ".workflow/runs/inner-run-1/artifacts/summary.md" }],
           deniedActions: []
         },
+        progress: { label: "PR ready", summary: "handoff evidence prepared", ordinal: 4, total: 4 },
+        stageArtifacts: [
+          {
+            kind: "handoff",
+            label: "PR handoff",
+            path: "artifacts/pr-handoff.md",
+            requiredForHandoff: true
+          }
+        ],
         summary: "handoff ready"
       });
     }
@@ -374,10 +392,38 @@ describe("workflow protocol adapter", () => {
         usage: "workflow protocol action --run inner-run-1 debug-only <change-id>"
       }
     });
+    expect(result.status.progress).toEqual({
+      label: "Review",
+      summary: "正在等待 materialize-change 参数",
+      ordinal: 3,
+      total: 4
+    });
+    expect(result.status.stageArtifacts).toEqual([
+      {
+        kind: "plan",
+        label: "Review notes",
+        path: "artifacts/review-notes.md",
+        requiredForHandoff: false
+      }
+    ]);
 
     const events = withDatabase(databasePath, (context) => listTaskEvents(context, fixture.taskId));
     const inspected = events.find((event) => event.type === "workflow.status_inspected");
     expect(inspected?.payload).toMatchObject({
+      progress: {
+        label: "Review",
+        summary: "正在等待 materialize-change 参数",
+        ordinal: 3,
+        total: 4
+      },
+      stageArtifacts: [
+        {
+          kind: "plan",
+          label: "Review notes",
+          path: "artifacts/review-notes.md",
+          requiredForHandoff: false
+        }
+      ],
       actionInputHints: {
         "debug-only": {
           requiredArgs: ["change-id"],
@@ -465,9 +511,41 @@ describe("workflow protocol adapter", () => {
     });
 
     expect(result.workflowRun).toMatchObject({ status: "handoff", handoffKind: "pr_ready" });
+    expect(result.status.progress).toEqual({
+      label: "PR ready",
+      summary: "handoff evidence prepared",
+      ordinal: 4,
+      total: 4
+    });
+    expect(result.status.stageArtifacts).toEqual([
+      {
+        kind: "handoff",
+        label: "PR handoff",
+        path: "artifacts/pr-handoff.md",
+        requiredForHandoff: true
+      }
+    ]);
     expect(result.operationId).toBeTruthy();
     const events = withDatabase(databasePath, (context) => listTaskEvents(context, fixture.taskId));
     expect(events.map((event) => event.type)).toContain("workflow.action");
+    const actionEvent = events.find((event) => event.type === "workflow.action");
+    expect(actionEvent?.payload).toMatchObject({
+      progress: {
+        label: "PR ready",
+        summary: "handoff evidence prepared",
+        ordinal: 4,
+        total: 4
+      },
+      stageArtifacts: [
+        {
+          kind: "handoff",
+          label: "PR handoff",
+          path: "artifacts/pr-handoff.md",
+          requiredForHandoff: true
+        }
+      ]
+    });
+    expect(JSON.stringify(actionEvent?.payload)).not.toContain('"actionInputs"');
     expect(events.map((event) => event.type)).not.toContain("task.status_updated");
   });
 

@@ -306,6 +306,7 @@ type WorkflowArtifactRef = {
   kind: string;
   path: string;
   label?: string;
+  requiredForHandoff?: boolean;
 };
 
 type WorkflowLensModel = {
@@ -1307,7 +1308,7 @@ function WorkflowLens({ model }: { model: WorkflowLensModel }) {
           {model.stageArtifacts.map((artifact) => (
             <li key={`${artifact.kind}-${artifact.path}`}>
               <strong>{artifact.label ?? artifact.kind}</strong>
-              <span>{artifact.path}</span>
+              <span>{artifact.requiredForHandoff ? `${artifact.path} · handoff evidence` : artifact.path}</span>
             </li>
           ))}
         </ul>
@@ -2584,7 +2585,8 @@ function readArtifactRefs(value: unknown): WorkflowArtifactRef[] {
       {
         kind: readString(item.kind) ?? "artifact",
         path,
-        label: readString(item.label)
+        label: readString(item.label),
+        requiredForHandoff: typeof item.requiredForHandoff === "boolean" ? item.requiredForHandoff : undefined
       }
     ];
   });
