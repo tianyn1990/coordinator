@@ -93,6 +93,8 @@ decision signals
 - provider private session path、完整 stdout/stderr、权限内部对象和复杂 JSONL 不进入 agent-facing surface。
 - Web 默认展示 normalized 摘要；完整 provider event 只在 debug drawer 或 artifact 中按需查看。
 
+当前 Slice 14.2 的最小落地是：SDK adapter 将 raw provider events 作为 JSONL 写入 agent session transcript artifact，并在 Core event payload 中只记录 implementation mode、permission profile、provider session id、provider version 和 artifact ref。normalized agent events、last activity 信号和 Web 活动摘要留到 Slice 14.3 实现。
+
 ### 3.3 Workflow Event
 
 记录 inner workflow：

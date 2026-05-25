@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { runCodexSdkBridge } from "./agent-provider-runtime.js";
 import {
   ActiveResourceConflictError,
   createAttempt,
@@ -18,10 +19,12 @@ import {
   ClaudeCodeProvider,
   CodexProvider,
   FakeAgentProvider,
+  ProviderUnavailableError,
   inspectAgentSession,
   runCoordinatorAgentSession,
   type AgentProviderRunInput,
-  type AgentProviderRunner
+  type AgentProviderRunner,
+  type AgentProviderSdkRunInput
 } from "./index.js";
 
 function createMigratedDatabase(): string {
@@ -275,6 +278,183 @@ describe("agent provider runtime", () => {
     expect(calls[0].input).toContain("large context");
   });
 
+  it("CodexProvider 默认优先使用 SDK adapter 并保留权限 evidence", () => {
+    const sdkCalls: AgentProviderSdkRunInput[] = [];
+    const sdkRunner = (input: AgentProviderSdkRunInput) => {
+      sdkCalls.push(input);
+      return {
+        finalResponse: "codex sdk final",
+        transcript: JSON.stringify({ type: "provider.raw_event", provider: "codex", event: "turn.completed" }),
+        providerSessionId: "codex-thread-1",
+        providerVersion: "0.test"
+      };
+    };
+    const cliRunner: AgentProviderRunner = () => {
+      throw new Error("CLI fallback should not run");
+    };
+    const root = mkdtempSync(join(tmpdir(), "coordinator-agent-codex-sdk-"));
+    const promptPath = join(root, "prompt.md");
+    const transcriptPath = join(root, "transcript.jsonl");
+    writeFileSync(promptPath, "# prompt\nsdk context", "utf8");
+
+    const provider = new CodexProvider({ sdkRunner, cliRunner });
+    const result = provider.run({
+      sessionId: "session-1",
+      cwd: root,
+      promptPath,
+      outputPath: join(root, "final.md"),
+      transcriptPath,
+      timeoutMs: 1234,
+      metadata: { providerId: "codex", role: "outer", taskId: "task-1" }
+    });
+
+    expect(result).toMatchObject({
+      finalResponse: "codex sdk final\n",
+      providerSessionId: "codex-thread-1",
+      implementationMode: "sdk",
+      permissionProfile: "codex:read-only:approval-never",
+      rawEventArtifactPath: transcriptPath
+    });
+    expect(sdkCalls[0]).toMatchObject({
+      cwd: root,
+      prompt: "# prompt\nsdk context",
+      permissionProfile: "codex:read-only:approval-never",
+      sdkPackageName: "@openai/codex-sdk"
+    });
+    expect(typeof sdkCalls[0].sdkImportPath).toBe("string");
+    expect(existsSync(sdkCalls[0].sdkImportPath!)).toBe(true);
+  });
+
+  it("CodexProvider 在 SDK unavailable 时受控回落到 CLI fallback", () => {
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const sdkRunner = () => {
+      throw new ProviderUnavailableError("codex sdk missing");
+    };
+    const cliRunner: AgentProviderRunner = (command, args) => {
+      calls.push({ command, args });
+      return "codex cli final";
+    };
+    const root = mkdtempSync(join(tmpdir(), "coordinator-agent-codex-fallback-"));
+    const promptPath = join(root, "prompt.md");
+    writeFileSync(promptPath, "# prompt", "utf8");
+
+    const provider = new CodexProvider({ sdkRunner, cliRunner });
+    const result = provider.run({
+      sessionId: "session-1",
+      cwd: root,
+      promptPath,
+      outputPath: join(root, "final.md"),
+      transcriptPath: join(root, "transcript.jsonl"),
+      timeoutMs: 1000,
+      metadata: { providerId: "codex", role: "outer" }
+    });
+
+    expect(result).toMatchObject({
+      finalResponse: "codex cli final\n",
+      implementationMode: "cli-fallback",
+      permissionProfile: "codex:read-only:approval-never"
+    });
+    expect(calls[0].command).toBe("codex");
+  });
+
+  it("Codex SDK bridge 把 raw events 直接写入 transcript artifact", () => {
+    const root = mkdtempSync(join(tmpdir(), "coordinator-agent-codex-bridge-"));
+    const fakeSdkPath = join(root, "fake-codex-sdk.mjs");
+    const transcriptPath = join(root, "transcript.jsonl");
+    const promptPath = join(root, "prompt.md");
+    writeFileSync(promptPath, "# prompt", "utf8");
+    writeFileSync(transcriptPath, "", "utf8");
+    writeFileSync(
+      fakeSdkPath,
+      [
+        "export class Codex {",
+        "  startThread() {",
+        "    return {",
+        "      id: 'thread-final',",
+        "      async runStreamed() {",
+        "        return { events: (async function* () {",
+        "          yield { type: 'thread.started', thread_id: 'thread-1' };",
+        "          yield { type: 'item.completed', item: { type: 'agent_message', text: 'sdk bridge final' } };",
+        "        })() };",
+        "      }",
+        "    };",
+        "  }",
+        "}"
+      ].join("\n"),
+      "utf8"
+    );
+
+    const result = runCodexSdkBridge({
+      sessionId: "session-1",
+      cwd: root,
+      promptPath,
+      outputPath: join(root, "final.md"),
+      transcriptPath,
+      timeoutMs: 1000,
+      metadata: { providerId: "codex", role: "outer" },
+      prompt: "# prompt",
+      permissionProfile: "codex:read-only:approval-never",
+      sdkPackageName: "fake-codex-sdk",
+      sdkImportPath: fakeSdkPath,
+      providerVersion: "0.test"
+    });
+
+    expect(result).toMatchObject({
+      finalResponse: "sdk bridge final\n",
+      providerSessionId: "thread-1",
+      implementationMode: "sdk",
+      permissionProfile: "codex:read-only:approval-never"
+    });
+    expect(result.transcript).toBeUndefined();
+    expect(readFileSync(transcriptPath, "utf8")).toContain("provider.raw_event");
+  });
+
+  it("Codex SDK bridge 遇到 turn.failed 不会伪装成成功响应", () => {
+    const root = mkdtempSync(join(tmpdir(), "coordinator-agent-codex-bridge-fail-"));
+    const fakeSdkPath = join(root, "fake-codex-sdk.mjs");
+    const transcriptPath = join(root, "transcript.jsonl");
+    const promptPath = join(root, "prompt.md");
+    writeFileSync(promptPath, "# prompt", "utf8");
+    writeFileSync(transcriptPath, "", "utf8");
+    writeFileSync(
+      fakeSdkPath,
+      [
+        "export class Codex {",
+        "  startThread() {",
+        "    return {",
+        "      id: 'thread-final',",
+        "      async runStreamed() {",
+        "        return { events: (async function* () {",
+        "          yield { type: 'thread.started', thread_id: 'thread-1' };",
+        "          yield { type: 'turn.failed', error: { message: 'auth failed' } };",
+        "        })() };",
+        "      }",
+        "    };",
+        "  }",
+        "}"
+      ].join("\n"),
+      "utf8"
+    );
+
+    expect(() =>
+      runCodexSdkBridge({
+        sessionId: "session-1",
+        cwd: root,
+        promptPath,
+        outputPath: join(root, "final.md"),
+        transcriptPath,
+        timeoutMs: 1000,
+        metadata: { providerId: "codex", role: "outer" },
+        prompt: "# prompt",
+        permissionProfile: "codex:read-only:approval-never",
+        sdkPackageName: "fake-codex-sdk",
+        sdkImportPath: fakeSdkPath,
+        providerVersion: "0.test"
+      })
+    ).toThrow(ProviderUnavailableError);
+    expect(readFileSync(transcriptPath, "utf8")).toContain("turn.failed");
+  });
+
   it("ClaudeCodeProvider 使用非交互 print 模式", () => {
     const calls: Array<{ command: string; args: string[]; input: string }> = [];
     const runner: AgentProviderRunner = (command, args, options) => {
@@ -300,6 +480,90 @@ describe("agent provider runtime", () => {
     expect(calls[0].command).toBe("claude");
     expect(calls[0].args).toEqual(["--bare", "--print", "--permission-mode", "dontAsk", "--tools", "", "--output-format", "text"]);
     expect(calls[0].input).toContain("# prompt");
+  });
+
+  it("ClaudeCodeProvider 默认优先使用 SDK adapter 并保留权限 evidence", () => {
+    const sdkCalls: AgentProviderSdkRunInput[] = [];
+    const sdkRunner = (input: AgentProviderSdkRunInput) => {
+      sdkCalls.push(input);
+      return {
+        finalResponse: "claude sdk final",
+        transcript: JSON.stringify({ type: "provider.raw_event", provider: "claude-code", event: "result" }),
+        providerSessionId: "claude-session-1",
+        providerVersion: "0.test"
+      };
+    };
+    const cliRunner: AgentProviderRunner = () => {
+      throw new Error("CLI fallback should not run");
+    };
+    const root = mkdtempSync(join(tmpdir(), "coordinator-agent-claude-sdk-"));
+    const promptPath = join(root, "prompt.md");
+    const transcriptPath = join(root, "transcript.jsonl");
+    writeFileSync(promptPath, "# prompt\nsdk context", "utf8");
+
+    const provider = new ClaudeCodeProvider({ sdkRunner, cliRunner });
+    const result = provider.run({
+      sessionId: "session-1",
+      cwd: root,
+      promptPath,
+      outputPath: join(root, "final.md"),
+      transcriptPath,
+      timeoutMs: 1234,
+      metadata: { providerId: "claude-code", role: "outer", taskId: "task-1" }
+    });
+
+    expect(result).toMatchObject({
+      finalResponse: "claude sdk final\n",
+      providerSessionId: "claude-session-1",
+      implementationMode: "sdk",
+      permissionProfile: "claude-code:dontAsk:tools-none",
+      rawEventArtifactPath: transcriptPath
+    });
+    expect(sdkCalls[0]).toMatchObject({
+      cwd: root,
+      prompt: "# prompt\nsdk context",
+      permissionProfile: "claude-code:dontAsk:tools-none",
+      sdkPackageName: "@anthropic-ai/claude-agent-sdk"
+    });
+    expect(typeof sdkCalls[0].sdkImportPath).toBe("string");
+    expect(existsSync(sdkCalls[0].sdkImportPath!)).toBe(true);
+  });
+
+  it("SDK raw events 只写入 transcript artifact，不进入 Core event payload", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createTaskFixture(databasePath);
+    const rawSecret = "raw-sdk-event-secret-lockToken-provider-private-session";
+    const provider = {
+      id: "sdk-fake",
+      kind: "fake",
+      capabilities: ["test"],
+      run(_input: AgentProviderRunInput) {
+        return {
+          finalResponse: "sdk completed",
+          transcript: JSON.stringify({ type: "provider.raw_event", payload: rawSecret }),
+          providerSessionId: "provider-session-1",
+          providerVersion: "0.test",
+          implementationMode: "sdk" as const,
+          permissionProfile: "test-readonly",
+          rawEventArtifactPath: _input.transcriptPath
+        };
+      }
+    };
+
+    const result = withDatabase(databasePath, (context) =>
+      runCoordinatorAgentSession(context, { taskId: fixture.taskId, provider })
+    );
+    const transcript = readFileSync(result.artifacts.transcriptPath, "utf8");
+    const events = withDatabase(databasePath, (context) => listTaskEvents(context, fixture.taskId));
+
+    expect(transcript).toContain(rawSecret);
+    expect(JSON.stringify(events)).not.toContain(rawSecret);
+    expect(events.find((event) => event.type === "agent.session_completed")?.payload).toMatchObject({
+      implementationMode: "sdk",
+      providerSessionId: "provider-session-1",
+      permissionProfile: "test-readonly",
+      rawEventArtifactPath: result.artifacts.transcriptPath
+    });
   });
 
   it("planning-only session 不要求 provider cwd 指向 repo", () => {

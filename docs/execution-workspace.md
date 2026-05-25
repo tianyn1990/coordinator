@@ -184,7 +184,7 @@ daemon 可释放过期 lock。
 - CodexProvider。
 - ClaudeCodeProvider。
 
-长期主路径应采用 SDK-first adapter：
+当前主路径已采用 SDK-first adapter：
 
 ```text
 CodexProvider -> @openai/codex-sdk
@@ -192,7 +192,7 @@ ClaudeCodeProvider -> @anthropic-ai/claude-agent-sdk
 CLI subprocess -> compatibility fallback
 ```
 
-SDK 仍可能在内部管理本地 CLI 子进程，但 Coordinator 不应直接长期拼接 Codex / Claude Code 的易变命令行参数。AgentProvider adapter 应统一承担 session id、cwd、permission profile、取消、resume、event stream 和版本兼容性。
+SDK 仍可能在内部管理本地 CLI 子进程，但 Coordinator 不再把直接拼接 Codex / Claude Code 易变命令行参数作为主路径。AgentProvider adapter 统一承担 session id、cwd、permission profile、event stream 证据和版本兼容性；现阶段 cancel/resume 的完整运行时语义继续留给后续切片补齐。
 
 统一抽象：
 
@@ -210,7 +210,9 @@ streamEvents
 
 - provider cwd 固定为 sessionRoot，不指向 project repo 或 workspace repo。
 - prompt、surface JSON、surface Markdown、transcript 和 final response 都保存在 `coordinator/sessions/<session-id>/`。
-- CodexProvider 使用 read-only sandbox；ClaudeCodeProvider 使用 bare / dontAsk / 空 tools。
+- CodexProvider 默认通过 `@openai/codex-sdk` 使用 read-only sandbox 与 never approval；SDK unavailable 时回落到既有 CLI read-only fallback。
+- ClaudeCodeProvider 默认通过 `@anthropic-ai/claude-agent-sdk` 使用 `dontAsk` 与空 tools；SDK unavailable 时回落到既有 CLI `--print` fallback。
+- SDK raw events 只写入 transcript artifact；Core event payload 只保留 implementation mode、permission profile、provider session id、provider version 和 artifact ref 等窄摘要。
 - 外层 agent 本轮不能直接执行 repo 写入、不能绕过 Coordinator Surface，也不能替代后续 agent tools executor。
 
 后续 SDK adapter 必须继续保持这些边界：

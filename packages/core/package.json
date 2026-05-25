@@ -16,7 +16,9 @@
     "build": "tsc -p tsconfig.json"
   },
   "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.150",
     "@coordinator/db": "workspace:*",
-    "@coordinator/shared": "workspace:*"
+    "@coordinator/shared": "workspace:*",
+    "@openai/codex-sdk": "0.133.0"
   }
 }

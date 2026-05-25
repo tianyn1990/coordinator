@@ -70,13 +70,17 @@ export type {
 } from "./coordinator-agent-tools.js";
 export type {
   AgentProvider,
+  AgentProviderImplementationMode,
   AgentProviderRunInput,
   AgentProviderRunResult,
   AgentProviderRunner,
+  AgentProviderSdkRunInput,
+  AgentProviderSdkRunner,
   AgentSessionInspection,
   AgentSessionRuntimeResult,
   InspectAgentSessionInput,
-  RunCoordinatorAgentSessionInput
+  RunCoordinatorAgentSessionInput,
+  SdkFirstAgentProviderOptions
 } from "./agent-provider-runtime.js";
 export type { DaemonActionResult, DaemonRuntimeInput, DaemonTickResult, ParsedAgentToolRequest } from "./daemon-runtime.js";
 export type {
