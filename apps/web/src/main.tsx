@@ -1,6 +1,15 @@
 import { StrictMode, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { serviceInfo } from "@coordinator/shared";
+import {
+  buildWorkflowGateInboxItem,
+  groupWorkflowActions,
+  summarizeWorkflowGate,
+  workflowActionButtonLabel,
+  type WorkflowGateInboxItem,
+  type WorkflowActionGroups,
+  type WorkflowGateSummary
+} from "./workflow-actions.js";
 import "./styles.css";
 
 type Project = {
@@ -268,16 +277,17 @@ type TaskCard = {
   artifactSummary: string;
   needsHuman: boolean;
   needsMergeApproval: boolean;
+  workflowGate: WorkflowGateSummary;
   attentionRequired: boolean;
   hasPrAttention: boolean;
 };
 
-type ActionInboxItem = {
+type ActionInboxItem = WorkflowGateInboxItem | {
   id: string;
   taskId: string;
   projectName: string;
   title: string;
-  kind: "merge" | "human" | "attention" | "pr" | "failed";
+  kind: "merge" | "human" | "workflow" | "attention" | "pr" | "failed";
   tone: "waiting" | "attention" | "danger";
   label: string;
   summary: string;
@@ -330,6 +340,7 @@ type WorkflowLensModel = {
   progressSummary: string;
   handoff: string;
   allowedActions: string[];
+  actionGroups: WorkflowActionGroups;
   deniedActions: string[];
   actionHints: WorkflowActionHint[];
   stageArtifacts: WorkflowArtifactRef[];
@@ -1055,12 +1066,19 @@ function WorkbenchBoard({
     {
       id: "needs",
       title: "Needs me",
-      cards: cards.filter((card) => card.needsHuman || card.needsMergeApproval || card.attentionRequired)
+      cards: cards.filter((card) => card.needsHuman || card.needsMergeApproval || card.workflowGate.hasOperatorGate || card.attentionRequired)
     },
     {
       id: "running",
       title: "Workflow active",
-      cards: cards.filter((card) => card.statusTone === "running" && !card.needsHuman && !card.needsMergeApproval && !card.attentionRequired)
+      cards: cards.filter(
+        (card) =>
+          card.statusTone === "running" &&
+          !card.needsHuman &&
+          !card.needsMergeApproval &&
+          !card.workflowGate.hasOperatorGate &&
+          !card.attentionRequired
+      )
     },
     {
       id: "review",
@@ -1076,6 +1094,7 @@ function WorkbenchBoard({
           card.statusTone === "waiting" &&
           !card.needsHuman &&
           !card.needsMergeApproval &&
+          !card.workflowGate.hasOperatorGate &&
           !card.attentionRequired &&
           !card.hasPrAttention
       )
@@ -1278,7 +1297,19 @@ function TaskCockpitView({
 
       <section className="summary-band cockpit-facts">
         <Fact label="Status" value={detail.task.status} />
-        <Fact label="Next owner" value={nextOwner(detail.task, detail, model.evidence.some((item) => item.kind === "human"), model.evidence.some((item) => item.kind === "merge"), detail.diagnosis.operatorAttention.required)} />
+        <Fact
+          label="Next owner"
+          value={nextOwner(
+            detail.task,
+            detail,
+            model.evidence.some((item) => item.kind === "human"),
+            model.evidence.some((item) => item.kind === "merge"),
+            model.workflow.actionGroups.operatorFacing.length > 0
+              ? summarizeWorkflowGate(model.workflow.actionGroups.operatorFacing)
+              : summarizeWorkflowGate([]),
+            detail.diagnosis.operatorAttention.required
+          )}
+        />
         <Fact label="Surface" value={detail.surface.surfaceKind} />
         <Fact label="Updated" value={formatRelativeTime(detail.task.updatedAt)} />
       </section>
@@ -1362,6 +1393,14 @@ function WorkflowLens({ model }: { model: WorkflowLensModel }) {
         <LensList title="Allowed actions" empty="none" items={model.allowedActions} />
         <LensList title="Denied actions" empty="none" items={model.deniedActions} />
       </div>
+      <div className="lens-columns">
+        <LensList title="Operator gates" empty="none" items={model.actionGroups.operatorFacing} />
+        <LensList
+          title="Internal / debug"
+          empty="none"
+          items={[...model.actionGroups.agentInternal, ...model.actionGroups.debugOnly]}
+        />
+      </div>
       <div className="lens-section">
         <p className="field-label">Action input hints</p>
         {model.actionHints.length === 0 ? <p className="muted">暂无 action input hint。</p> : null}
@@ -1426,7 +1465,8 @@ function WorkflowActionPanel({
 }) {
   const [submittingAction, setSubmittingAction] = useState<string | undefined>();
   const run = detail.workflowRuns[0];
-  if (!run || run.status !== "running" || run.handoffKind || workflow.allowedActions.length === 0) {
+  const operatorActions = workflow.actionGroups.operatorFacing;
+  if (!run || run.status !== "running" || run.handoffKind || operatorActions.length === 0) {
     return null;
   }
 
@@ -1473,11 +1513,11 @@ function WorkflowActionPanel({
         </ul>
       ) : null}
       <div className="workflow-action-list">
-        {workflow.allowedActions.map((actionId) => {
+        {operatorActions.map((actionId) => {
           const hint = hintByAction.get(actionId);
           const requiredArgs = hint?.requiredArgs ?? [];
           const unsupported = requiredArgs.length > 1;
-          const buttonLabel = actionId === "freeze-requirements" ? "Approve requirements and continue" : "Continue";
+          const buttonLabel = workflowActionButtonLabel(actionId);
           return (
             <form key={actionId} className="workflow-action-card" onSubmit={(event) => void submit(event, actionId, requiredArgs)}>
               <div>
@@ -1493,7 +1533,7 @@ function WorkflowActionPanel({
               {unsupported ? <p className="muted">当前 Web 仅支持 0 或 1 个 string 参数；请先使用 workflow 内部流程或后续版本处理。</p> : null}
               {hint?.usage ? <small>{hint.usage}</small> : null}
               <button type="submit" disabled={Boolean(submittingAction) || unsupported}>
-                {submittingAction === actionId ? "Confirming..." : buttonLabel}
+                {submittingAction === actionId ? "Confirming…" : buttonLabel}
               </button>
             </form>
           );
@@ -2315,9 +2355,19 @@ function describeRunStopReason(
   }
   const latestWorkflow = detail.workflowRuns[0];
   if (latestWorkflow?.status === "running" && !latestWorkflow.handoffKind) {
+    const workflow = buildWorkflowLensModel(detail);
+    if (workflow.actionGroups.operatorFacing.length > 0) {
+      return {
+        stop: true,
+        reason: `已停止：workflow 等待 operator gate - ${workflow.actionGroups.operatorFacing.join(", ")}`
+      };
+    }
     return {
       stop: true,
-      reason: "已停止：workflow 正在运行且尚未 handoff，Coordinator 只读 inspect，不自动执行 workflow action"
+      reason:
+        workflow.actionGroups.agentInternal.length > 0 || workflow.actionGroups.debugOnly.length > 0
+          ? "仍在观察：workflow 当前只有 agent/internal 或 debug-only action；不进入 needs-me，也不自动执行 workflow action"
+          : "仍在观察：workflow 正在运行且尚未 handoff；Coordinator 只读 inspect / 等待 handoff"
     };
   }
   if (tick.status === "failed") {
@@ -2381,7 +2431,8 @@ function buildWorkbenchModel(
       id: project.id,
       name: project.name,
       total: projectCards.length,
-      attention: projectCards.filter((card) => card.needsHuman || card.needsMergeApproval || card.attentionRequired).length
+      attention: projectCards.filter((card) => card.needsHuman || card.needsMergeApproval || card.workflowGate.hasOperatorGate || card.attentionRequired)
+        .length
     };
   });
   return {
@@ -2389,7 +2440,7 @@ function buildWorkbenchModel(
     metrics: {
       total: cards.length,
       running: cards.filter((card) => card.statusTone === "running").length,
-      needsHuman: cards.filter((card) => card.needsHuman || card.needsMergeApproval).length,
+      needsHuman: cards.filter((card) => card.needsHuman || card.needsMergeApproval || card.workflowGate.hasOperatorGate).length,
       attention: cards.filter((card) => card.attentionRequired).length,
       review: cards.filter((card) => card.hasPrAttention).length,
       done: cards.filter((card) => card.statusTone === "done").length
@@ -2403,18 +2454,21 @@ function buildTaskCard(task: TaskListItem, detail?: TaskDetail): TaskCard {
   const pendingHuman = detail?.humanRequests.find((request) => request.status === "pending" && request.kind !== "merge_approval");
   const pendingMerge = detail?.humanRequests.find((request) => request.status === "pending" && request.kind === "merge_approval");
   const hasPrAttention = Boolean(detail?.latestPullRequest && detail.latestPullRequest.status !== "merged");
+  const workflowGate = summarizeWorkflowGate(detail ? buildWorkflowLensModel(detail).allowedActions : []);
   const attentionRequired = detail?.diagnosis.operatorAttention.required ?? isHighRiskStatus(task.status);
+  const needsDecision = Boolean(pendingHuman || pendingMerge || workflowGate.hasOperatorGate);
   return {
     task,
     detail,
     prSummary: prSummary(detail),
-    statusTone: taskTone(task.status, Boolean(pendingHuman || pendingMerge), attentionRequired),
-    nextOwner: nextOwner(task, detail, Boolean(pendingHuman), Boolean(pendingMerge), attentionRequired),
+    statusTone: taskTone(task.status, needsDecision, attentionRequired),
+    nextOwner: nextOwner(task, detail, Boolean(pendingHuman), Boolean(pendingMerge), workflowGate, attentionRequired),
     blocker: detail?.currentBlocker ?? task.status,
     workflowSummary: workflowSummary(detail),
     artifactSummary: artifactSummary(detail),
     needsHuman: Boolean(pendingHuman),
     needsMergeApproval: Boolean(pendingMerge),
+    workflowGate,
     attentionRequired,
     hasPrAttention
   };
@@ -2448,6 +2502,15 @@ function buildActionInbox(cards: TaskCard[]): ActionInboxItem[] {
         label: "Human request",
         summary: pendingHuman.questionArtifactPath ?? pendingHuman.blockedKey
       });
+    }
+    const workflowGateItem = buildWorkflowGateInboxItem({
+      taskId: card.task.id,
+      projectName: card.task.projectName,
+      title: card.task.title,
+      actionIds: card.workflowGate.operatorActions
+    });
+    if (workflowGateItem) {
+      items.push(workflowGateItem);
     }
     if (card.attentionRequired) {
       items.push({
@@ -2560,9 +2623,12 @@ function buildWorkflowLensModel(detail: TaskDetail): WorkflowLensModel {
   const progressLabel = projection.progressLabel ?? (stage === "unknown" ? "Workflow status" : stage);
   const progressSummary = projection.progressSummary ?? workflowSummary(detail);
   const latestEvents = detail.events.filter((event) => event.type.startsWith("workflow.")).slice(-5);
+  const actionGroups = groupWorkflowActions(projection.allowedActions);
   const inspectOnlyReason =
     run?.status === "running" && !run.handoffKind
-      ? "workflow 正在运行且尚未 handoff；Coordinator 只读 inspect / 等待 handoff，不自动执行 workflow action。"
+      ? actionGroups.operatorFacing.length > 0
+        ? "workflow 正在等待 operator-facing gate；确认仍由 Core 校验后执行。"
+        : "workflow 正在运行且尚未 handoff；当前仅观察 workflow runtime / inner agent，不自动执行 workflow action。"
       : "Workflow debug 字段只用于 operator 展示，不驱动外层状态。";
 
   return {
@@ -2576,6 +2642,7 @@ function buildWorkflowLensModel(detail: TaskDetail): WorkflowLensModel {
     progressSummary,
     handoff,
     allowedActions: projection.allowedActions,
+    actionGroups,
     deniedActions: projection.deniedActions,
     actionHints: projection.actionHints,
     stageArtifacts: projection.stageArtifacts,
@@ -2708,10 +2775,12 @@ function nextOwner(
   detail: TaskDetail | undefined,
   needsHuman: boolean,
   needsMergeApproval: boolean,
+  workflowGate: WorkflowGateSummary,
   attentionRequired: boolean
 ): string {
   if (needsMergeApproval) return "next: human approval";
   if (needsHuman) return "next: human answer";
+  if (workflowGate.hasOperatorGate) return "next: workflow operator gate";
   if (attentionRequired) return "next: operator review";
   const workflow = detail?.workflowRuns[0];
   if (workflow?.status === "running") return "next: workflow handoff";

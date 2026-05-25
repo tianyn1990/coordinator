@@ -3,6 +3,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import {
   createAttempt,
   createHumanRequest,
@@ -618,6 +619,97 @@ exit 1
       });
       const events = withDatabase(databasePath, (context) => listTaskEvents(context, "task-api-workflow-action"));
       expect(events.map((event) => event.type)).toContain("workflow.action");
+    } finally {
+      if (previous === undefined) {
+        delete process.env.COORDINATOR_DB_PATH;
+      } else {
+        process.env.COORDINATOR_DB_PATH = previous;
+      }
+    }
+  });
+
+  it("workflow actions API 即使 latest allowedActions 包含 materialize-change 也会按 classification 拒绝", async () => {
+    const databasePath = join(mkdtempSync(join(tmpdir(), "coordinator-api-workflow-internal-action-")), "api.sqlite");
+    const repoPath = mkdtempSync(join(tmpdir(), "coordinator-api-workflow-internal-action-repo-"));
+    mkdirSync(join(repoPath, ".git"));
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "coordinator-api-workflow-internal-action-workspaces-"));
+    const launcherPath = join(mkdtempSync(join(tmpdir(), "coordinator-api-workflow-internal-action-launcher-")), "workflow");
+    const actionMarker = join(tmpdir(), `coordinator-api-workflow-internal-action-${randomUUID()}.txt`);
+    writeFileSync(
+      launcherPath,
+      `#!/bin/sh
+set -eu
+if [ "$1" = "protocol" ] && [ "$2" = "status" ]; then
+  cat <<'JSON'
+{"runId":"inner-run-1","profile":"feature","lifecycle":"active","stage":"implementation","allowedActions":["materialize-change"],"actionInputs":{"materialize-change":{"requiredArgs":["change-id"],"usage":"workflow protocol action --run inner-run-1 materialize-change <change-id>"}},"handoff":{"available":false,"artifacts":[],"deniedActions":[]},"summary":"waiting for inner agent"}
+JSON
+  exit 0
+fi
+if [ "$1" = "protocol" ] && [ "$2" = "action" ]; then
+  echo action-called > ${JSON.stringify(actionMarker)}
+  echo "materialize-change should not be called by Web/API" >&2
+  exit 1
+fi
+echo "unexpected args: $*" >&2
+exit 1
+`
+    );
+    chmodSync(launcherPath, 0o755);
+    runMigrations(databasePath);
+    withDatabase(databasePath, (context) => {
+      const project = createProject(context, {
+        id: "project-api-workflow-internal-action",
+        name: "workflow-internal-action",
+        repoPath,
+        workspaceRoot,
+        workflowLauncher: launcherPath
+      });
+      const task = createTask(context, { id: "task-api-workflow-internal-action", projectId: project.id, title: "workflow internal action" });
+      const attempt = createAttempt(context, {
+        id: "attempt-api-workflow-internal-action",
+        projectId: project.id,
+        taskId: task.id
+      });
+      const workspacePath = join(workspaceRoot, project.id, task.id, attempt.id);
+      const repoWorktree = join(workspacePath, "repo");
+      mkdirSync(join(repoWorktree, ".git"), { recursive: true });
+      createWorkspace(context, {
+        id: "workspace-api-workflow-internal-action",
+        projectId: project.id,
+        taskId: task.id,
+        attemptId: attempt.id,
+        status: "ready",
+        workspacePath,
+        repoPath: repoWorktree,
+        branch: "coordinator/task-api-workflow-internal-action/attempt-api-workflow-internal-action",
+        baseBranch: "main"
+      });
+      createWorkflowRun(context, {
+        id: "workflow-run-api-internal-action",
+        projectId: project.id,
+        taskId: task.id,
+        attemptId: attempt.id,
+        profileId: "feature",
+        status: "running",
+        externalId: "inner-run-1"
+      });
+    });
+
+    const previous = process.env.COORDINATOR_DB_PATH;
+    process.env.COORDINATOR_DB_PATH = databasePath;
+    try {
+      const server = buildServer();
+      const response = await server.inject({
+        method: "POST",
+        url: "/workflow-runs/workflow-run-api-internal-action/actions",
+        payload: { action: "materialize-change", arg: "add-web-loop", expectedStateVersion: 0, actor: "api-test" }
+      });
+
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toMatchObject({ error: expect.stringContaining("不是 operator-facing gate") });
+      expect(existsSync(actionMarker)).toBe(false);
+      const events = withDatabase(databasePath, (context) => listTaskEvents(context, "task-api-workflow-internal-action"));
+      expect(events.map((event) => event.type)).not.toContain("workflow.action");
     } finally {
       if (previous === undefined) {
         delete process.env.COORDINATOR_DB_PATH;

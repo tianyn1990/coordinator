@@ -1701,6 +1701,72 @@ describe("daemon runtime", () => {
     expect(operation.last_observed_state).not.toContain("secret-provider-output");
   });
 
+  it("daemon inspect 到 agent/internal workflow action 时不制造 operator blocker", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createTaskFixture(databasePath);
+    const runner: WorkflowProtocolRunner = () =>
+      JSON.stringify({
+        runId: "inner-run-internal-action",
+        profile: "feature",
+        lifecycle: "active",
+        allowedActions: ["materialize-change"],
+        actionInputs: {
+          "materialize-change": {
+            requiredArgs: ["change-id"],
+            usage: "workflow protocol action --run inner-run-internal-action materialize-change <change-id>"
+          }
+        },
+        handoff: { available: false, artifacts: [] },
+        summary: "implementation continues in workflow runtime"
+      });
+    let branch = "";
+
+    withDatabase(databasePath, (context) => {
+      const fixtureWorkspace = createWorkflowWorkspaceFixture(context, fixture, "workflow-run-internal-action");
+      branch = fixtureWorkspace.branch;
+      context.db
+        .prepare(
+          `INSERT INTO workflow_runs (id, project_id, task_id, attempt_id, profile_id, status, external_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          "workflow-run-internal-action",
+          fixture.projectId,
+          fixture.taskId,
+          fixtureWorkspace.attempt.id,
+          "feature",
+          "running",
+          "inner-run-internal-action"
+        );
+      context.db.prepare("UPDATE tasks SET status = ? WHERE id = ?").run("running", fixture.taskId);
+    });
+
+    const result = withDatabase(databasePath, (context) =>
+      runDaemonTick(context, {
+        taskId: fixture.taskId,
+        workflowInspectRunner: runner,
+        workspaceGitRunner: createWorkflowWorkspaceGitRunner(branch)
+      })
+    );
+    expect(result.actions).toContainEqual(
+      expect.objectContaining({
+        kind: "workflow_inspected",
+        workflowRunId: "workflow-run-internal-action",
+        status: "succeeded"
+      })
+    );
+
+    const state = withDatabase(databasePath, (context) => ({
+      task: context.db.prepare("SELECT status FROM tasks WHERE id = ?").get(fixture.taskId) as { status: string },
+      events: listTaskEvents(context, fixture.taskId),
+      surface: buildTaskSurfaceFromDb(context, fixture.taskId)
+    }));
+    expect(state.task.status).toBe("running");
+    expect(state.events.map((event) => event.type)).not.toContain("human.request_created");
+    expect(JSON.stringify(state.events)).not.toContain("operator_attention");
+    expect(JSON.stringify(state.surface.json.available_tools)).not.toContain("workflow_action");
+  });
+
   it("task-scoped workflow inspect 先按 task 过滤再 LIMIT", () => {
     const databasePath = createMigratedDatabase();
     const fixture = createTaskFixture(databasePath);

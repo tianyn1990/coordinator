@@ -54,6 +54,15 @@ daemon 是巡检与恢复运行时，不是 workflow 内部执行者。
 running workflow 的下一步由 workflow protocol 和 handoff 表达，coordinator 不越过 handoff 猜测内部进度。
 ```
 
+进一步约束：
+
+```text
+inner coding agent 仍在运行 => daemon 只观察、探活、记录和 reconcile。
+inner coding agent 结束/失败/stalled/handoff => Core 才结合 agent evidence 与 workflow status 判断 owner。
+```
+
+daemon 不应在 coding agent 仍在运行时，因为 inspect 到 workflow `allowedActions` 就制造 Web needs-me。它可以记录 latest status、last activity、provider event 摘要和 recovery decision；真正 operator gate 必须来自 human request、merge approval、workflow handoff、operator attention，或 Coordinator 侧明确分类为 operator-facing 的 workflow gate。
+
 ### 1.2 当前已落地的 recovery hardening 子集
 
 Iteration 12.2 已补齐 daemon/Core recovery matrix 的第一层实现：
@@ -112,6 +121,7 @@ daemon 不负责：
 - workflow profile 语义选择。
 - 把 human explicit selection 之外的 profile 写入 workflow start 请求。
 - 根据 workflow allowedActions / actionInputHints 主动执行 workflow action。
+- 根据 workflow allowedActions / actionInputHints 主动打断 running inner coding agent 并要求开发者决策。
 - 直接修改代码。
 - 绕过 Coordinator Agent 执行高层策略。
 

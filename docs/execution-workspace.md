@@ -184,6 +184,16 @@ daemon 可释放过期 lock。
 - CodexProvider。
 - ClaudeCodeProvider。
 
+长期主路径应采用 SDK-first adapter：
+
+```text
+CodexProvider -> @openai/codex-sdk
+ClaudeCodeProvider -> @anthropic-ai/claude-agent-sdk
+CLI subprocess -> compatibility fallback
+```
+
+SDK 仍可能在内部管理本地 CLI 子进程，但 Coordinator 不应直接长期拼接 Codex / Claude Code 的易变命令行参数。AgentProvider adapter 应统一承担 session id、cwd、permission profile、取消、resume、event stream 和版本兼容性。
+
 统一抽象：
 
 ```text
@@ -202,6 +212,14 @@ streamEvents
 - prompt、surface JSON、surface Markdown、transcript 和 final response 都保存在 `coordinator/sessions/<session-id>/`。
 - CodexProvider 使用 read-only sandbox；ClaudeCodeProvider 使用 bare / dontAsk / 空 tools。
 - 外层 agent 本轮不能直接执行 repo 写入、不能绕过 Coordinator Surface，也不能替代后续 agent tools executor。
+
+后续 SDK adapter 必须继续保持这些边界：
+
+- outer provider 默认最小权限，cwd 固定 sessionRoot。
+- inner provider 才允许在 workspace repo 中运行，并且必须由 workflow/runtime 或明确 Core gate 授权。
+- provider raw JSONL、SDK private session 文件、权限内部细节和完整 stdout 不进入 Core 状态机。
+- provider event 应分层保存：raw event 写 artifact，normalized event 写 timeline 摘要，Core 只使用极少数 lifecycle signal。
+- provider SDK 和底层 CLI 版本需要记录或 pin；版本不兼容时进入 provider unavailable / operator attention，而不是静默降级为危险权限。
 
 ## 10. Outer 和 Inner Agent
 

@@ -111,6 +111,8 @@ Symphony 的核心经验会被吸收为：
   - 交接给 `/Users/hetao/Documents/github/workflow` 工程的 actionInputs protocol schema 正式化说明。
 - [workflow-stage-substate-handoff.md](./workflow-stage-substate-handoff.md)
   - 交接给 `/Users/hetao/Documents/github/workflow` 工程的 stage/substate/progress protocol 展示增强说明。
+- [workflow-agent-lifecycle-handoff.md](./workflow-agent-lifecycle-handoff.md)
+  - Coordinator 观察 inner coding agent 生命周期、区分 workflow 内部 action 与真正 operator gate 的设计交接备忘。
 - [execution-workspace.md](./execution-workspace.md)
   - workspace、git worktree、branch、worker runtime、agent provider。
 - [project-registry.md](./project-registry.md)
@@ -136,6 +138,17 @@ Symphony 的核心经验会被吸收为：
 agent 有智能，但只能通过受控 surface 和 tools 行动。
 复杂内容写 artifact，工具参数保持窄。
 ```
+
+针对 workflow 与 agent 生命周期，第一版的长期心智是：
+
+```text
+Coordinator 管多个 workflow run 如何被观察、恢复、确认和收口。
+workflow / inner coding agent 管单个代码工作单元内部如何执行。
+```
+
+Coordinator 可以持续只读 inspect、记录 agent/provider/workflow 事件、展示运行进度和恢复建议；但当 inner coding agent 仍在运行时，不应因为 workflow `allowedActions` 或 `actionInputs` 出现就打断开发者。只有在 workflow handoff、human request、merge approval、provider failure、operator attention 或明确 operator gate 出现时，Web 才应把事项放进 needs-me / Action Inbox。
+
+当前 `workflow protocol` 保持既有契约不变。`agent.state`、`blocker.owner`、`operatorActions`、`agentActions` 等字段只作为未来可选 protocol 增强方向；本期 Coordinator 侧必须用保守分类和现有状态信息避免把 `materialize-change <change-id>` 等内部动作错误升级为人工 gate。
 
 第一版可以是单进程、本机执行，但必须保留：
 

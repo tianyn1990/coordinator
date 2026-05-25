@@ -4,6 +4,8 @@
 > 来源：`coordinator` Web 多任务工作台与 Task Cockpit 设计  
 > 目标读者：负责 `workflow` 工程的 agent / 开发者
 
+> 当前约束：本期 Coordinator 不推进 `/Users/hetao/Documents/github/workflow` 修改，也不要求 workflow protocol 立即变更。本文保留为未来交接参考；Coordinator 侧现阶段必须兼容字段缺失，并且不得把 `allowedActions/actionInputs` 直接升级为 Web needs-me。
+
 ## 1. 背景
 
 `coordinator` 的核心目标不是替代 `workflow`，而是让一个开发者可以同时管理多个工程、多个任务，并只在真正需要人工判断时介入。
@@ -59,6 +61,7 @@ stabilize-protocol-stage-substate-projection
 - 读取或写入 `.workflow` private state。
 - 根据 `stage` / `substate` / `gate` 推导 `pr_ready`、`done` 或 `merge`。
 - 根据 `allowedActions` / `actionInputs` 自动执行 workflow action。
+- 根据 `allowedActions` / `actionInputs` 自动生成 Web Action Card 或人工待办。
 - 把 workflow debug 字段暴露给外层 Coordinator Agent 作为 agent tool。
 - 让 daemon 基于 workflow 内部 action 做自动推进。
 

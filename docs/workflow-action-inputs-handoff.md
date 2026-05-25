@@ -4,6 +4,8 @@
 > 来源：`coordinator` 第一轮真实工程 smoke test  
 > 目标读者：负责 `workflow` 工程的 agent / 开发者
 
+> 当前约束：本期 Coordinator 不推进 `/Users/hetao/Documents/github/workflow` 修改，也不要求 workflow protocol 立即变更。本文保留为未来交接参考；Coordinator 侧现阶段只把 `actionInputs` 当作 operator/debug 展示 hint，不把带参内部 action 自动变成 Web needs-me。
+
 ## 1. 背景
 
 `coordinator` 在真实工程 smoke 中已经通过 `workflow protocol status` 观察到顶层 `actionInputs`：
@@ -19,7 +21,9 @@
 }
 ```
 
-这个字段能解决 operator 只能看到 action 名、但不知道 action 参数要求的问题。例如 `materialize-change` 需要一个真实 OpenSpec change id；如果 operator 或外层 agent 不知道这个参数，会先触发 `PROTOCOL_INPUT_NOT_SUPPORTED`，再可能触发 `OPENSPEC_CHANGE_NOT_FOUND`。
+这个字段能解决 operator/debug 视角只能看到 action 名、但不知道 action 参数要求的问题。例如 `materialize-change` 需要一个真实 OpenSpec change id；如果 operator 或外层 agent 不知道这个参数，会先触发 `PROTOCOL_INPUT_NOT_SUPPORTED`，再可能触发 `OPENSPEC_CHANGE_NOT_FOUND`。
+
+但 `materialize-change <change-id>` 这类参数通常应由 workflow runtime / inner coding agent 在其内部上下文中处理，不应默认升级为 Web 开发者必须填写的 Action Card。
 
 `coordinator` 侧本轮只做 sanitized projection：把 `actionInputs` 投影为 operator/debug status 中的 action input hints，不进入 Coordinator Agent Surface，也不驱动外层状态机。
 
@@ -97,6 +101,7 @@ repair-current-change-reference -> requiredArgs: ["change-id"]
 - 根据 `currentChange` 或文件系统自动猜 `change-id`。
 - 根据 `actionInputs` 扩大 Coordinator Agent Surface。
 - 根据 `stage/substate/gate/actionInputs` 推导 PR readiness、done 或 merge。
+- 因 `actionInputs` 存在就把 agent/internal action 放入 Web needs-me。
 
 如果未来需要让 Coordinator Agent 自动执行带参 workflow action，应该在 `coordinator` 侧另开 change，更新 `docs/workflow-protocol.md`、`docs/coordinator-surface.md` 和 `docs/agent-tools.md`，明确哪些 action input hint 可以进入 agent-facing surface。
 

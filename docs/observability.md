@@ -68,6 +68,31 @@ Coordinator Event 必须记录状态迁移、operation_id 和 transition_id。
 
 Agent Event 必须记录 surface snapshot 引用、tool call 引用和 lock token（如有）。
 
+### 3.2.1 Provider SDK Event 分层
+
+Codex / Claude Code 接入 SDK 后，provider 可能持续输出大量结构化事件，例如 turn started/completed、message delta、tool use、command execution、file change、permission request、rate limit、partial stream、result message 等。
+
+这些事件必须分层处理：
+
+```text
+raw provider events
+  -> provider-events.jsonl artifact，只读排查用
+
+normalized agent events
+  -> timeline 摘要，例如 turn_started、tool_started、file_changed、command_finished、permission_requested、turn_completed
+
+decision signals
+  -> 极少数字段进入 Core 判断，例如 agent.state、last_activity_at、failure kind
+```
+
+限制：
+
+- raw event 不作为 Core 真相源。
+- raw event 不默认进入 Coordinator Agent prompt。
+- raw event 不直接驱动 task completed、PR readiness、merge 或 workflow handoff。
+- provider private session path、完整 stdout/stderr、权限内部对象和复杂 JSONL 不进入 agent-facing surface。
+- Web 默认展示 normalized 摘要；完整 provider event 只在 debug drawer 或 artifact 中按需查看。
+
 ### 3.3 Workflow Event
 
 记录 inner workflow：

@@ -5,6 +5,8 @@
 > 当前仓库：`/Users/hetao/Documents/github/coordinator`  
 > 目标读者：继续实现 Web 驱动真实流程、Workflow action 确认闭环的 agent / 开发者
 
+> 更新说明：本文记录 `add-web-workflow-action-loop` 前后的历史判断。2026-05-25 后，`docs/workflow-agent-lifecycle-handoff.md` 对本文中“所有 allowedActions 都按人类确认处理”的策略做了修正：Coordinator 不应成为 workflow 遥控器；Web 只展示真正 operator-facing gate，`materialize-change <change-id>` 等 agent/internal action 只进入 Workflow Lens debug/detail。本期不修改 workflow protocol。
+
 ## 1. 当前目标
 
 用户希望从 Web 页面触发并推进完整真实流程，尽量自动走到最远；但当 workflow 内部出现需要人类确认的阶段时，Coordinator 应该在 Web 中明确展示，并让人确认或补充输入后再继续推进。
@@ -25,7 +27,7 @@ Web 创建任务
 
 - Coordinator 需要主动推进任务，但不是静默执行所有 workflow action。
 - Daemon 可以自动 tick、inspect、reconcile。
-- Web 可以把 workflow 当前阶段和 allowed action 转成 operator action card。
+- Web 只能把 workflow 当前阶段中的 operator-facing gate 转成 operator action card；不能把所有 allowed action 都视为人工待办。
 - 人确认后，Core 才能调用 `workflow protocol action`。
 - Outer Agent 不应该自行选择 workflow profile，也不应该根据 `allowedActions` 静默执行 workflow action。
 
@@ -325,14 +327,14 @@ workflow protocol action ... freeze-requirements
 当前系统缺少的是：
 
 ```text
-Workflow allowed action -> Coordinator Web action card -> 人类确认/输入 -> Core 受控 workflow action -> 继续 run until blocked
+Workflow operator-facing gate -> Coordinator Web action card -> 人类确认 -> Core 受控 workflow action -> 继续 run until blocked
 ```
 
-现在停在 `requirements` 阶段不是失败，而是缺少这个 human-confirmed workflow action loop。
+现在停在 `requirements` 阶段不是失败，而是缺少这个 operator-facing gate 确认闭环。
 
 ## 8. 推荐设计：Workflow Action Card
 
-建议新增一个 Coordinator 侧的 operator action model，把 Workflow projection 转成 Web 可操作卡片。
+建议新增一个 Coordinator 侧的 operator action model，把 Workflow projection 中的真正 operator-facing gate 转成 Web 可操作卡片。`allowedActions` 本身只说明 workflow 内部控制面允许什么，不足以直接成为 Action Card。
 
 ### 8.1 输入来源
 
@@ -352,7 +354,7 @@ Workflow allowed action -> Coordinator Web action card -> 人类确认/输入 ->
 
 ### 8.2 UI 表达
 
-当 workflow running 且无 handoff，但存在 `allowedActions` 时，Task Cockpit 应显示：
+当 workflow running 且无 handoff，并且存在 operator-facing action 时，Task Cockpit 应显示：
 
 ```text
 Workflow requires operator action
@@ -382,29 +384,37 @@ Allowed action:
 }
 ```
 
-Web 应显示：
+Web 不应默认把这类 agent/internal action 升级成人工表单。`materialize-change <change-id>` 应优先由 workflow runtime / inner coding agent 在其上下文中处理；Coordinator Web 只在 Workflow Lens 或 debug detail 中展示参数提示：
 
 ```text
 Action: materialize-change
-change-id: [ input ]
-[Continue]
+required arg: change-id
+usage: workflow protocol action --run run-... materialize-change <change-id>
+not shown in needs me
 ```
 
 ### 8.3 风险等级
 
-第一版建议所有 workflow action 都按 `human-confirmed` 处理：
+修正后的第一版建议按 action ownership 分层：
 
 ```text
 inspect-only:
   workflow status / events / artifacts inspect
   daemon 可自动做
 
-human-confirmed:
+operator-facing:
   freeze-requirements
+  approve-planning-dossier
+  approve-review
+  明确 merge / approval 类 gate
+  Web 必须由人确认后做
+
+agent/internal:
   materialize-change
   repair-current-change-reference
-  其他 workflow allowedActions
-  Web 必须确认后做
+  run-alignment-checks
+  inspect/resume 类 workflow 内部动作
+  只进入 Workflow Lens debug/detail，不进入 needs me
 
 restricted:
   PR/MR create/update
@@ -414,7 +424,7 @@ restricted:
   继续走既有 Core gate
 ```
 
-后续如需自动执行低风险 workflow action，应另开设计，不要在当前 change 中扩大自动化范围。
+后续如需更精确区分 ownership，应优先推动 workflow protocol 增强 `agent.state`、`blocker.owner`、`operatorActions`、`agentActions`。本期不修改 workflow protocol，Coordinator 侧先使用保守分类，避免误打断开发者。
 
 ## 9. 推荐实现方案
 
@@ -427,6 +437,7 @@ add-web-workflow-action-loop
 目标：
 
 - 在 Task Cockpit 中加入 Workflow Action Panel。
+- Panel 只展示 operator-facing gate，不再由 `allowedActions.length > 0` 直接触发。
 - Core/API 增加受控 workflow action endpoint。
 - Web 提交 operator intent。
 - Core 校验 latest status / allowedActions / actionInputs / stateVersion。
@@ -459,6 +470,7 @@ invokeWorkflowActionFromOperator(context, {
 
 - 读取 workflow run。
 - inspect latest status 或使用可证明最新的 projection。
+- 校验 action 属于 Coordinator 侧 operator-facing classification。
 - 校验 action 在 `allowedActions` 中。
 - 校验 action 不在 `deniedActions` 中。
 - 根据 `actionInputs[action].requiredArgs` 校验参数。
@@ -507,8 +519,8 @@ Task Cockpit / Workflow Lens 增加 Action Panel：
 
 - 展示当前 stage / progress。
 - 展示 stageArtifacts。
-- 展示 allowed action。
-- 若 `actionInputs[action].requiredArgs` 非空，显示输入框。
+- 只展示 operator-facing action。
+- `actionInputs[action].requiredArgs` 非空时，只有 action 已被分类为 operator-facing 才显示输入；agent/internal action 只展示 debug hint。
 - 用户点击后调用 API。
 - 成功后 refresh 当前 task。
 - 可选：成功后自动触发 task-scoped `Run until blocked`，但第一版建议先只 refresh，由用户再点一次继续；若用户确认，希望体验更连续，可在同一次按钮中做：
@@ -537,12 +549,14 @@ Run all
 
 - inspect running workflow。
 - 如果 handoff 产生，按 handoff 后续处理。
-- 如果 allowedActions 存在，保持停止并等待 operator。
+- 如果只有 agent/internal allowedActions，继续视为 workflow/inner agent 内部执行窗口，不制造 operator needs-me。
+- 如果 operator-facing gate 存在，等待 operator。
 
 不允许：
 
 - daemon 根据 `allowedActions` 调 `invokeWorkflowAction`。
 - outer Agent 生成 `coordinator-tool tool: workflow_action` 并自动执行。
+- daemon 在 inner coding agent 仍在运行时，因为看到 `allowedActions` 就打断开发者。
 
 如果未来需要自动低风险 action，必须另开 change，并定义 action allowlist 与风险策略。
 
@@ -621,19 +635,21 @@ next owner = workflow handoff
 
 建议：
 
-- 在 task summary projection 中把 workflow running no handoff 显示为：
+- 在 task summary projection 中把 workflow running no handoff 且存在 operator-facing gate 的场景显示为：
 
 ```text
-currentBlocker: waiting workflow action
-nextOwner: operator workflow action
+currentBlocker: waiting operator-facing workflow gate
+nextOwner: operator gate confirmation
 ```
 
 或增加 UI-only derived status：
 
 ```text
 workflow_running
-waiting_workflow_action
+waiting_operator_gate
 ```
+
+如果只存在 `materialize-change <change-id>` 这类 agent/internal action，则不应派生为 `waiting_operator_gate`，只在 Workflow Lens debug/detail 展示。
 
 谨慎点：
 
@@ -682,7 +698,7 @@ add-web-workflow-action-loop
 
 4. Proposal 中明确：
    - 不让 daemon/outer Agent 自动执行 workflow action。
-   - Web action card 是 human-confirmed operator intent。
+   - Web action card 是 operator-facing gate 的 human-confirmed intent。
    - Core 是唯一执行和校验 workflow action 的入口。
 5. 实现最小闭环：
    - `freeze-requirements` 无参数 action card。
@@ -715,15 +731,15 @@ add-web-workflow-action-loop
 ```markdown
 ## 1. Spec / Design
 
-- [ ] 1.1 定义 Web Workflow Action Loop 的边界：human-confirmed，不自动执行。
-- [ ] 1.2 定义 operator action card 的输入、展示、执行语义。
+- [ ] 1.1 定义 Web Workflow Action Loop 的边界：仅 operator-facing gate human-confirmed，不自动执行。
+- [ ] 1.2 定义 operator action card 的输入、展示、执行语义，只承接 operator-facing gate。
 - [ ] 1.3 定义 Core/API workflow action endpoint 的校验契约。
 - [ ] 1.4 定义 task-scoped/global run until blocked 的停止原因展示。
 
 ## 2. Core / API
 
 - [ ] 2.1 新增 operator-facing workflow action helper。
-- [ ] 2.2 校验 expectedStateVersion / allowedActions / deniedActions / actionInputs。
+- [ ] 2.2 校验 expectedStateVersion / action classification / allowedActions / deniedActions / actionInputs。
 - [ ] 2.3 增加 POST /workflow-runs/:id/actions。
 - [ ] 2.4 补充 operation/event 记录和 sanitized response。
 
@@ -731,7 +747,7 @@ add-web-workflow-action-loop
 
 - [ ] 3.1 Task Cockpit 增加 Workflow Action Panel。
 - [ ] 3.2 支持无参 action：freeze-requirements。
-- [ ] 3.3 支持一个 string arg 的 action input。
+- [ ] 3.3 agent/internal action input 只进入 Workflow Lens debug/detail，不进入 needs-me。
 - [ ] 3.4 action 成功后 refresh 当前 task。
 - [ ] 3.5 task card 增加 data-task-id 和 aria-label。
 - [ ] 3.6 RunUntilBlockedBanner 显示 scope 和分组结果。

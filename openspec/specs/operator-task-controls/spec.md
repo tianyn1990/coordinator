@@ -105,7 +105,7 @@
 
 - **WHEN** daemon tick 后 task 的 workflow run 仍为 running 且没有 handoff
 - **THEN** Web 停止或等待下一轮只读 inspect 结果
-- **AND** Web 不调用 `/workflow-runs/:id/action`
+- **AND** Web 不调用 `/workflow-runs/:id/actions`
 - **AND** Web 不根据 workflow `allowedActions` 或 `actionInputs` 自动构造 action 参数
 
 #### Scenario: 停止条件只用于 operator explanation
@@ -114,6 +114,13 @@
 - **THEN** Web 展示停止原因和最近 tick summaries
 - **AND** 该停止原因不写入 Core DB 作为新状态
 - **AND** 后续任务真相仍以 Core task status、events、human requests、PR/MR、workflow run 和 diagnosis 为准
+
+#### Scenario: agent/internal workflow action 不制造 needs-me
+
+- **WHEN** run-until-blocked 后当前 task 的 workflow projection 只存在 `materialize-change`、`run-alignment-checks` 或 unknown action
+- **THEN** banner 说明当前处于 observing / waiting runtime
+- **AND** Web 不把这些 action 展示为 operator blocker
+- **AND** Web 不要求 operator 输入 workflow 内部参数
 
 ### Requirement: Web Run Until Blocked 必须区分 task-scoped 与 global 结果展示
 
@@ -133,9 +140,9 @@
 - **AND** Web 展示本次 tick actions summary
 - **AND** 某个历史 task 的失败不得掩盖当前打开 task 的 detail 状态
 
-#### Scenario: run banner 不自动执行 workflow action
+#### Scenario: run banner 只提示 operator-facing workflow gate
 
-- **WHEN** run-until-blocked 后当前 task 的 workflow projection 仍存在 allowedActions
-- **THEN** banner 可以提示需要 operator workflow action
+- **WHEN** run-until-blocked 后当前 task 的 workflow projection 存在 allowedActions
+- **THEN** banner 只有在存在 operator-facing gate 时才提示需要 operator workflow action
 - **AND** Web 不因 banner 停止原因自动调用 workflow action endpoint
 

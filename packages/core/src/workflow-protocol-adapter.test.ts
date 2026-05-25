@@ -689,24 +689,38 @@ describe("workflow protocol adapter", () => {
     expect(protocol.calls.find((call) => call.args[1] === "action")?.args).not.toContain(" payload ");
   });
 
-  it("operator workflow action 先校验 latest allowedActions 与 required arg 再执行", () => {
+  it("operator workflow action 先校验 latest allowedActions 与 classification 再执行", () => {
     const databasePath = createMigratedDatabase();
     const fixture = createAttemptWithReadyWorkspace(databasePath);
     const protocol = createProtocolRunner();
+    const operatorRunner: WorkflowProtocolRunner = (args, options) => {
+      if (args[1] === "status") {
+        protocol.calls.push({ args, cwd: options.cwd, launcher: options.launcher, timeoutMs: options.timeoutMs });
+        return JSON.stringify({
+          runId: "inner-run-1",
+          profile: "feature",
+          lifecycle: "active",
+          stage: "requirements",
+          allowedActions: ["freeze-requirements"],
+          handoff: { available: false, artifacts: [], deniedActions: [] },
+          summary: "waiting for requirements approval"
+        });
+      }
+      return protocol.runner(args, options);
+    };
 
     const result = withDatabase(databasePath, (context) => {
       const started = startWorkflowRun(context, {
         attemptId: fixture.attemptId,
         profileId: "feature",
-        runner: protocol.runner
+        runner: operatorRunner
       });
       return invokeWorkflowActionFromOperator(context, {
         workflowRunId: started.workflowRun.id,
-        action: "debug-only",
-        arg: " change-1 ",
+        action: "freeze-requirements",
         expectedStateVersion: started.workflowRun.stateVersion,
         actor: "web-operator",
-        runner: protocol.runner
+        runner: operatorRunner
       });
     });
 
@@ -717,8 +731,52 @@ describe("workflow protocol adapter", () => {
       "action",
       "--run",
       "inner-run-1",
-      "debug-only",
-      "change-1"
+      "freeze-requirements"
+    ]);
+  });
+
+  it("operator workflow action 允许 approve-planning-dossier 这类人工 gate", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createAttemptWithReadyWorkspace(databasePath);
+    const protocol = createProtocolRunner();
+    const planningApprovalRunner: WorkflowProtocolRunner = (args, options) => {
+      if (args[1] === "status") {
+        protocol.calls.push({ args, cwd: options.cwd, launcher: options.launcher, timeoutMs: options.timeoutMs });
+        return JSON.stringify({
+          runId: "inner-run-1",
+          profile: "feature",
+          lifecycle: "active",
+          stage: "technical-plan",
+          allowedActions: ["approve-planning-dossier"],
+          handoff: { available: false, artifacts: [], deniedActions: [] },
+          summary: "waiting for plan approval"
+        });
+      }
+      return protocol.runner(args, options);
+    };
+
+    const result = withDatabase(databasePath, (context) => {
+      const started = startWorkflowRun(context, {
+        attemptId: fixture.attemptId,
+        profileId: "feature",
+        runner: planningApprovalRunner
+      });
+      return invokeWorkflowActionFromOperator(context, {
+        workflowRunId: started.workflowRun.id,
+        action: "approve-planning-dossier",
+        expectedStateVersion: started.workflowRun.stateVersion,
+        actor: "web-operator",
+        runner: planningApprovalRunner
+      });
+    });
+
+    expect(result.operationId).toBeTruthy();
+    expect(protocol.calls.find((call) => call.args[1] === "action")?.args).toEqual([
+      "protocol",
+      "action",
+      "--run",
+      "inner-run-1",
+      "approve-planning-dossier"
     ]);
   });
 
@@ -750,6 +808,95 @@ describe("workflow protocol adapter", () => {
     const databasePath = createMigratedDatabase();
     const fixture = createAttemptWithReadyWorkspace(databasePath);
     const protocol = createProtocolRunner();
+    const requiredArgRunner: WorkflowProtocolRunner = (args, options) => {
+      if (args[1] === "status") {
+        protocol.calls.push({ args, cwd: options.cwd, launcher: options.launcher, timeoutMs: options.timeoutMs });
+        return JSON.stringify({
+          runId: "inner-run-1",
+          profile: "feature",
+          lifecycle: "active",
+          allowedActions: ["approve-review"],
+          actionInputs: {
+            "approve-review": {
+              requiredArgs: ["review-id"],
+              usage: "workflow protocol action --run inner-run-1 approve-review <review-id>"
+            }
+          },
+          handoff: { available: false, artifacts: [], deniedActions: [] },
+          summary: "waiting for review approval"
+        });
+      }
+      return protocol.runner(args, options);
+    };
+
+    expect(() =>
+      withDatabase(databasePath, (context) => {
+        const started = startWorkflowRun(context, {
+          attemptId: fixture.attemptId,
+          profileId: "feature",
+          runner: requiredArgRunner
+        });
+        return invokeWorkflowActionFromOperator(context, {
+          workflowRunId: started.workflowRun.id,
+          action: "approve-review",
+          expectedStateVersion: started.workflowRun.stateVersion,
+          runner: requiredArgRunner
+        });
+      })
+    ).toThrow(/需要参数 review-id/);
+
+    expect(protocol.calls.some((call) => call.args[1] === "action")).toBe(false);
+  });
+
+  it("operator workflow action 拒绝 materialize-change 这类 agent/internal action", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createAttemptWithReadyWorkspace(databasePath);
+    const protocol = createProtocolRunner();
+    const internalActionRunner: WorkflowProtocolRunner = (args, options) => {
+      if (args[1] === "status") {
+        protocol.calls.push({ args, cwd: options.cwd, launcher: options.launcher, timeoutMs: options.timeoutMs });
+        return JSON.stringify({
+          runId: "inner-run-1",
+          profile: "feature",
+          lifecycle: "active",
+          allowedActions: ["materialize-change"],
+          actionInputs: {
+            "materialize-change": {
+              requiredArgs: ["change-id"],
+              usage: "workflow protocol action --run inner-run-1 materialize-change <change-id>"
+            }
+          },
+          handoff: { available: false, artifacts: [], deniedActions: [] },
+          summary: "implementation needs inner agent"
+        });
+      }
+      return protocol.runner(args, options);
+    };
+
+    expect(() =>
+      withDatabase(databasePath, (context) => {
+        const started = startWorkflowRun(context, {
+          attemptId: fixture.attemptId,
+          profileId: "feature",
+          runner: internalActionRunner
+        });
+        return invokeWorkflowActionFromOperator(context, {
+          workflowRunId: started.workflowRun.id,
+          action: "materialize-change",
+          arg: "add-web-loop",
+          expectedStateVersion: started.workflowRun.stateVersion,
+          runner: internalActionRunner
+        });
+      })
+    ).toThrow(/不是 operator-facing gate/);
+
+    expect(protocol.calls.some((call) => call.args[1] === "action")).toBe(false);
+  });
+
+  it("operator workflow action 对 unknown action 采取 debug-only 保守拒绝", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createAttemptWithReadyWorkspace(databasePath);
+    const protocol = createProtocolRunner();
 
     expect(() =>
       withDatabase(databasePath, (context) => {
@@ -761,11 +908,12 @@ describe("workflow protocol adapter", () => {
         return invokeWorkflowActionFromOperator(context, {
           workflowRunId: started.workflowRun.id,
           action: "debug-only",
+          arg: "change-1",
           expectedStateVersion: started.workflowRun.stateVersion,
           runner: protocol.runner
         });
       })
-    ).toThrow(/需要参数 change-id/);
+    ).toThrow(/不是 operator-facing gate/);
 
     expect(protocol.calls.some((call) => call.args[1] === "action")).toBe(false);
   });

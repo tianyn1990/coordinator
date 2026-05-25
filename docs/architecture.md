@@ -17,6 +17,15 @@
 
 `coordinator` 的目标是建立外层无人值守任务协调系统，让一个任务可以从创建、规划、实现、PR/MR、review、rework、merge 到 done 形成完整闭环。
 
+补充定位：
+
+```text
+coordinator 不是 workflow 遥控器。
+coordinator 是多个 workflow run 和 agent session 的管理者、观察者、恢复者和人工 gate 收件箱。
+```
+
+因此，当 inner coding agent 仍在运行时，Coordinator 可以观察 heartbeat、provider event、workflow status 和 artifact 引用，但不应因为 workflow 暴露 `allowedActions` 就中断流程让开发者逐项点击。开发者只应在真正 operator gate、handoff、PR/MR/review/merge、失败恢复或高风险 attention 出现时介入。
+
 ## 2. 核心定位
 
 ```text
@@ -48,6 +57,8 @@ workflow 是内层代码变更执行协议。
 - OpenSpec 使用时机。
 - inner coding agent 的执行边界。
 
+`allowed actions / denied actions` 是 workflow 内部控制面投影，不等同于 Coordinator Web 的 human todo。Coordinator 只能将明确 operator-facing 的 gate 收敛成 Web Action Card；agent/internal action 应保持在 Workflow Lens / debug detail 中作为观察信息。
+
 ## 3. 总体分层
 
 ```text
@@ -62,7 +73,7 @@ Coordinator Core
 Execution Adapters
   |
   +-- Workspace Manager
-  +-- Agent Provider Adapter: Codex / Claude Code
+  +-- Agent Provider Adapter: Codex SDK / Claude Agent SDK / CLI fallback
   +-- Workflow Runtime Adapter: @hetao-ai/workflow
   +-- Git Provider
   +-- Pull Request Provider: GitHub / GitLab
@@ -146,7 +157,7 @@ Coordinator Agent 是外层智能体。
 
 - 读取 Coordinator Surface。
 - 根据任务目标制定 execution plan。
-- 基于 workflow protocol 暴露的 profile catalog 选择或建议 workflow profile。
+- 理解任务已有的人类显式 workflow 选择和 runtime 返回的 actual profile，但不自行选择 workflow profile。
 - 调用受控 tools。
 - 根据 workflow run 结果调整下一步。
 - 判断是否需要 human request。
@@ -162,6 +173,8 @@ Coordinator Agent 是外层智能体。
 - 不能直接改数据库状态伪造完成。
 - 不能绕过 merge approval。
 - 不能绕过 `workflow` protocol。
+- 不能把 workflow `allowedActions/actionInputs` 当作自己的 action queue。
+- 不能在 inner coding agent 仍在运行时替开发者抢先确认 workflow 内部 action。
 - 不能使用 hidden memory。
 
 ### 4.4 Execution Adapters
@@ -185,6 +198,8 @@ Execution Adapters 负责运行真实外部动作。
 - merge policy。
 - human review 判断。
 - workflow profile 语义选择。
+
+Agent Provider Adapter 的长期实现应采用 SDK-first：Codex 通过 `@openai/codex-sdk`，Claude Code / Claude Agent 通过 `@anthropic-ai/claude-agent-sdk`，CLI subprocess 仅作为 compatibility fallback。SDK 仍可能在内部管理本地子进程，但 Coordinator 不应长期手写易碎 CLI 参数组合；provider session、事件流、取消、resume、权限和 cwd 应由 adapter 统一封装。
 
 ### 4.5 Task Source Adapters
 

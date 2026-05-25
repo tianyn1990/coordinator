@@ -20,6 +20,9 @@
 - `coordinator` 不读写 `.workflow` private state。
 - `coordinator` 不映射 workflow 私有 stage/substate 来判断业务完成。
 - `coordinator` 只通过 `workflow protocol` 消费 workflow 声明的 handoff、status、artifact、events。
+- workflow `allowedActions`、`deniedActions` 和 `actionInputs` 不是 Coordinator 的自动执行计划，也不是 Web needs-me 的充分条件。
+- Coordinator 只能把明确 operator-facing 的 gate 收敛成 Web Action Card；`materialize-change <change-id>`、对齐检查、实现推进、inspect/resume 等 agent/internal action 默认只进入 debug/display。
+- 当前版本不要求修改 `workflow protocol`；`operatorActions`、`agentActions`、`blocker.owner`、`agent.state` 等只作为未来可选协议增强。
 
 ### 2.2 Coordinator Agent
 
@@ -36,6 +39,16 @@
 - daemon 不选择 workflow profile。
 - daemon 不判断 review 结论。
 - daemon 只做调度、探活、reconciliation、retry、恢复、并发控制和事件记录。
+- daemon 可以观察 agent/provider/workflow 生命周期，但不得在 inner coding agent 仍在运行时因为 `allowedActions` 出现而打断开发者或自动执行 workflow action。
+
+### 2.4 Agent Provider
+
+- AgentProvider 是执行适配层，不是 Core 状态机。
+- Codex / Claude Code 的长期主路径应使用官方 SDK adapter；CLI 直接拼参数只能作为 compatibility fallback。
+- SDK raw event、provider session 文件、provider 私有 cwd 编码、权限细节和完整 JSONL transcript 不是真相源。
+- Core 只保存统一的 provider session id、cwd/sessionRoot、provider version、权限 profile 摘要、raw transcript artifact ref、normalized event summary 和极少数 lifecycle signal。
+- outer Coordinator Agent 默认是 decision-only：cwd 固定为 sessionRoot，权限最小，不直接修改 repo/workspace。
+- inner coding agent 的 repo 修改能力必须位于 workflow/inner runtime 边界内，不能绕过 workflow protocol 或 workspace/fencing 约束。
 
 ## 3. Coordinator Surface Contract
 

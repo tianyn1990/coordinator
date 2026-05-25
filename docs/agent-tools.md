@@ -188,6 +188,8 @@ operator tools 只能由 Web/CLI/operator 调用，不得进入 Coordinator Agen
 
 - workflow handoff 由 daemon / workflow adapter 根据 workflow protocol 记录。
 - Coordinator Agent 不能调用 `complete_workflow_handoff` 或伪造 handoff。
+- Coordinator Agent 不拥有 workflow action executor；`allowedActions/actionInputs` 不会变成 agent tools。
+- 如果 workflow 内部 action 需要参数，例如 `materialize-change <change-id>`，参数来源应由 workflow runtime / inner coding agent 处理，不能由外层 Coordinator Agent 猜测或通过复杂 JSON 传递。
 
 #### start_workflow_run
 
@@ -232,6 +234,12 @@ operator tools 只能由 Web/CLI/operator 调用，不得进入 Coordinator Agen
 ```text
 --run <workflow-run-id>
 ```
+
+说明：
+
+- inspect 只产生观察和 evidence，不表示外层 agent 可以根据 `allowedActions` 继续执行 workflow 内部 action。
+- 如果 inspect 发现 workflow 仍 active 且无 handoff，默认下一步是等待 workflow/inner agent 继续、或由 daemon 做只读 reconcile。
+- 如果 inspect 发现明确 operator gate、human request suggestion 或 handoff，后续动作仍必须通过 Core gate 和当前 surface 可见工具决定。
 
 ### 3.4 Human Interaction Tools
 

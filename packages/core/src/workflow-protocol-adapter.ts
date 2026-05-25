@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
+import { classifyWorkflowAction } from "@coordinator/shared";
 import {
   ActiveResourceConflictError,
   acquireLock,
@@ -482,6 +483,7 @@ export function invokeWorkflowActionFromOperator(
   const actionArg = input.arg === undefined ? undefined : requireNonEmpty(input.arg, "arg");
 
   if (workflowRun.stateVersion !== input.expectedStateVersion) {
+    assertOperatorFacingWorkflowAction(action);
     return invokeWorkflowAction(context, {
       workflowRunId: input.workflowRunId,
       action,
@@ -671,6 +673,7 @@ function assertOperatorWorkflowActionAllowed(status: WorkflowStatus, action: str
   if (!allowedActions.includes(action)) {
     throw new WorkflowProtocolError(`workflow action ${action} 不在 latest allowedActions 中`);
   }
+  assertOperatorFacingWorkflowAction(action);
 
   const requiredArgs = status.actionInputHints[action]?.requiredArgs ?? [];
   if (requiredArgs.length > 1) {
@@ -682,6 +685,14 @@ function assertOperatorWorkflowActionAllowed(status: WorkflowStatus, action: str
   // actionInputs 是 operator intent 的窄提示；未声明参数时拒绝额外 arg，避免 Web 成为复杂参数通道。
   if (requiredArgs.length === 0 && arg !== undefined) {
     throw new WorkflowProtocolError(`workflow action ${action} 当前不接受参数`);
+  }
+}
+
+function assertOperatorFacingWorkflowAction(action: string): void {
+  const actionClass = classifyWorkflowAction(action);
+  if (actionClass !== "operator-facing") {
+    // allowedActions 是 workflow 内部控制面投影；Core 只允许真正 operator gate 通过 Web/API 执行。
+    throw new WorkflowProtocolError(`workflow action ${action} 不是 operator-facing gate，当前仅可作为 debug/detail 展示`);
   }
 }
 

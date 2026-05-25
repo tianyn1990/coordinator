@@ -362,6 +362,22 @@ latest events
 - daemon 不根据 workflow debug 字段自动执行 workflow action。
 - outer Agent 不根据 workflow debug 字段选择 workflow action。
 
+Workflow Action Panel 只能展示真正 operator-facing 的 gate。不要再使用：
+
+```text
+allowedActions.length > 0 => Web Action Card
+```
+
+应改为：
+
+```text
+operator-facing gate => Web Action Card / Action Inbox
+agent/internal action => Workflow Lens debug/detail
+unknown action => 保守展示为 debug/detail，不进入 needs me
+```
+
+在当前 `workflow protocol` 不变的前提下，Coordinator 侧先使用保守分类：`freeze-requirements`、`approve-planning-dossier` 等明确人工确认可以进入 Panel；`materialize-change <change-id>`、对齐检查、实现推进、inspect/resume 类 action 默认不进入 needs-me，也不要求 Web operator 填内部参数。
+
 ## 9. Run Until Blocked
 
 `Run until blocked` 是 Web 真实流程体验的关键。
@@ -387,7 +403,8 @@ latest events
 terminal task
 pending human request
 pending merge approval
-workflow running without handoff
+workflow running without handoff and no operator-facing gate
+inner agent completed/failed/stalled and owner needs operator decision
 operator attention required
 project config blocker
 PR/MR waiting review
@@ -400,7 +417,8 @@ max tick count reached
 页面必须把停止原因说清楚。例如：
 
 ```text
-已停止：workflow 正在运行且尚未产生 handoff。Coordinator 会继续只读 inspect，不会自动执行 workflow action。
+仍在观察：workflow / inner agent 正在运行，或当前只有 agent/internal action，尚未产生 handoff；当前不需要 operator 操作。
+已停止：需要 operator gate / human request / merge approval / recovery attention。
 ```
 
 ## 10. Project Admin 与 Workspace Hook 预留
@@ -483,6 +501,7 @@ industrial mission control
 - 前端自行判断 merge readiness。
 - 前端根据 stage/substate 推导 PR ready。
 - 前端根据 allowedActions 自动执行 workflow action。
+- 前端根据 allowedActions 自动生成 needs-me Action Card。
 
 ## 13. 迭代引用要求
 

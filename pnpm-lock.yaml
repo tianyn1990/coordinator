@@ -87,6 +87,9 @@ importers:
       '@coordinator/db':
         specifier: workspace:*
         version: link:../db
+      '@coordinator/shared':
+        specifier: workspace:*
+        version: link:../shared
 
   packages/db: {}
 

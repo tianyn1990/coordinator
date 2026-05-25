@@ -32,6 +32,15 @@
 - **AND** daemon 不调用 `workflow protocol action`
 - **AND** daemon 不根据 allowedActions、actionInputHints、stage 或 gate 推进 workflow action
 
+#### Scenario: agent/internal action 不制造 operator blocker
+
+- **WHEN** workflow run 数据库状态为 running
+- **AND** workflow protocol status 返回 lifecycle active 且 handoff unavailable
+- **AND** allowedActions 只包含 `materialize-change`、`run-alignment-checks`、repair/current-change、inspect/resume、实现推进类或 unknown action
+- **THEN** daemon 不创建 human request、operator attention 或 needs-me event
+- **AND** daemon 只记录 sanitized workflow status observation
+- **AND** daemon 不调用 operator workflow action helper
+
 ### Requirement: daemon 必须支持 human request 唤醒
 系统 SHALL 在 human request 被回答后唤醒对应 task，并生成新的 Coordinator Surface 继续推进。
 

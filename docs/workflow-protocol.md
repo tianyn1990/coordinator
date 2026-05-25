@@ -208,6 +208,21 @@ Coordinator 外层状态迁移只依赖：
 
 同理，`allowedActions` 只说明 workflow 当前内部控制面允许哪些 action。它不是 Coordinator 的自动执行计划，也不是 daemon 的 action queue。running workflow 没有 handoff 时，Coordinator 的稳定动作是 inspect 或等待 handoff；daemon 不得根据 `allowedActions` 或 `actionInputs` 自动调用 `workflow protocol action`。
 
+当前 Coordinator 版本保持本协议不变，不要求 `/Users/hetao/Documents/github/workflow` 增加新字段。Coordinator 侧会保守地区分 operator-facing gate 与 agent/internal action：`freeze-requirements`、`approve-planning-dossier` 这类明确人工确认可进入 Web Action Card；`materialize-change <change-id>`、对齐检查、实现推进等 action 默认只作为 debug/detail 展示，不进入 needs-me，也不要求 Web operator 手动填写内部参数。
+
+未来如果 workflow 希望让外层系统更准确理解 owner，可以另行交接 protocol 增强，例如：
+
+```json
+{
+  "agent": { "state": "running" },
+  "blocker": { "owner": "operator" },
+  "operatorActions": [],
+  "agentActions": []
+}
+```
+
+这些字段只是未来方向；在本期中不得作为已存在契约实现或测试。
+
 ### 4.4 action
 
 ```bash

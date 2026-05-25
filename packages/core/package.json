@@ -16,6 +16,7 @@
     "build": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@coordinator/db": "workspace:*"
+    "@coordinator/db": "workspace:*",
+    "@coordinator/shared": "workspace:*"
   }
 }
