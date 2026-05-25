@@ -31,6 +31,89 @@ describe("web workflow action helpers", () => {
     });
   });
 
+  it("优先使用 Core workflow observation 判断 needs-me", () => {
+    expect(
+      summarizeWorkflowGate(["materialize-change"], {
+        mode: "observing-runtime",
+        owner: "workflow-runtime",
+        reason: "workflow runtime active",
+        summary: "implementation continues",
+        operatorActions: [],
+        agentInternalActions: ["materialize-change"],
+        debugOnlyActions: [],
+        deniedActions: [],
+        handoffAvailable: false,
+        actionInputHints: {
+          "materialize-change": { requiredArgs: ["change-id"] }
+        }
+      })
+    ).toMatchObject({
+      hasOperatorGate: false,
+      summary: "observing internal/debug workflow action"
+    });
+    expect(
+      buildWorkflowGateInboxItem({
+        taskId: "task-3",
+        projectName: "coordinator",
+        title: "requirements gate",
+        observation: {
+          mode: "waiting-operator-gate",
+          owner: "operator",
+          reason: "workflow waits for operator gate",
+          summary: "freeze requirements",
+          operatorActions: ["freeze-requirements"],
+          agentInternalActions: [],
+          debugOnlyActions: [],
+          deniedActions: [],
+          handoffAvailable: false,
+          actionInputHints: {}
+        }
+      })
+    ).toMatchObject({ kind: "workflow", label: "Requirements approval" });
+  });
+
+  it("非 operator gate observation 即使携带 stale operator action 也不进入 needs-me", () => {
+    expect(
+      summarizeWorkflowGate(["freeze-requirements"], {
+        mode: "handoff-ready",
+        owner: "coordinator",
+        reason: "workflow handoff ready",
+        summary: "handoff ready",
+        operatorActions: ["freeze-requirements"],
+        agentInternalActions: [],
+        debugOnlyActions: [],
+        deniedActions: [],
+        handoffAvailable: true,
+        handoffKind: "pr_ready",
+        actionInputHints: {}
+      })
+    ).toMatchObject({
+      hasOperatorGate: false,
+      operatorActions: [],
+      summary: "handoff-ready"
+    });
+    expect(
+      buildWorkflowGateInboxItem({
+        taskId: "task-stale",
+        projectName: "coordinator",
+        title: "handoff ready",
+        actionIds: ["freeze-requirements"],
+        observation: {
+          mode: "recovery-attention",
+          owner: "recovery",
+          reason: "workflow requires recovery",
+          summary: "recovery",
+          operatorActions: ["freeze-requirements"],
+          agentInternalActions: [],
+          debugOnlyActions: [],
+          deniedActions: [],
+          handoffAvailable: false,
+          actionInputHints: {}
+        }
+      })
+    ).toBeUndefined();
+  });
+
   it("Action Inbox 只为 operator-facing workflow gate 生成 item", () => {
     expect(
       buildWorkflowGateInboxItem({

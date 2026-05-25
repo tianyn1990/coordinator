@@ -1,6 +1,10 @@
 import { StrictMode, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { serviceInfo } from "@coordinator/shared";
+import {
+  deriveWorkflowRuntimeObservation,
+  serviceInfo,
+  type WorkflowRuntimeObservation
+} from "@coordinator/shared";
 import {
   buildWorkflowGateInboxItem,
   groupWorkflowActions,
@@ -159,6 +163,7 @@ type TaskDetail = {
   executionPlan?: { id: string; status: string; artifactPath?: string };
   workspace?: { id: string; status: string; workspacePath?: string; repoPath?: string; branch?: string; baseBranch?: string };
   workflowRuns: Array<{ id: string; profileId: string; status: string; handoffKind?: string; stateVersion: number }>;
+  workflowObservation?: WorkflowRuntimeObservation;
   agentSessions: Array<{
     id: string;
     providerKind: string;
@@ -364,6 +369,7 @@ type WorkflowActionSubmitInput = {
 type WorkflowLensModel = {
   profile: string;
   lifecycle: string;
+  observation: WorkflowRuntimeObservation;
   stage: string;
   substate: string;
   gateState: string;
@@ -1415,11 +1421,15 @@ function WorkflowLens({ model }: { model: WorkflowLensModel }) {
           <span>handoff</span>
           <strong>{model.handoff}</strong>
         </div>
+        <div>
+          <span>owner</span>
+          <strong>{model.observation.owner}</strong>
+        </div>
       </div>
       <div className="lens-callout">
         <strong>{model.progressLabel}</strong>
         <p>{model.progressSummary}</p>
-        <small>{model.inspectOnlyReason}</small>
+        <small>{model.observation.mode} · {model.inspectOnlyReason}</small>
       </div>
       <div className="lens-columns">
         <LensList title="Allowed actions" empty="none" items={model.allowedActions} />
@@ -1498,7 +1508,7 @@ function WorkflowActionPanel({
   const [submittingAction, setSubmittingAction] = useState<string | undefined>();
   const run = detail.workflowRuns[0];
   const operatorActions = workflow.actionGroups.operatorFacing;
-  if (!run || run.status !== "running" || run.handoffKind || operatorActions.length === 0) {
+  if (!run || run.status !== "running" || run.handoffKind || workflow.observation.mode !== "waiting-operator-gate" || operatorActions.length === 0) {
     return null;
   }
 
@@ -2444,16 +2454,16 @@ function describeRunStopReason(
   const latestWorkflow = detail.workflowRuns[0];
   if (latestWorkflow?.status === "running" && !latestWorkflow.handoffKind) {
     const workflow = buildWorkflowLensModel(detail);
-    if (workflow.actionGroups.operatorFacing.length > 0) {
+    if (workflow.observation.mode === "waiting-operator-gate") {
       return {
         stop: true,
-        reason: `已停止：workflow 等待 operator gate - ${workflow.actionGroups.operatorFacing.join(", ")}`
+        reason: `已停止：workflow 等待 operator gate - ${workflow.observation.operatorActions.join(", ")}`
       };
     }
     return {
       stop: true,
       reason:
-        workflow.actionGroups.agentInternal.length > 0 || workflow.actionGroups.debugOnly.length > 0
+        workflow.observation.mode === "observing-runtime"
           ? "仍在观察：workflow 当前只有 agent/internal 或 debug-only action；不进入 needs-me，也不自动执行 workflow action"
           : "仍在观察：workflow 正在运行且尚未 handoff；Coordinator 只读 inspect / 等待 handoff"
     };
@@ -2542,7 +2552,8 @@ function buildTaskCard(task: TaskListItem, detail?: TaskDetail): TaskCard {
   const pendingHuman = detail?.humanRequests.find((request) => request.status === "pending" && request.kind !== "merge_approval");
   const pendingMerge = detail?.humanRequests.find((request) => request.status === "pending" && request.kind === "merge_approval");
   const hasPrAttention = Boolean(detail?.latestPullRequest && detail.latestPullRequest.status !== "merged");
-  const workflowGate = summarizeWorkflowGate(detail ? buildWorkflowLensModel(detail).allowedActions : []);
+  const workflowModel = detail ? buildWorkflowLensModel(detail) : undefined;
+  const workflowGate = summarizeWorkflowGate(workflowModel?.allowedActions, workflowModel?.observation);
   const attentionRequired = detail?.diagnosis.operatorAttention.required ?? isHighRiskStatus(task.status);
   const needsDecision = Boolean(pendingHuman || pendingMerge || workflowGate.hasOperatorGate);
   return {
@@ -2595,7 +2606,8 @@ function buildActionInbox(cards: TaskCard[]): ActionInboxItem[] {
       taskId: card.task.id,
       projectName: card.task.projectName,
       title: card.task.title,
-      actionIds: card.workflowGate.operatorActions
+      actionIds: card.workflowGate.operatorActions,
+      observation: card.detail?.workflowObservation
     });
     if (workflowGateItem) {
       items.push(workflowGateItem);
@@ -2711,10 +2723,38 @@ function buildWorkflowLensModel(detail: TaskDetail): WorkflowLensModel {
   const progressLabel = projection.progressLabel ?? (stage === "unknown" ? "Workflow status" : stage);
   const progressSummary = projection.progressSummary ?? workflowSummary(detail);
   const latestEvents = detail.events.filter((event) => event.type.startsWith("workflow.")).slice(-5);
-  const actionGroups = groupWorkflowActions(projection.allowedActions);
+  const observation =
+    detail.workflowObservation ??
+    deriveWorkflowRuntimeObservation({
+      lifecycle,
+      status: run?.status,
+      handoffKind: run?.handoffKind,
+      handoffAvailable: handoff !== "none",
+      allowedActions: projection.allowedActions,
+      deniedActions: projection.deniedActions,
+      actionInputHints: Object.fromEntries(
+        projection.actionHints.map((hint) => [
+          hint.actionId,
+          {
+            requiredArgs: hint.requiredArgs,
+            usage: hint.usage
+          }
+        ])
+      ),
+      summary: progressSummary
+    });
+  // 非 waiting-operator-gate 下的 operatorActions 只能视为 stale/debug projection，不能生成可提交表单。
+  const actionGroups: WorkflowActionGroups = {
+    operatorFacing: observation.mode === "waiting-operator-gate" ? observation.operatorActions : [],
+    agentInternal: observation.agentInternalActions,
+    debugOnly:
+      observation.mode === "waiting-operator-gate"
+        ? observation.debugOnlyActions
+        : [...observation.debugOnlyActions, ...observation.operatorActions]
+  };
   const inspectOnlyReason =
     run?.status === "running" && !run.handoffKind
-      ? actionGroups.operatorFacing.length > 0
+      ? observation.mode === "waiting-operator-gate"
         ? "workflow 正在等待 operator-facing gate；确认仍由 Core 校验后执行。"
         : "workflow 正在运行且尚未 handoff；当前仅观察 workflow runtime / inner agent，不自动执行 workflow action。"
       : "Workflow debug 字段只用于 operator 展示，不驱动外层状态。";
@@ -2722,6 +2762,7 @@ function buildWorkflowLensModel(detail: TaskDetail): WorkflowLensModel {
   return {
     profile: projection.profile ?? run?.profileId ?? "none",
     lifecycle,
+    observation,
     stage,
     substate,
     gateState,
@@ -2871,7 +2912,9 @@ function nextOwner(
   if (workflowGate.hasOperatorGate) return "next: workflow operator gate";
   if (attentionRequired) return "next: operator review";
   const workflow = detail?.workflowRuns[0];
-  if (workflow?.status === "running") return "next: workflow handoff";
+  if (workflow?.status === "running") {
+    return detail?.workflowObservation?.mode === "observing-runtime" ? "next: observing workflow runtime" : "next: workflow handoff";
+  }
   if (detail?.latestPullRequest && detail.latestPullRequest.status !== "merged") return "next: PR/MR review";
   if (task.status === "planning" || task.status === "resuming") return "next: daemon tick";
   if (isTerminalTaskStatus(task.status)) return "next: none";
@@ -2881,7 +2924,8 @@ function nextOwner(
 function workflowSummary(detail?: TaskDetail): string {
   const run = detail?.workflowRuns[0];
   if (!run) return "Workflow: none";
-  return `Workflow: ${run.profileId || "auto"} / ${run.status} / handoff=${run.handoffKind ?? "none"}`;
+  const observation = detail?.workflowObservation ? ` / ${detail.workflowObservation.mode}` : "";
+  return `Workflow: ${run.profileId || "auto"} / ${run.status} / handoff=${run.handoffKind ?? "none"}${observation}`;
 }
 
 function prSummary(detail?: TaskDetail): string {

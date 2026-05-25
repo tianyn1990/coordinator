@@ -210,14 +210,32 @@ Coordinator 外层状态迁移只依赖：
 
 当前 Coordinator 版本保持本协议不变，不要求 `/Users/hetao/Documents/github/workflow` 增加新字段。Coordinator 侧会保守地区分 operator-facing gate 与 agent/internal action：`freeze-requirements`、`approve-planning-dossier` 这类明确人工确认可进入 Web Action Card；`materialize-change <change-id>`、对齐检查、实现推进等 action 默认只作为 debug/detail 展示，不进入 needs-me，也不要求 Web operator 手动填写内部参数。
 
+Coordinator 会在 operator-only surface 中从现有字段派生 `workflow runtime observation` 摘要，用于解释当前 run 的 owner/mode：
+
+```text
+observing-runtime
+waiting-operator-gate
+handoff-ready
+recovery-attention
+completed / unknown
+```
+
+该 observation 不是 workflow protocol 字段，不写入 `.workflow`，也不改变 workflow run coarse status。它只帮助 Web/daemon/operator summary 说明“当前是在观察 inner agent / runtime，还是等待真正 operator gate”。
+
 未来如果 workflow 希望让外层系统更准确理解 owner，可以另行交接 protocol 增强，例如：
 
 ```json
 {
-  "agent": { "state": "running" },
-  "blocker": { "owner": "operator" },
+  "agent": {
+    "state": "running",
+    "lastEventSummary": "coding agent is materializing change"
+  },
+  "blocker": {
+    "owner": "inner-agent",
+    "reason": "workflow runtime is still materializing the change"
+  },
   "operatorActions": [],
-  "agentActions": []
+  "agentActions": ["materialize-change"]
 }
 ```
 

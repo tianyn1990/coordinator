@@ -638,6 +638,8 @@ Iteration 14 的目标是把 Coordinator 从“轮询 workflow allowed action �
 
 #### Slice 14.4: Workflow runtime / inner agent lifecycle alignment
 
+当前 Slice 14.4 已落地实现：共享层新增 workflow runtime observation 派生，Core/API 从已持久化 workflow projection 派生 operator-only observation，Web Task Cockpit / Action Inbox / task card / Run Until Blocked 优先使用 observation 区分 `observing-runtime` 与 `waiting-operator-gate`，Surface 只暴露短 owner/mode 摘要，daemon 对 internal/debug action 继续只读观察。
+
 目标：
 
 - 在不修改 workflow protocol 的前提下，Coordinator 侧先用保守策略表达 inner agent lifecycle：
@@ -659,6 +661,7 @@ Iteration 14 的目标是把 Coordinator 从“轮询 workflow allowed action �
 
 - 真实 Web flow 在 `requirements`、`technical-plan` 人工 gate 仍可由 Web 确认。
 - 真实 Web flow 到 `materialize-change <change-id>` 时不进入 needs-me，只展示 debug/detail 或 observing。
+- 当前已通过局部 tests 覆盖 shared observation、operator summary、surface 收窄、Web needs-me 和 daemon internal action observation；最终仍需全量 validate/build 与 subagent review。
 - subagent review 必查 docs 总体设计、过度设计、AgentProvider SDK raw event 泄漏、daemon 自动 workflow action 和 workflow protocol 越界。
 
 ### 重点关注事项

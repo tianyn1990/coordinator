@@ -1,4 +1,4 @@
-import { classifyWorkflowAction } from "@coordinator/shared";
+import { classifyWorkflowAction, type WorkflowRuntimeObservation } from "@coordinator/shared";
 
 export type WorkflowActionGroups = {
   operatorFacing: string[];
@@ -18,6 +18,7 @@ export type WorkflowGateInboxSource = {
   projectName: string;
   title: string;
   actionIds?: string[];
+  observation?: WorkflowRuntimeObservation;
 };
 
 export type WorkflowGateInboxItem = {
@@ -59,15 +60,32 @@ export function workflowActionButtonLabel(actionId: string): string {
   return "Confirm and continue";
 }
 
-export function summarizeWorkflowGate(actionIds: string[] = []): WorkflowGateSummary {
-  const groups = groupWorkflowActions(actionIds);
+export function summarizeWorkflowGate(
+  actionIds: string[] = [],
+  observation?: WorkflowRuntimeObservation
+): WorkflowGateSummary {
+  if (observation && observation.mode !== "waiting-operator-gate") {
+    return {
+      hasOperatorGate: false,
+      operatorActions: [],
+      label: "Workflow active",
+      summary: observation.mode === "observing-runtime" ? "observing internal/debug workflow action" : observation.mode
+    };
+  }
+  const groups = observation
+    ? {
+        operatorFacing: observation.operatorActions,
+        agentInternal: observation.agentInternalActions,
+        debugOnly: observation.debugOnlyActions
+      }
+    : groupWorkflowActions(actionIds);
   if (groups.operatorFacing.length === 0) {
     return {
       hasOperatorGate: false,
       operatorActions: [],
       label: "Workflow active",
       summary:
-        groups.agentInternal.length > 0 || groups.debugOnly.length > 0
+        observation?.mode === "observing-runtime" || groups.agentInternal.length > 0 || groups.debugOnly.length > 0
           ? "observing internal/debug workflow action"
           : "waiting workflow handoff"
     };
@@ -81,7 +99,7 @@ export function summarizeWorkflowGate(actionIds: string[] = []): WorkflowGateSum
 }
 
 export function buildWorkflowGateInboxItem(source: WorkflowGateInboxSource): WorkflowGateInboxItem | undefined {
-  const gate = summarizeWorkflowGate(source.actionIds);
+  const gate = summarizeWorkflowGate(source.actionIds, source.observation);
   if (!gate.hasOperatorGate) {
     return undefined;
   }

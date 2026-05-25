@@ -121,7 +121,18 @@ describe("Coordinator Surface", () => {
         executionPlan: { id: "plan-1", status: "active", artifactPath: "execution-plan.md" },
         attempt: { id: "attempt-1", status: "created" },
         workspace: { id: "workspace-1", status: "ready", path: "/tmp/workspace", branch: "coordinator/task/attempt" },
-        workflowRuns: [{ id: "workflow-1", status: "running", profileId: "feature" }]
+        workflowRuns: [
+          {
+            id: "workflow-1",
+            status: "running",
+            profileId: "feature",
+            observation: {
+              mode: "observing-runtime",
+              owner: "workflow-runtime",
+              handoffAvailable: false
+            }
+          }
+        ]
       })
     );
 
@@ -130,6 +141,8 @@ describe("Coordinator Surface", () => {
     expect(JSON.stringify(surface.json.available_tools)).not.toContain("workflow_action");
     expect(surface.markdown).toContain("等待 workflow 自己推进");
     expect(surface.markdown).toContain("不要绕过 workflow handoff 执行内部 action");
+    expect(surface.markdown).toContain("runtime_observation: mode=observing-runtime owner=workflow-runtime");
+    expect(JSON.stringify(surface.json)).not.toContain("change-id");
   });
 
   it("surface 不暴露 operator-only 工具", () => {

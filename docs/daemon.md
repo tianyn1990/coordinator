@@ -63,6 +63,8 @@ inner coding agent 结束/失败/stalled/handoff => Core 才结合 agent evidenc
 
 daemon 不应在 coding agent 仍在运行时，因为 inspect 到 workflow `allowedActions` 就制造 Web needs-me。它可以记录 latest status、last activity、provider event 摘要和 recovery decision；真正 operator gate 必须来自 human request、merge approval、workflow handoff、operator attention，或 Coordinator 侧明确分类为 operator-facing 的 workflow gate。
 
+daemon 可以记录 Core 派生的 `workflow runtime observation`，例如 `observing-runtime`、`waiting-operator-gate` 或 `recovery-attention`，但这仍是 observation。`observing-runtime` 不创建 human request，不标记 operator attention，也不调用 operator workflow action helper；`waiting-operator-gate` 只能等待 Web/API/CLI operator-only 确认。
+
 ### 1.2 当前已落地的 recovery hardening 子集
 
 Iteration 12.2 已补齐 daemon/Core recovery matrix 的第一层实现：

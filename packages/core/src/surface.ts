@@ -3,6 +3,11 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { getProject, getTask, type DbContext, type ProjectRecord, type TaskRecord } from "@coordinator/db";
 import { extractAgentActivitySummary, type AgentActivitySummary, type NormalizedAgentEvent } from "./agent-activity.js";
+import {
+  deriveWorkflowRuntimeObservationFromPayload,
+  toSurfaceWorkflowRuntimeObservation,
+  type SurfaceWorkflowRuntimeObservation
+} from "./workflow-runtime-observation.js";
 
 export type SurfaceKind =
   | "bootstrap"
@@ -191,6 +196,7 @@ export type WorkflowRunSnapshot = {
   requestedProfileAlias?: string;
   status?: string;
   handoffKind?: string;
+  observation?: SurfaceWorkflowRuntimeObservation;
 };
 
 type WorkflowRunSnapshotJson = {
@@ -201,6 +207,7 @@ type WorkflowRunSnapshotJson = {
   requested_profile_alias?: string;
   status?: string;
   handoff_kind?: string;
+  observation?: SurfaceWorkflowRuntimeObservation;
 };
 
 export type AgentSessionSnapshot = {
@@ -413,6 +420,9 @@ export function buildTaskSurfaceFromDb(context: DbContext, taskId: string): Surf
   const latestAttempt = findLatestAttemptForTask(context, task.id);
   const activeWorkspace = latestAttempt ? findActiveWorkspaceForAttempt(context, latestAttempt.id) : undefined;
   const activeWorkflowRun = latestAttempt ? findActiveWorkflowRunForAttempt(context, latestAttempt.id) : undefined;
+  const activeWorkflowObservation = activeWorkflowRun
+    ? findLatestWorkflowObservationForSurface(context, activeWorkflowRun)
+    : undefined;
   const recentAgentSessions = findRecentAgentSessionsForTask(context, task.id);
   const executionPlan = findLatestExecutionPlanForTask(context, task.id);
   const humanRequests = findHumanRequestsForTask(context, task.id);
@@ -462,7 +472,8 @@ export function buildTaskSurfaceFromDb(context: DbContext, taskId: string): Surf
             requestedProfileId: activeWorkflowRun.requested_profile_id ?? undefined,
             requestedProfileAlias: activeWorkflowRun.requested_profile_alias ?? undefined,
             status: activeWorkflowRun.status,
-            handoffKind: activeWorkflowRun.handoff_kind ?? undefined
+            handoffKind: activeWorkflowRun.handoff_kind ?? undefined,
+            observation: activeWorkflowObservation
           }
         ]
       : [],
@@ -584,6 +595,11 @@ export function renderSurfaceMarkdown(
       lines.push(
         `- workflow_run: ${run.id ?? "unknown"} profile=${run.profile_id ?? "unknown"} selection=${selection} requested=${requested} status=${run.status ?? "unknown"} handoff=${run.handoff_kind ?? "none"}`
       );
+      if (run.observation) {
+        lines.push(
+          `  - runtime_observation: mode=${run.observation.mode} owner=${run.observation.owner}`
+        );
+      }
     }
   } else {
     lines.push(`- workflow_run: 当前 surface 未发现 active workflow run。`);
@@ -1110,6 +1126,40 @@ function findActiveWorkflowRunForAttempt(
     | undefined;
 }
 
+function findLatestWorkflowObservationForSurface(
+  context: DbContext,
+  workflowRun: {
+    id: string;
+    status: string;
+    handoff_kind: string | null;
+  }
+): SurfaceWorkflowRuntimeObservation | undefined {
+  const row = context.db
+    .prepare(
+      `SELECT payload_json FROM events
+       WHERE workflow_run_id = ? AND type IN ('workflow.status_inspected', 'workflow.started', 'workflow.action')
+       ORDER BY created_at DESC, id DESC
+       LIMIT 1`
+    )
+    .get(workflowRun.id) as { payload_json: string | null } | undefined;
+  if (!row?.payload_json) {
+    return undefined;
+  }
+  try {
+    const observation = deriveWorkflowRuntimeObservationFromPayload(
+      {
+        status: workflowRun.status,
+        handoffKind: workflowRun.handoff_kind ?? undefined
+      },
+      JSON.parse(row.payload_json)
+    );
+    return toSurfaceWorkflowRuntimeObservation(observation);
+  } catch {
+    // workflow event payload 损坏时不阻断 surface；operator detail 仍可从 timeline 排查原始 event。
+    return undefined;
+  }
+}
+
 function findRecentAgentSessionsForTask(
   context: DbContext,
   taskId: string
@@ -1400,7 +1450,8 @@ function toWorkflowRunJson(run: WorkflowRunSnapshot): WorkflowRunSnapshotJson {
     requested_profile_id: run.requestedProfileId,
     requested_profile_alias: run.requestedProfileAlias,
     status: run.status,
-    handoff_kind: run.handoffKind
+    handoff_kind: run.handoffKind,
+    observation: run.observation
   };
 }
 

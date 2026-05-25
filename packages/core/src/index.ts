@@ -29,6 +29,11 @@ export {
 export { buildCoordinatorSurface, buildTaskSurfaceFromDb, renderSurfaceMarkdown } from "./surface.js";
 export { buildAgentActivitySummary, collectNormalizedAgentEvents, normalizeProviderEvent } from "./agent-activity.js";
 export {
+  deriveWorkflowRuntimeObservationForRun,
+  deriveWorkflowRuntimeObservationFromPayload,
+  toSurfaceWorkflowRuntimeObservation
+} from "./workflow-runtime-observation.js";
+export {
   WorkspaceManagerError,
   WorkspacePathError,
   assertArtifactRelativePath,
@@ -181,6 +186,7 @@ export type {
   WorkflowRunSnapshot,
   WorkspaceSnapshot
 } from "./surface.js";
+export type { SurfaceWorkflowRuntimeObservation } from "./workflow-runtime-observation.js";
 
 export type GitProviderKind = "github" | "gitlab";
 

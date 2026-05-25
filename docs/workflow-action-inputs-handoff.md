@@ -6,6 +6,8 @@
 
 > 当前约束：本期 Coordinator 不推进 `/Users/hetao/Documents/github/workflow` 修改，也不要求 workflow protocol 立即变更。本文保留为未来交接参考；Coordinator 侧现阶段只把 `actionInputs` 当作 operator/debug 展示 hint，不把带参内部 action 自动变成 Web needs-me。
 
+> 最新 Coordinator 侧落地：`actionInputs.materialize-change.requiredArgs = ["change-id"]` 会进入 Workflow Lens debug/detail，但 Core/Web 会通过 `workflow runtime observation` 将其归类为 `observing-runtime`，不会生成 needs-me，也不会要求 operator 手动填写 `change-id`。
+
 ## 1. 背景
 
 `coordinator` 在真实工程 smoke 中已经通过 `workflow protocol status` 观察到顶层 `actionInputs`：

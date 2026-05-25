@@ -6,6 +6,8 @@
 
 > 当前约束：本期 Coordinator 不推进 `/Users/hetao/Documents/github/workflow` 修改，也不要求 workflow protocol 立即变更。本文保留为未来交接参考；Coordinator 侧现阶段必须兼容字段缺失，并且不得把 `allowedActions/actionInputs` 直接升级为 Web needs-me。
 
+> 最新 Coordinator 侧落地：当前 Web/daemon/operator summary 已通过只读 `workflow runtime observation` 把 only internal/debug action 解释为 `observing-runtime`，把明确人工 gate 解释为 `waiting-operator-gate`。这不改变本文对 workflow protocol 的未来建议，也不要求 workflow 本期新增字段。
+
 ## 1. 背景
 
 `coordinator` 的核心目标不是替代 `workflow`，而是让一个开发者可以同时管理多个工程、多个任务，并只在真正需要人工判断时介入。

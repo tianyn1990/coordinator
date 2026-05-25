@@ -1765,6 +1765,11 @@ describe("daemon runtime", () => {
     expect(state.events.map((event) => event.type)).not.toContain("human.request_created");
     expect(JSON.stringify(state.events)).not.toContain("operator_attention");
     expect(JSON.stringify(state.surface.json.available_tools)).not.toContain("workflow_action");
+    expect(state.surface.json.workflow_runs[0]?.observation).toMatchObject({
+      mode: "observing-runtime",
+      owner: "workflow-runtime"
+    });
+    expect(JSON.stringify(state.surface.json)).not.toContain("change-id");
   });
 
   it("task-scoped workflow inspect 先按 task 过滤再 LIMIT", () => {

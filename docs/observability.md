@@ -111,6 +111,8 @@ Workflow Event 可以来自 `workflow protocol events`，但 coordinator 只依�
 
 workflow protocol 返回的 handoff、allowedActions、deniedActions、recovery 必须被记录或引用，不应只保留模糊摘要。
 
+Coordinator 可以从已持久化 workflow projection 派生 operator-only `workflow runtime observation`，用于解释当前 owner/mode，例如 observing-runtime、waiting-operator-gate、handoff-ready 或 recovery-attention。该 observation 是只读摘要，不触发实时 inspect，不写回 workflow private state，也不得成为 task completed、PR readiness、merge 或 Coordinator Agent tool visibility 的依据。
+
 ### 3.4 Git / PR Event
 
 记录：

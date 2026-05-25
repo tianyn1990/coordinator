@@ -7,6 +7,8 @@
 
 > 本期约束：不修改 `/Users/hetao/Documents/github/workflow` 工程，也不要求 `workflow protocol` 立即新增字段。本文中的 `operatorActions`、`agentActions`、`blocker.owner`、`agent.state` 只作为后续可选协议增强方向；当前 Coordinator 侧先用保守分类和既有 protocol 字段避免误把内部 action 变成人工 gate。
 
+> 当前落地：Slice 14.4 在 Coordinator 侧增加了 operator-only `workflow runtime observation` 派生摘要，用现有 protocol projection、handoff、action classification 与 agent activity 表达 `observing-runtime`、`waiting-operator-gate`、`handoff-ready`、`recovery-attention` 等模式。该摘要只服务 Web/operator 展示、Run Until Blocked explanation 和 daemon observation，不修改 workflow protocol，也不是新的外层状态机。
+
 ## 1. 背景
 
 当前 `coordinator` 已经完成一轮 Web workflow action 闭环：
@@ -340,19 +342,56 @@ Coordinator Core 是外层任务状态机真源。
 
 ## 8. 后续实现切片建议
 
-后续进入实现阶段时，可新建一个 OpenSpec change，名称可选：
+Slice 14.4 的 Coordinator 侧最小实现已经不再把 `allowedActions.length > 0` 直接视为人工待办。它采用的规则是：
 
 ```text
-align-workflow-agent-lifecycle
+workflow active + no handoff + only agent/internal or debug actions
+=> observing-runtime，owner=workflow-runtime，不进入 needs-me
+
+workflow active + no handoff + operator-facing gate
+=> waiting-operator-gate，owner=operator，只能由 Web/API/CLI operator-only intent 确认
+
+workflow handoff available
+=> handoff-ready，由 Coordinator Core 后续 PR/MR/review/merge flow 消费
+
+workflow/provider inconsistent or failed
+=> recovery-attention，由 Core recovery decision 判定是否需要 operator
 ```
 
-目标：
+后续如需继续演进，重点不应是扩大 Web action card，而是把 workflow runtime 与 inner coding agent 的 owner 信号协议化。
 
-```text
-把 Coordinator Web action loop 从“allowedActions 直接人工确认”调整为“inner coding agent 生命周期驱动 + 真正 operator gate 才进入 Web Action Card”。
+## 8.1 后续 workflow protocol 增强建议
+
+建议未来在 `/Users/hetao/Documents/github/workflow` 中独立讨论 protocol 增强，示例：
+
+```json
+{
+  "agent": {
+    "state": "running",
+    "lastEventSummary": "coding agent is materializing change"
+  },
+  "blocker": {
+    "owner": "inner-agent",
+    "reason": "materialize-change requires workflow-local change id"
+  },
+  "operatorActions": ["freeze-requirements"],
+  "agentActions": ["materialize-change"]
+}
 ```
 
-建议任务拆分：
+这些字段的语义建议：
+
+- `agent.state`：只表达 inner coding agent / workflow runtime 是否 running、completed、failed、stalled，不替代 handoff。
+- `blocker.owner`：明确当前停点归属 operator、inner-agent、workflow-runtime、external-system 或 recovery。
+- `operatorActions`：只包含真正需要人类确认的 gate。
+- `agentActions`：包含 workflow runtime / inner coding agent 内部推进动作。
+- `lastAgentEventSummary`：只提供短摘要，不输出 raw JSONL、完整 transcript 或 provider private state。
+
+这些增强必须保持兼容：Coordinator 当前版本不能依赖它们，也不能因为字段缺失而退回“所有 allowedActions 都是 needs-me”。
+
+## 8.2 后续 Coordinator 侧可选工作
+
+后续 Coordinator 侧可继续做：
 
 1. 梳理当前 `run until blocked`、daemon tick、workflow status projection、Web Action Panel 的触发路径。
 2. 定义 Coordinator 侧 action classification：
@@ -373,10 +412,7 @@ align-workflow-agent-lifecycle
    - `approve-planning-dossier` 仍显示 operator action。
    - `materialize-change` 不进入 needs me，不要求 Web operator 填 `change-id`。
    - daemon 不自动执行 `materialize-change`，只 inspect/reconcile 或等待 inner agent / workflow runtime。
-8. 记录 `/Users/hetao/Documents/github/workflow` 后续 protocol 增强建议，但不作为本期 Coordinator 实现前提：
-   - `operatorActions` / `agentActions`。
-   - `blocker.owner`。
-   - `agent.state`。
+8. 如果 workflow 后续提供 owner/action 分层字段，再单独新增 change 适配；适配时仍不得让 daemon 或 outer Agent 自动确认 human gate。
 
 ## 9. 验收标准
 

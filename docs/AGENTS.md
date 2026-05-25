@@ -150,6 +150,8 @@ Coordinator 可以持续只读 inspect、记录 agent/provider/workflow 事件�
 
 当前 `workflow protocol` 保持既有契约不变。`agent.state`、`blocker.owner`、`operatorActions`、`agentActions` 等字段只作为未来可选 protocol 增强方向；本期 Coordinator 侧必须用保守分类和现有状态信息避免把 `materialize-change <change-id>` 等内部动作错误升级为人工 gate。
 
+Coordinator 可以派生 operator-only `workflow runtime observation` 解释当前 owner/mode；该摘要只服务 Web/operator/daemon 观察，不是新状态机，不得扩大 Coordinator Agent Surface，也不得作为修改 workflow protocol 的理由。
+
 第一版可以是单进程、本机执行，但必须保留：
 
 - `TaskSource` 扩展点。

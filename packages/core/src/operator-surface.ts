@@ -44,6 +44,8 @@ import {
 } from "./agent-activity.js";
 import { buildTaskSurfaceFromDb, type SurfaceEnvelope } from "./surface.js";
 import { assertArtifactRelativePath } from "./workspace-manager.js";
+import { deriveWorkflowRuntimeObservationForRun } from "./workflow-runtime-observation.js";
+import type { WorkflowRuntimeObservation } from "@coordinator/shared";
 
 export type OperatorTaskListItem = TaskListRecord;
 
@@ -58,6 +60,7 @@ export type OperatorTaskDetail = {
   executionPlan?: ExecutionPlanRecord;
   workspace?: WorkspaceRecord;
   workflowRuns: WorkflowRunRecord[];
+  workflowObservation?: WorkflowRuntimeObservation;
   agentSessions: OperatorAgentSessionSummary[];
   pullRequests: PullRequestRecord[];
   latestPullRequest?: PullRequestRecord;
@@ -174,6 +177,7 @@ export type OperatorExecutionSummary = {
     status: string;
     externalId?: string;
     handoffKind?: string;
+    observation?: WorkflowRuntimeObservation;
   };
   artifacts: Array<{
     path: string;
@@ -322,6 +326,9 @@ export function getOperatorTaskDetail(context: DbContext, taskId: string): Opera
   const latestPullRequest = getLatestPullRequestByTask(context, task.id);
   const agentSessions = enrichAgentSessionsWithActivity(listAgentSessionsByTask(context, task.id, 5), events);
   const currentWorkflowRun = findCurrentWorkflowRun(workflowRuns, attempt);
+  const workflowObservation = currentWorkflowRun
+    ? deriveWorkflowRuntimeObservationForRun(currentWorkflowRun, events)
+    : undefined;
   const currentPullRequest = findCurrentPullRequest(pullRequests, attempt);
   const currentActiveAgentSession = findCurrentAgentSession(agentSessions, attempt, isActiveAgentSessionStatus);
   const currentAttentionAgentSession = findCurrentAgentSession(agentSessions, attempt, isCurrentAgentAttentionStatus);
@@ -354,6 +361,7 @@ export function getOperatorTaskDetail(context: DbContext, taskId: string): Opera
     executionPlan: getLatestExecutionPlanByTask(context, task.id),
     workspace,
     workflowRuns,
+    workflowObservation,
     agentSessions,
     pullRequests,
     latestPullRequest,
@@ -420,7 +428,8 @@ export function getOperatorExecutionSummary(context: DbContext, taskId: string):
           requestedProfileAlias: currentWorkflowRun.requestedProfileAlias,
           status: currentWorkflowRun.status,
           externalId: currentWorkflowRun.externalId,
-          handoffKind: currentWorkflowRun.handoffKind
+          handoffKind: currentWorkflowRun.handoffKind,
+          observation: detail.workflowObservation
         }
       : undefined,
     artifacts: summarizeArtifactRefs(detail.events),

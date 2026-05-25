@@ -537,6 +537,8 @@ workflow 内部 allowed actions / denied actions 仍以 `workflow protocol statu
 
 这些 workflow 内部 action 不是 Coordinator Agent 的工具队列。Surface 不应因为 `allowedActions/actionInputs` 出现而新增 workflow action executor，也不应把 `materialize-change <change-id>` 等内部推进动作包装成外层 agent 或开发者必须处理的下一步。
 
+Surface 可以展示 Core 派生的短 `workflow runtime observation`，例如 `observing-runtime` 或 `waiting-operator-gate`，帮助 outer Agent 理解当前 owner；但该摘要不得包含完整 `actionInputs`、required arg、workflow raw status 或 Web/API action endpoint，也不得让 outer Agent 代替 operator 确认 workflow gate。
+
 当 inner coding agent 仍在运行时，Surface 的推荐语义应是观察、inspect 或等待 handoff；当 agent 停止、失败、stalled 或 workflow 产生 handoff 后，Core 才结合 agent final response、transcript/artifacts 摘要、workflow status/events 和 operation ledger 生成下一步。
 
 Provider SDK 的 raw event stream 不直接进入 Coordinator Surface。Surface 只能引用受控 artifact 或展示归一化摘要，例如 agent session 状态、last activity、final response artifact 和必要 error summary，避免把完整 JSONL、provider raw output、权限细节或复杂事件对象暴露给外层 agent。

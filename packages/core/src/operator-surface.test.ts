@@ -260,6 +260,28 @@ describe("operator surface", () => {
         )
         .run("workflow-summary", project.id, task.id, attempt.id, "feature", "running", "inner-summary");
       appendEvent(context, {
+        type: "workflow.status_inspected",
+        summary: "workflow status inspected",
+        projectId: project.id,
+        taskId: task.id,
+        attemptId: attempt.id,
+        workflowRunId: "workflow-summary",
+        payload: {
+          lifecycle: "active",
+          summary: "implementation continues in workflow runtime",
+          handoff: { available: false, artifacts: [] },
+          actionInputHints: {
+            "materialize-change": {
+              requiredArgs: ["change-id"],
+              usage: "workflow protocol action --run inner-summary materialize-change <change-id>"
+            }
+          },
+          debug: {
+            allowedActions: ["materialize-change"]
+          }
+        }
+      });
+      appendEvent(context, {
         type: "daemon.agent_extra_artifact_written",
         summary: "agent wrote extra coordinator artifacts for create_attempt",
         projectId: project.id,
@@ -280,7 +302,16 @@ describe("operator surface", () => {
       task: { id: "task-summary" },
       attempt: { id: "attempt-summary" },
       workspace: { id: "workspace-summary", status: "ready" },
-      workflow: { id: "workflow-summary", status: "running", externalId: "inner-summary" }
+      workflow: {
+        id: "workflow-summary",
+        status: "running",
+        externalId: "inner-summary",
+        observation: {
+          mode: "observing-runtime",
+          owner: "workflow-runtime",
+          agentInternalActions: ["materialize-change"]
+        }
+      }
     });
     expect(summary.coordinatorTools).toContainEqual(
       expect.objectContaining({ toolName: "create_attempt", extraArtifact: true, artifactRefs: ["note.md"] })

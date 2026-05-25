@@ -378,6 +378,17 @@ unknown action => 保守展示为 debug/detail，不进入 needs me
 
 在当前 `workflow protocol` 不变的前提下，Coordinator 侧先使用保守分类：`freeze-requirements`、`approve-planning-dossier` 等明确人工确认可以进入 Panel；`materialize-change <change-id>`、对齐检查、实现推进、inspect/resume 类 action 默认不进入 needs-me，也不要求 Web operator 填内部参数。
 
+Task Cockpit / Workbench 应优先使用 Core 提供的 operator-only `workflow runtime observation` 摘要来表达 owner 和 mode：
+
+```text
+observing-runtime => workflow / inner agent 仍在运行或只暴露 internal/debug action
+waiting-operator-gate => 只展示 operator-facing action card
+handoff-ready => 进入 PR/MR/review/merge 或 human handoff flow
+recovery-attention => 由 Core recovery decision 决定是否进入 operator attention
+```
+
+该 observation 是展示层派生，不是新状态机；Web 不应反向把它写回 DB，也不应因 observation 自动调用 workflow action endpoint。
+
 ## 9. Run Until Blocked
 
 `Run until blocked` 是 Web 真实流程体验的关键。
@@ -420,6 +431,8 @@ max tick count reached
 仍在观察：workflow / inner agent 正在运行，或当前只有 agent/internal action，尚未产生 handoff；当前不需要 operator 操作。
 已停止：需要 operator gate / human request / merge approval / recovery attention。
 ```
+
+Run Until Blocked 的 task-scoped banner 应明确使用当前 task 的 observation；global run 只能展示全局 queue 结果，不能用历史 task 的失败覆盖当前打开 task 的 detail。`observing-runtime` 是一个安全停止解释，不代表失败，也不代表开发者需要输入 workflow 内部参数。
 
 ## 10. Project Admin 与 Workspace Hook 预留
 
