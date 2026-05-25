@@ -156,6 +156,17 @@ export type InvokeWorkflowActionInput = {
   runner?: WorkflowProtocolRunner;
 };
 
+export type InvokeWorkflowActionFromOperatorInput = {
+  workflowRunId: string;
+  action: string;
+  arg?: string;
+  expectedStateVersion: number;
+  actor?: string;
+  ttlMs?: number;
+  now?: Date;
+  runner?: WorkflowProtocolRunner;
+};
+
 export type ListWorkflowArtifactsInput = {
   workflowRunId: string;
   runner?: WorkflowProtocolRunner;
@@ -461,6 +472,43 @@ export function invokeWorkflowAction(context: DbContext, input: InvokeWorkflowAc
   }
 }
 
+export function invokeWorkflowActionFromOperator(
+  context: DbContext,
+  input: InvokeWorkflowActionFromOperatorInput
+): WorkflowRunResult {
+  const runner = input.runner ?? runWorkflowProtocol;
+  const workflowRun = requireWorkflowRunRecord(context, input.workflowRunId);
+  const action = requireNonEmpty(input.action, "action");
+  const actionArg = input.arg === undefined ? undefined : requireNonEmpty(input.arg, "arg");
+
+  if (workflowRun.stateVersion !== input.expectedStateVersion) {
+    return invokeWorkflowAction(context, {
+      workflowRunId: input.workflowRunId,
+      action,
+      arg: actionArg,
+      expectedStateVersion: input.expectedStateVersion,
+      owner: input.actor ?? "web-operator",
+      ttlMs: input.ttlMs,
+      now: input.now,
+      runner
+    });
+  }
+
+  const project = requireProjectRecord(context, workflowRun.projectId);
+  const status = inspectStatusForRun(context, project, requireWorkflowLauncher(project), workflowRun, runner);
+  assertOperatorWorkflowActionAllowed(status, action, actionArg);
+  return invokeWorkflowAction(context, {
+    workflowRunId: input.workflowRunId,
+    action,
+    arg: actionArg,
+    expectedStateVersion: input.expectedStateVersion,
+    owner: input.actor ?? "web-operator",
+    ttlMs: input.ttlMs,
+    now: input.now,
+    runner
+  });
+}
+
 export function listWorkflowArtifacts(context: DbContext, input: ListWorkflowArtifactsInput): WorkflowArtifacts {
   const workflowRun = requireWorkflowRunRecord(context, input.workflowRunId);
   const project = requireProjectRecord(context, workflowRun.projectId);
@@ -608,6 +656,32 @@ function assertProtocolStatusMatchesRun(workflowRun: WorkflowRunRecord, status: 
   }
   if (status.profile && workflowRun.profileId !== UNKNOWN_WORKFLOW_PROFILE && status.profile !== workflowRun.profileId) {
     throw new WorkflowProtocolError("workflow protocol profile mismatch");
+  }
+}
+
+function assertOperatorWorkflowActionAllowed(status: WorkflowStatus, action: string, arg?: string): void {
+  const deniedActions = new Set([...(status.debug.deniedActions ?? []), ...status.handoff.deniedActions]);
+  const allowedActions = status.debug.allowedActions ?? [];
+  if (status.lifecycle !== "active" || status.handoff.available) {
+    throw new WorkflowProtocolError("workflow action 只能在 active 且无 handoff 的 workflow run 上执行");
+  }
+  if (deniedActions.has(action)) {
+    throw new WorkflowProtocolError(`workflow action ${action} 当前被 workflow deniedActions 拒绝`);
+  }
+  if (!allowedActions.includes(action)) {
+    throw new WorkflowProtocolError(`workflow action ${action} 不在 latest allowedActions 中`);
+  }
+
+  const requiredArgs = status.actionInputHints[action]?.requiredArgs ?? [];
+  if (requiredArgs.length > 1) {
+    throw new WorkflowProtocolError("当前仅支持 0 或 1 个 string workflow action 参数");
+  }
+  if (requiredArgs.length === 1 && arg === undefined) {
+    throw new WorkflowProtocolError(`workflow action ${action} 需要参数 ${requiredArgs[0]}`);
+  }
+  // actionInputs 是 operator intent 的窄提示；未声明参数时拒绝额外 arg，避免 Web 成为复杂参数通道。
+  if (requiredArgs.length === 0 && arg !== undefined) {
+    throw new WorkflowProtocolError(`workflow action ${action} 当前不接受参数`);
   }
 }
 

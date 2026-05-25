@@ -78,6 +78,7 @@ type EventRecord = {
   type: string;
   summary: string;
   severity: string;
+  workflowRunId?: string;
   operationId?: string;
   prId?: string;
   humanRequestId?: string;
@@ -123,7 +124,7 @@ type TaskDetail = {
   attempt?: { id: string; status: string; reason: string; stateVersion: number };
   executionPlan?: { id: string; status: string; artifactPath?: string };
   workspace?: { id: string; status: string; workspacePath?: string; repoPath?: string; branch?: string; baseBranch?: string };
-  workflowRuns: Array<{ id: string; profileId: string; status: string; handoffKind?: string }>;
+  workflowRuns: Array<{ id: string; profileId: string; status: string; handoffKind?: string; stateVersion: number }>;
   agentSessions: Array<{ id: string; providerKind: string; role: string; status: string; finalResponsePath?: string }>;
   pullRequests: PullRequest[];
   latestPullRequest?: PullRequest;
@@ -309,6 +310,13 @@ type WorkflowArtifactRef = {
   path: string;
   label?: string;
   requiredForHandoff?: boolean;
+};
+
+type WorkflowActionSubmitInput = {
+  workflowRunId: string;
+  expectedStateVersion: number;
+  action: string;
+  arg?: string;
 };
 
 type WorkflowLensModel = {
@@ -519,8 +527,12 @@ function App() {
 
   async function runUntilBlockedForTask(taskId?: string, initialDetail?: TaskDetail) {
     const seedDetail = initialDetail ?? (taskId ? taskDetails[taskId] ?? (await request<TaskDetail>(`/tasks/${taskId}`)) : undefined);
-    if (!taskId && !seedDetail) {
+    if (taskId && !seedDetail) {
       setFlash({ tone: "error", message: "没有可推进的 task" });
+      return;
+    }
+    if (!taskId && tasks.length === 0) {
+      setFlash({ tone: "error", message: "当前没有 task 可进入 global run until blocked" });
       return;
     }
     if (seedDetail && requiresWorkflowSelectionBeforeAutoRun(seedDetail)) {
@@ -601,6 +613,28 @@ function App() {
   async function runUntilBlockedCurrent() {
     if (!detail) return;
     await runUntilBlockedForTask(detail.task.id, detail);
+  }
+
+  async function submitWorkflowAction(input: WorkflowActionSubmitInput) {
+    if (!detail) return;
+    const taskId = detail.task.id;
+    try {
+      await request(`/workflow-runs/${input.workflowRunId}/actions`, {
+        method: "POST",
+        body: JSON.stringify({
+          action: input.action,
+          arg: input.arg,
+          expectedStateVersion: input.expectedStateVersion,
+          actor: "web-operator"
+        })
+      });
+      setFlash({ tone: "ok", message: `workflow action 已确认：${input.action}` });
+      const snapshot = await refresh(taskId);
+      // 每次 workflow action 仍需人工确认；这里仅继续当前 task 的 daemon tick，遇到下一张 action card 会再次停下。
+      await runUntilBlockedForTask(taskId, snapshot?.detail ?? detail);
+    } catch (error) {
+      setFlash({ tone: "error", message: error instanceof Error ? error.message : String(error) });
+    }
   }
 
   async function createProject(event: React.FormEvent<HTMLFormElement>) {
@@ -852,6 +886,7 @@ function App() {
           onMerge={mergeAfterApproval}
           onTaskControl={controlTask}
           onRunUntilBlocked={() => void runUntilBlockedCurrent()}
+          onWorkflowAction={submitWorkflowAction}
           onCreatePullRequest={createPullRequest}
           onUpdatePullRequest={updatePullRequest}
           onInspectReview={inspectReview}
@@ -1090,7 +1125,11 @@ function TaskCardView({
   onOpenClassicDebug: (taskId: string) => void;
 }) {
   return (
-    <article className={selected ? `task-card tone-${card.statusTone} selected` : `task-card tone-${card.statusTone}`}>
+    <article
+      className={selected ? `task-card tone-${card.statusTone} selected` : `task-card tone-${card.statusTone}`}
+      data-task-id={card.task.id}
+      aria-label={`Task ${card.task.title}`}
+    >
       <div className="card-main">
         <span className="card-topline">
           <span>{card.task.projectName}</span>
@@ -1112,7 +1151,13 @@ function TaskCardView({
       </div>
       <div className="card-actions">
         <small>{formatRelativeTime(card.task.updatedAt)}</small>
-        <button type="button" onClick={() => onOpenTask(card.task.id)}>
+        <button
+          type="button"
+          data-action="open-task"
+          data-task-id={card.task.id}
+          aria-label={`Open task ${card.task.title}`}
+          onClick={() => onOpenTask(card.task.id)}
+        >
           Open
         </button>
         <button type="button" onClick={() => onOpenClassicDebug(card.task.id)}>
@@ -1188,6 +1233,7 @@ function TaskCockpitView({
   onMerge,
   onTaskControl,
   onRunUntilBlocked,
+  onWorkflowAction,
   onCreatePullRequest,
   onUpdatePullRequest,
   onInspectReview,
@@ -1201,6 +1247,7 @@ function TaskCockpitView({
   onMerge: (pr: PullRequest) => void;
   onTaskControl: (action: "pause" | "resume" | "cancel" | "retry", reason: string) => void;
   onRunUntilBlocked: () => void;
+  onWorkflowAction: (input: WorkflowActionSubmitInput) => Promise<void>;
   onCreatePullRequest: (taskId: string, form: FormData) => Promise<void>;
   onUpdatePullRequest: (taskId: string, prId: string, form: FormData) => Promise<void>;
   onInspectReview: (taskId: string, prId: string) => Promise<void>;
@@ -1248,6 +1295,8 @@ function TaskCockpitView({
           onDecideMerge={onDecideMerge}
           onMerge={onMerge}
           onTaskControl={onTaskControl}
+          workflow={model.workflow}
+          onWorkflowAction={onWorkflowAction}
           onCreatePullRequest={onCreatePullRequest}
           onUpdatePullRequest={onUpdatePullRequest}
           onInspectReview={onInspectReview}
@@ -1366,6 +1415,94 @@ function LensList({ title, empty, items }: { title: string; empty: string; items
   );
 }
 
+function WorkflowActionPanel({
+  detail,
+  workflow,
+  onWorkflowAction
+}: {
+  detail: TaskDetail;
+  workflow: WorkflowLensModel;
+  onWorkflowAction: (input: WorkflowActionSubmitInput) => Promise<void>;
+}) {
+  const [submittingAction, setSubmittingAction] = useState<string | undefined>();
+  const run = detail.workflowRuns[0];
+  if (!run || run.status !== "running" || run.handoffKind || workflow.allowedActions.length === 0) {
+    return null;
+  }
+
+  const hintByAction = new Map(workflow.actionHints.map((hint) => [hint.actionId, hint]));
+
+  async function submit(event: React.FormEvent<HTMLFormElement>, actionId: string, requiredArgs: string[]) {
+    event.preventDefault();
+    if (!run || submittingAction) return;
+    const form = new FormData(event.currentTarget);
+    const rawArg = requiredArgs.length === 1 ? String(form.get("workflowArg") ?? "").trim() : undefined;
+    if (requiredArgs.length === 1 && !rawArg) {
+      return;
+    }
+    setSubmittingAction(actionId);
+    try {
+      await onWorkflowAction({
+        workflowRunId: run.id,
+        expectedStateVersion: run.stateVersion,
+        action: actionId,
+        arg: rawArg
+      });
+    } finally {
+      setSubmittingAction(undefined);
+    }
+  }
+
+  return (
+    <section className="workflow-action-panel" aria-label="Workflow action panel">
+      <div>
+        <p className="eyebrow">Workflow requires operator action</p>
+        <strong>{workflow.stage}</strong>
+        <span>
+          {workflow.progressLabel} · {workflow.progressSummary}
+        </span>
+      </div>
+      {workflow.stageArtifacts.length > 0 ? (
+        <ul className="compact-list">
+          {workflow.stageArtifacts.slice(0, 3).map((artifact) => (
+            <li key={`${artifact.kind}-${artifact.path}`}>
+              <strong>{artifact.label ?? artifact.kind}</strong>
+              <span>{artifact.path}</span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      <div className="workflow-action-list">
+        {workflow.allowedActions.map((actionId) => {
+          const hint = hintByAction.get(actionId);
+          const requiredArgs = hint?.requiredArgs ?? [];
+          const unsupported = requiredArgs.length > 1;
+          const buttonLabel = actionId === "freeze-requirements" ? "Approve requirements and continue" : "Continue";
+          return (
+            <form key={actionId} className="workflow-action-card" onSubmit={(event) => void submit(event, actionId, requiredArgs)}>
+              <div>
+                <span>Action</span>
+                <strong>{actionId}</strong>
+              </div>
+              {requiredArgs.length === 1 ? (
+                <label>
+                  <span>{requiredArgs[0]}</span>
+                  <input name="workflowArg" placeholder={requiredArgs[0]} disabled={Boolean(submittingAction)} required />
+                </label>
+              ) : null}
+              {unsupported ? <p className="muted">当前 Web 仅支持 0 或 1 个 string 参数；请先使用 workflow 内部流程或后续版本处理。</p> : null}
+              {hint?.usage ? <small>{hint.usage}</small> : null}
+              <button type="submit" disabled={Boolean(submittingAction) || unsupported}>
+                {submittingAction === actionId ? "Confirming..." : buttonLabel}
+              </button>
+            </form>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 function EvidenceActionsPanel({
   detail,
   evidence,
@@ -1374,6 +1511,8 @@ function EvidenceActionsPanel({
   onDecideMerge,
   onMerge,
   onTaskControl,
+  workflow,
+  onWorkflowAction,
   onCreatePullRequest,
   onUpdatePullRequest,
   onInspectReview,
@@ -1386,6 +1525,8 @@ function EvidenceActionsPanel({
   onDecideMerge: (pr: PullRequest, request: HumanRequest, decision: "approve" | "reject") => void;
   onMerge: (pr: PullRequest) => void;
   onTaskControl: (action: "pause" | "resume" | "cancel" | "retry", reason: string) => void;
+  workflow: WorkflowLensModel;
+  onWorkflowAction: (input: WorkflowActionSubmitInput) => Promise<void>;
   onCreatePullRequest: (taskId: string, form: FormData) => Promise<void>;
   onUpdatePullRequest: (taskId: string, prId: string, form: FormData) => Promise<void>;
   onInspectReview: (taskId: string, prId: string) => Promise<void>;
@@ -1404,6 +1545,7 @@ function EvidenceActionsPanel({
           <h3>{evidence.length} items</h3>
         </div>
       </div>
+      <WorkflowActionPanel detail={detail} workflow={workflow} onWorkflowAction={onWorkflowAction} />
       <div className="evidence-list">
         {evidence.length === 0 ? <p className="muted">暂无需要突出的 evidence 或 action。</p> : null}
         {evidence.map((item) => (
@@ -1903,6 +2045,7 @@ function PrOperatorPanel({
 }
 
 function RunUntilBlockedBanner({ state }: { state: RunUntilBlockedState }) {
+  const scopeLabel = state.scope === "task" ? `task ${state.taskId ?? "unknown"}` : "global queue";
   return (
     <section className="run-banner">
       <div className="panel-heading">
@@ -1914,13 +2057,18 @@ function RunUntilBlockedBanner({ state }: { state: RunUntilBlockedState }) {
           {state.tickCount}/{state.maxTicks}
         </span>
       </div>
+      <p className="scope-line">Scope: {scopeLabel}</p>
       <p className="muted">{state.stopReason ?? "正在推进"}</p>
       <div className="run-log">
         {state.logs.slice(-3).map((log) => (
           <article key={log.index} className="run-log-item">
             <strong>tick {log.index}</strong>
             <span>{log.status}</span>
-            <small>{log.actions.map((action) => `${action.kind}:${action.status}`).join(" · ")}</small>
+            <small>
+              {log.actions.length === 0
+                ? "no actions"
+                : log.actions.map((action) => `${action.taskId ?? "global"} ${action.kind}:${action.status}`).join(" · ")}
+            </small>
           </article>
         ))}
       </div>
@@ -2138,6 +2286,18 @@ function describeRunStopReason(
   maxTicks: number,
   scope: "global" | "task"
 ): { stop: boolean; reason: string } {
+  if (scope === "global") {
+    if (tick.status === "failed") {
+      return { stop: true, reason: "已停止：global daemon tick 返回 failed；当前 task detail 仍以 Core 最新状态为准" };
+    }
+    if (tickIndex >= maxTicks) {
+      return { stop: true, reason: `已停止：global run 达到最大轮数 ${maxTicks}` };
+    }
+    if (tick.actions.length === 0) {
+      return { stop: true, reason: "已停止：global queue 没有可安全推进的 action" };
+    }
+    return { stop: false, reason: "继续推进 global queue" };
+  }
   if (!detail) {
     return { stop: true, reason: "没有可推进的 task，停止 run until blocked" };
   }
@@ -2165,9 +2325,6 @@ function describeRunStopReason(
   }
   if (tickIndex >= maxTicks) {
     return { stop: true, reason: `已停止：达到最大轮数 ${maxTicks}` };
-  }
-  if (scope === "global" && tick.actions.length === 0) {
-    return { stop: true, reason: "已停止：没有可安全推进的 action" };
   }
   return { stop: false, reason: "继续推进" };
 }
@@ -2394,7 +2551,7 @@ function buildOuterFlow(detail: TaskDetail): OuterFlowNode[] {
 
 function buildWorkflowLensModel(detail: TaskDetail): WorkflowLensModel {
   const run = detail.workflowRuns[0];
-  const projection = extractWorkflowProjection(detail);
+  const projection = extractWorkflowProjection(detail, run?.id);
   const lifecycle = projection.lifecycle ?? run?.status ?? "none";
   const handoff = projection.handoff ?? run?.handoffKind ?? "none";
   const stage = projection.stage ?? "unknown";
@@ -2472,7 +2629,7 @@ function collectKeyArtifacts(detail: TaskDetail, workflow: WorkflowLensModel): s
     .slice(0, 12);
 }
 
-function extractWorkflowProjection(detail: TaskDetail): {
+function extractWorkflowProjection(detail: TaskDetail, workflowRunId?: string): {
   profile?: string;
   lifecycle?: string;
   stage?: string;
@@ -2488,7 +2645,9 @@ function extractWorkflowProjection(detail: TaskDetail): {
   stageArtifacts: WorkflowArtifactRef[];
 } {
   // Workflow protocol 字段只来自公开 event payload；缺字段时宁可 fallback，也不读取 .workflow private state。
-  const workflowEvents = [...detail.events].reverse().filter((event) => event.type.startsWith("workflow."));
+  const workflowEvents = [...detail.events]
+    .reverse()
+    .filter((event) => event.type.startsWith("workflow.") && (!workflowRunId || event.workflowRunId === workflowRunId));
   for (const event of workflowEvents) {
     const payload = isRecord(event.payload) ? event.payload : undefined;
     const status = isRecord(payload?.status) ? payload.status : payload;

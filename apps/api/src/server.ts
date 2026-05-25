@@ -23,7 +23,7 @@ import {
   inspectWorkflowCapabilities,
   inspectWorkflowRun,
   listOperatorTasks,
-  invokeWorkflowAction,
+  invokeWorkflowActionFromOperator,
   listWorkflowArtifacts,
   listWorkflowEvents,
   mergeAfterApprovalRuntime,
@@ -450,6 +450,7 @@ export function buildServer(): FastifyInstance {
           properties: {
             action: { type: "string", minLength: 1 },
             arg: { type: "string", minLength: 1 },
+            actor: { type: "string", minLength: 1 },
             expectedStateVersion: { type: "integer", minimum: 0 }
           }
         }
@@ -463,11 +464,57 @@ export function buildServer(): FastifyInstance {
 
       try {
         return withDatabase(databasePath, (context) =>
-          invokeWorkflowAction(context, {
+          invokeWorkflowActionFromOperator(context, {
             workflowRunId: request.params.workflowRunId,
             action: request.body.action,
             expectedStateVersion: request.body.expectedStateVersion,
-            arg: request.body.arg
+            arg: request.body.arg,
+            actor: request.body.actor ?? "api-operator"
+          })
+        );
+      } catch (error) {
+        if (error instanceof WorkflowProtocolError || error instanceof ActiveResourceConflictError) {
+          return reply.code(400).send({ error: error.message });
+        }
+        throw error;
+      }
+    }
+  );
+
+  server.post<{
+    Params: { workflowRunId: string };
+    Body: WorkflowActionBody;
+  }>(
+    "/workflow-runs/:workflowRunId/actions",
+    {
+      schema: {
+        body: {
+          type: "object",
+          required: ["action", "expectedStateVersion"],
+          additionalProperties: false,
+          properties: {
+            action: { type: "string", minLength: 1 },
+            arg: { type: "string", minLength: 1 },
+            actor: { type: "string", minLength: 1 },
+            expectedStateVersion: { type: "integer", minimum: 0 }
+          }
+        }
+      }
+    },
+    async (request, reply) => {
+      const databasePath = process.env.COORDINATOR_DB_PATH;
+      if (!databasePath) {
+        return reply.code(503).send({ error: "COORDINATOR_DB_PATH 未配置" });
+      }
+
+      try {
+        return withDatabase(databasePath, (context) =>
+          invokeWorkflowActionFromOperator(context, {
+            workflowRunId: request.params.workflowRunId,
+            action: request.body.action,
+            expectedStateVersion: request.body.expectedStateVersion,
+            arg: request.body.arg,
+            actor: request.body.actor ?? "web-operator"
           })
         );
       } catch (error) {
@@ -906,6 +953,7 @@ type WorkflowActionBody = {
   action: string;
   expectedStateVersion: number;
   arg?: string;
+  actor?: string;
 };
 
 type RunAgentSessionBody = {

@@ -19,6 +19,7 @@ import {
   inspectWorkflowCapabilities,
   inspectWorkflowRun,
   invokeWorkflowAction,
+  invokeWorkflowActionFromOperator,
   listWorkflowArtifacts,
   listWorkflowEvents,
   startWorkflowRun,
@@ -686,6 +687,126 @@ describe("workflow protocol adapter", () => {
     expect(protocol.calls.filter((call) => call.args[1] === "action")).toHaveLength(1);
     expect(protocol.calls.find((call) => call.args[1] === "action")?.args).toContain("payload");
     expect(protocol.calls.find((call) => call.args[1] === "action")?.args).not.toContain(" payload ");
+  });
+
+  it("operator workflow action 先校验 latest allowedActions 与 required arg 再执行", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createAttemptWithReadyWorkspace(databasePath);
+    const protocol = createProtocolRunner();
+
+    const result = withDatabase(databasePath, (context) => {
+      const started = startWorkflowRun(context, {
+        attemptId: fixture.attemptId,
+        profileId: "feature",
+        runner: protocol.runner
+      });
+      return invokeWorkflowActionFromOperator(context, {
+        workflowRunId: started.workflowRun.id,
+        action: "debug-only",
+        arg: " change-1 ",
+        expectedStateVersion: started.workflowRun.stateVersion,
+        actor: "web-operator",
+        runner: protocol.runner
+      });
+    });
+
+    expect(result.workflowRun.status).toBe("handoff");
+    expect(protocol.calls.map((call) => call.args[1])).toEqual(["capabilities", "start", "status", "action"]);
+    expect(protocol.calls.find((call) => call.args[1] === "action")?.args).toEqual([
+      "protocol",
+      "action",
+      "--run",
+      "inner-run-1",
+      "debug-only",
+      "change-1"
+    ]);
+  });
+
+  it("operator workflow action 不在 latest allowedActions 时不执行 protocol action", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createAttemptWithReadyWorkspace(databasePath);
+    const protocol = createProtocolRunner();
+
+    expect(() =>
+      withDatabase(databasePath, (context) => {
+        const started = startWorkflowRun(context, {
+          attemptId: fixture.attemptId,
+          profileId: "feature",
+          runner: protocol.runner
+        });
+        return invokeWorkflowActionFromOperator(context, {
+          workflowRunId: started.workflowRun.id,
+          action: "freeze-requirements",
+          expectedStateVersion: started.workflowRun.stateVersion,
+          runner: protocol.runner
+        });
+      })
+    ).toThrow(WorkflowProtocolError);
+
+    expect(protocol.calls.some((call) => call.args[1] === "action")).toBe(false);
+  });
+
+  it("operator workflow action 缺少 required arg 时不执行 protocol action", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createAttemptWithReadyWorkspace(databasePath);
+    const protocol = createProtocolRunner();
+
+    expect(() =>
+      withDatabase(databasePath, (context) => {
+        const started = startWorkflowRun(context, {
+          attemptId: fixture.attemptId,
+          profileId: "feature",
+          runner: protocol.runner
+        });
+        return invokeWorkflowActionFromOperator(context, {
+          workflowRunId: started.workflowRun.id,
+          action: "debug-only",
+          expectedStateVersion: started.workflowRun.stateVersion,
+          runner: protocol.runner
+        });
+      })
+    ).toThrow(/需要参数 change-id/);
+
+    expect(protocol.calls.some((call) => call.args[1] === "action")).toBe(false);
+  });
+
+  it("operator workflow action 命中 deniedActions 时不执行 protocol action", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createAttemptWithReadyWorkspace(databasePath);
+    const protocol = createProtocolRunner();
+    const deniedRunner: WorkflowProtocolRunner = (args, options) => {
+      if (args[1] === "status") {
+        protocol.calls.push({ args, cwd: options.cwd, launcher: options.launcher, timeoutMs: options.timeoutMs });
+        return JSON.stringify({
+          runId: "inner-run-1",
+          profile: "feature",
+          lifecycle: "active",
+          allowedActions: ["blocked-action"],
+          deniedActions: ["blocked-action"],
+          handoff: { available: false, artifacts: [], deniedActions: [] },
+          summary: "denied"
+        });
+      }
+      return protocol.runner(args, options);
+    };
+
+    expect(() =>
+      withDatabase(databasePath, (context) => {
+        const started = startWorkflowRun(context, {
+          attemptId: fixture.attemptId,
+          profileId: "feature",
+          runner: deniedRunner
+        });
+        return invokeWorkflowActionFromOperator(context, {
+          workflowRunId: started.workflowRun.id,
+          action: "blocked-action",
+          expectedStateVersion: started.workflowRun.stateVersion,
+          runner: deniedRunner
+        });
+      })
+    ).toThrow(/deniedActions/);
+
+    expect(protocol.calls.some((call) => call.args[1] === "action")).toBe(false);
   });
 
   it("artifacts/events 只返回 protocol 暴露的只读引用并记录外层 event", () => {

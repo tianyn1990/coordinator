@@ -42,6 +42,7 @@ export {
   inspectWorkflowCapabilities,
   inspectWorkflowRun,
   invokeWorkflowAction,
+  invokeWorkflowActionFromOperator,
   listWorkflowArtifacts,
   listWorkflowEvents,
   startWorkflowRun
@@ -105,6 +106,7 @@ export type {
 export type {
   InspectWorkflowCapabilitiesInput,
   InspectWorkflowRunInput,
+  InvokeWorkflowActionFromOperatorInput,
   InvokeWorkflowActionInput,
   ListWorkflowArtifactsInput,
   ListWorkflowEventsInput,

@@ -510,6 +510,13 @@ textarea {
   padding: 16px;
 }
 
+.scope-line {
+  margin: 8px 0 0;
+  color: #7ee7ef;
+  font-size: 13px;
+  font-weight: 900;
+}
+
 .run-log {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -787,6 +794,7 @@ textarea {
 .workflow-stage div,
 .lens-callout,
 .lens-section,
+.workflow-action-panel,
 .panel-lite {
   min-width: 0;
   border: 1px solid #223940;
@@ -853,6 +861,58 @@ textarea {
 .hint-row span,
 .hint-row small {
   color: #9eb5ba;
+  overflow-wrap: anywhere;
+}
+
+.workflow-action-panel {
+  display: grid;
+  gap: 12px;
+  border-color: #7b5b20;
+  background: #14160f;
+}
+
+.workflow-action-panel > div:first-child {
+  display: grid;
+  gap: 5px;
+}
+
+.workflow-action-panel > div:first-child strong {
+  color: #ffc766;
+}
+
+.workflow-action-panel > div:first-child span,
+.workflow-action-card small {
+  color: #9eb5ba;
+  overflow-wrap: anywhere;
+}
+
+.workflow-action-list {
+  display: grid;
+  gap: 10px;
+}
+
+.workflow-action-card {
+  display: grid;
+  gap: 10px;
+  border-top: 1px solid #3b2b0e;
+  padding-top: 10px;
+}
+
+.workflow-action-card > div {
+  display: grid;
+  gap: 3px;
+}
+
+.workflow-action-card > div span,
+.workflow-action-card label span {
+  color: #a8bdc2;
+  font-size: 12px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.workflow-action-card > div strong {
+  color: #e6f1f2;
   overflow-wrap: anywhere;
 }
 

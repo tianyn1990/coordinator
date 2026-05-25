@@ -10,6 +10,7 @@ import {
   createProject,
   createTask,
   createWorkspace,
+  createWorkflowRun,
   listTaskEvents,
   runMigrations,
   updateOperation,
@@ -55,7 +56,7 @@ describe("API health", () => {
       const server = buildServer();
       const response = await server.inject({ method: "GET", url: "/tasks/task-api-timeline/timeline" });
 
-      expect(response.statusCode).toBe(200);
+      expect(response.statusCode, JSON.stringify(response.json())).toBe(200);
       expect(response.json()).toMatchObject({
         taskId: "task-api-timeline",
         events: [{ type: "task.created" }]
@@ -87,7 +88,7 @@ describe("API health", () => {
       const server = buildServer();
       const response = await server.inject({ method: "GET", url: "/projects" });
 
-      expect(response.statusCode).toBe(200);
+      expect(response.statusCode, JSON.stringify(response.json())).toBe(200);
       expect(response.json()).toMatchObject({
         projects: [{ id: "project-api", defaultBranch: "main" }]
       });
@@ -525,6 +526,180 @@ exit 1
         }
       });
       expect(body.workflowRun).not.toHaveProperty("requestedProfileId");
+    } finally {
+      if (previous === undefined) {
+        delete process.env.COORDINATOR_DB_PATH;
+      } else {
+        process.env.COORDINATOR_DB_PATH = previous;
+      }
+    }
+  });
+
+  it("workflow actions API 经 Core 校验后执行 operator-confirmed action", async () => {
+    const databasePath = join(mkdtempSync(join(tmpdir(), "coordinator-api-workflow-action-")), "api.sqlite");
+    const repoPath = mkdtempSync(join(tmpdir(), "coordinator-api-workflow-action-repo-"));
+    mkdirSync(join(repoPath, ".git"));
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "coordinator-api-workflow-action-workspaces-"));
+    const launcherPath = join(mkdtempSync(join(tmpdir(), "coordinator-api-workflow-action-launcher-")), "workflow");
+    writeFileSync(
+      launcherPath,
+      `#!/bin/sh
+set -eu
+if [ "$1" = "protocol" ] && [ "$2" = "status" ]; then
+  cat <<'JSON'
+{"runId":"inner-run-1","profile":"feature","lifecycle":"active","stage":"requirements","allowedActions":["freeze-requirements"],"handoff":{"available":false,"artifacts":[],"deniedActions":[]},"summary":"waiting for operator"}
+JSON
+  exit 0
+fi
+if [ "$1" = "protocol" ] && [ "$2" = "action" ] && [ "$5" = "freeze-requirements" ]; then
+  cat <<'JSON'
+{"runId":"inner-run-1","profile":"feature","lifecycle":"active","stage":"implementation","allowedActions":[],"handoff":{"available":false,"artifacts":[],"deniedActions":[]},"summary":"requirements frozen"}
+JSON
+  exit 0
+fi
+echo "unexpected args: $*" >&2
+exit 1
+`
+    );
+    chmodSync(launcherPath, 0o755);
+    runMigrations(databasePath);
+    withDatabase(databasePath, (context) => {
+      const project = createProject(context, {
+        id: "project-api-workflow-action",
+        name: "workflow-action",
+        repoPath,
+        workspaceRoot,
+        workflowLauncher: launcherPath
+      });
+      const task = createTask(context, { id: "task-api-workflow-action", projectId: project.id, title: "workflow action" });
+      const attempt = createAttempt(context, { id: "attempt-api-workflow-action", projectId: project.id, taskId: task.id });
+      const workspacePath = join(workspaceRoot, project.id, task.id, attempt.id);
+      const repoWorktree = join(workspacePath, "repo");
+      mkdirSync(join(repoWorktree, ".git"), { recursive: true });
+      createWorkspace(context, {
+        id: "workspace-api-workflow-action",
+        projectId: project.id,
+        taskId: task.id,
+        attemptId: attempt.id,
+        status: "ready",
+        workspacePath,
+        repoPath: repoWorktree,
+        branch: "coordinator/task-api-workflow-action/attempt-api-workflow-action",
+        baseBranch: "main"
+      });
+      createWorkflowRun(context, {
+        id: "workflow-run-api-action",
+        projectId: project.id,
+        taskId: task.id,
+        attemptId: attempt.id,
+        profileId: "feature",
+        status: "running",
+        externalId: "inner-run-1"
+      });
+    });
+
+    const previous = process.env.COORDINATOR_DB_PATH;
+    process.env.COORDINATOR_DB_PATH = databasePath;
+    try {
+      const server = buildServer();
+      const response = await server.inject({
+        method: "POST",
+        url: "/workflow-runs/workflow-run-api-action/actions",
+        payload: { action: "freeze-requirements", expectedStateVersion: 0, actor: "api-test" }
+      });
+
+      expect(response.statusCode, JSON.stringify(response.json())).toBe(200);
+      expect(response.json()).toMatchObject({
+        workflowRun: { id: "workflow-run-api-action", status: "running", stateVersion: 1 },
+        status: {
+          debug: { stage: "implementation" },
+          summary: "requirements frozen"
+        }
+      });
+      const events = withDatabase(databasePath, (context) => listTaskEvents(context, "task-api-workflow-action"));
+      expect(events.map((event) => event.type)).toContain("workflow.action");
+    } finally {
+      if (previous === undefined) {
+        delete process.env.COORDINATOR_DB_PATH;
+      } else {
+        process.env.COORDINATOR_DB_PATH = previous;
+      }
+    }
+  });
+
+  it("legacy workflow action API 也必须经 Core allowedActions 校验", async () => {
+    const databasePath = join(mkdtempSync(join(tmpdir(), "coordinator-api-workflow-action-legacy-")), "api.sqlite");
+    const repoPath = mkdtempSync(join(tmpdir(), "coordinator-api-workflow-action-legacy-repo-"));
+    mkdirSync(join(repoPath, ".git"));
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "coordinator-api-workflow-action-legacy-workspaces-"));
+    const launcherPath = join(mkdtempSync(join(tmpdir(), "coordinator-api-workflow-action-legacy-launcher-")), "workflow");
+    writeFileSync(
+      launcherPath,
+      `#!/bin/sh
+set -eu
+if [ "$1" = "protocol" ] && [ "$2" = "status" ]; then
+  cat <<'JSON'
+{"runId":"inner-run-1","profile":"feature","lifecycle":"active","stage":"requirements","allowedActions":["freeze-requirements"],"handoff":{"available":false,"artifacts":[],"deniedActions":[]},"summary":"waiting for operator"}
+JSON
+  exit 0
+fi
+if [ "$1" = "protocol" ] && [ "$2" = "action" ]; then
+  echo "legacy endpoint bypassed allowedActions" >&2
+  exit 1
+fi
+echo "unexpected args: $*" >&2
+exit 1
+`
+    );
+    chmodSync(launcherPath, 0o755);
+    runMigrations(databasePath);
+    withDatabase(databasePath, (context) => {
+      const project = createProject(context, {
+        id: "project-api-workflow-action-legacy",
+        name: "workflow-action-legacy",
+        repoPath,
+        workspaceRoot,
+        workflowLauncher: launcherPath
+      });
+      const task = createTask(context, { id: "task-api-workflow-action-legacy", projectId: project.id, title: "workflow action legacy" });
+      const attempt = createAttempt(context, { id: "attempt-api-workflow-action-legacy", projectId: project.id, taskId: task.id });
+      const workspacePath = join(workspaceRoot, project.id, task.id, attempt.id);
+      const repoWorktree = join(workspacePath, "repo");
+      mkdirSync(join(repoWorktree, ".git"), { recursive: true });
+      createWorkspace(context, {
+        id: "workspace-api-workflow-action-legacy",
+        projectId: project.id,
+        taskId: task.id,
+        attemptId: attempt.id,
+        status: "ready",
+        workspacePath,
+        repoPath: repoWorktree,
+        branch: "coordinator/task-api-workflow-action-legacy/attempt-api-workflow-action-legacy",
+        baseBranch: "main"
+      });
+      createWorkflowRun(context, {
+        id: "workflow-run-api-action-legacy",
+        projectId: project.id,
+        taskId: task.id,
+        attemptId: attempt.id,
+        profileId: "feature",
+        status: "running",
+        externalId: "inner-run-1"
+      });
+    });
+
+    const previous = process.env.COORDINATOR_DB_PATH;
+    process.env.COORDINATOR_DB_PATH = databasePath;
+    try {
+      const server = buildServer();
+      const response = await server.inject({
+        method: "POST",
+        url: "/workflow-runs/workflow-run-api-action-legacy/action",
+        payload: { action: "unsafe-action", expectedStateVersion: 0, actor: "api-test" }
+      });
+
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toMatchObject({ error: expect.stringContaining("latest allowedActions") });
     } finally {
       if (previous === undefined) {
         delete process.env.COORDINATOR_DB_PATH;
