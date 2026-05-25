@@ -32,17 +32,27 @@ import {
   rejectMergeRuntime,
   requestMergeApprovalRuntime,
   resumeWorkspacePreflight,
-  runDaemonTick,
-  runCoordinatorAgentSession,
   startWorkflowRun,
   updatePullRequestRuntime,
   viewProjectRegistry,
   type GitProviderKind
 } from "@coordinator/core";
 import { getHealthStatus } from "@coordinator/shared";
+import {
+  RuntimeWorkerError,
+  createRuntimeWorkerExecutor,
+  isRuntimeWorkerErrorNamed,
+  isRuntimeWorkerTimeout,
+  type RuntimeExecutor
+} from "./runtime-worker.js";
 
-export function buildServer(): FastifyInstance {
+export type BuildServerOptions = {
+  runtimeExecutor?: RuntimeExecutor;
+};
+
+export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
   const server = Fastify({ logger: true });
+  const runtimeExecutor = options.runtimeExecutor ?? createRuntimeWorkerExecutor();
 
   server.addHook("onRequest", (request, reply, done) => {
     const origin = request.headers.origin;
@@ -587,17 +597,29 @@ export function buildServer(): FastifyInstance {
       }
 
       try {
-        return withDatabase(databasePath, (context) =>
-          runCoordinatorAgentSession(context, {
-            taskId: request.params.taskId,
-            providerId: request.body.providerId,
-            requestId: request.body.requestId,
-            timeoutMs: request.body.timeoutMs
-          })
-        );
+        return await runtimeExecutor.runCoordinatorAgentSession(databasePath, {
+          taskId: request.params.taskId,
+          providerId: request.body.providerId,
+          requestId: request.body.requestId,
+          timeoutMs: request.body.timeoutMs
+        });
       } catch (error) {
-        if (error instanceof AgentProviderRuntimeError || error instanceof ActiveResourceConflictError) {
-          return reply.code(400).send({ error: error.message });
+        if (
+          error instanceof AgentProviderRuntimeError ||
+          error instanceof ActiveResourceConflictError ||
+          isRuntimeWorkerErrorNamed(error, [
+            "AgentProviderRuntimeError",
+            "ProviderUnavailableError",
+            "ActiveResourceConflictError"
+          ])
+        ) {
+          return reply.code(400).send({ error: getErrorMessage(error) });
+        }
+        if (isRuntimeWorkerTimeout(error)) {
+          return reply.code(504).send({ error: getErrorMessage(error) });
+        }
+        if (error instanceof RuntimeWorkerError) {
+          return reply.code(500).send({ error: getErrorMessage(error) });
         }
         throw error;
       }
@@ -700,17 +722,25 @@ export function buildServer(): FastifyInstance {
       }
 
       try {
-        return withDatabase(databasePath, (context) =>
-          runDaemonTick(context, {
-            owner: request.body.owner ?? "api",
-            taskId: request.body.taskId,
-            retryBudget: request.body.retryBudget,
-            candidateLimit: request.body.candidateLimit
-          })
-        );
+        return await runtimeExecutor.runDaemonTick(databasePath, {
+          owner: request.body.owner ?? "api",
+          taskId: request.body.taskId,
+          retryBudget: request.body.retryBudget,
+          candidateLimit: request.body.candidateLimit
+        });
       } catch (error) {
-        if (error instanceof DaemonRuntimeError || error instanceof ActiveResourceConflictError) {
-          return reply.code(400).send({ error: error.message });
+        if (
+          error instanceof DaemonRuntimeError ||
+          error instanceof ActiveResourceConflictError ||
+          isRuntimeWorkerErrorNamed(error, ["DaemonRuntimeError", "ActiveResourceConflictError"])
+        ) {
+          return reply.code(400).send({ error: getErrorMessage(error) });
+        }
+        if (isRuntimeWorkerTimeout(error)) {
+          return reply.code(504).send({ error: getErrorMessage(error) });
+        }
+        if (error instanceof RuntimeWorkerError) {
+          return reply.code(500).send({ error: getErrorMessage(error) });
         }
         throw error;
       }
@@ -1011,6 +1041,10 @@ function parsePositiveInt(value: string | undefined, fallback: number): number {
   }
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function resolveAllowedOrigins(): Set<string> {

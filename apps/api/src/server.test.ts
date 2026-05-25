@@ -18,6 +18,7 @@ import {
   withDatabase
 } from "@coordinator/db";
 import { buildServer } from "./server.js";
+import { RuntimeWorkerError } from "./runtime-worker.js";
 
 describe("API health", () => {
   it("返回 coordinator 健康状态", async () => {
@@ -41,6 +42,113 @@ describe("API health", () => {
 
     expect(response.statusCode).toBe(204);
     expect(response.headers["access-control-allow-origin"]).toBe("http://127.0.0.1:5173");
+  });
+
+  it("长 runtime 请求进行中时不阻塞健康检查", async () => {
+    let releaseDaemonTick: () => void = () => {};
+    const daemonTickCompleted = new Promise<void>((resolve) => {
+      releaseDaemonTick = () => resolve();
+    });
+    const server = buildServer({
+      runtimeExecutor: {
+        async runDaemonTick() {
+          await daemonTickCompleted;
+          return { tickId: "tick-api-nonblocking", status: "idle", actions: [] };
+        },
+        async runCoordinatorAgentSession() {
+          throw new Error("unexpected agent session invocation");
+        }
+      }
+    });
+
+    const previous = process.env.COORDINATOR_DB_PATH;
+    process.env.COORDINATOR_DB_PATH = "runtime-worker-not-used.sqlite";
+    try {
+      const daemonRequest = server.inject({
+        method: "POST",
+        url: "/daemon/tick",
+        payload: { owner: "api-test" }
+      });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      const health = await server.inject({ method: "GET", url: "/health" });
+      expect(health.statusCode).toBe(200);
+
+      releaseDaemonTick();
+      const daemonResponse = await daemonRequest;
+      expect(daemonResponse.statusCode).toBe(200);
+      expect(daemonResponse.json()).toMatchObject({ tickId: "tick-api-nonblocking", status: "idle" });
+    } finally {
+      if (previous === undefined) {
+        delete process.env.COORDINATOR_DB_PATH;
+      } else {
+        process.env.COORDINATOR_DB_PATH = previous;
+      }
+    }
+  });
+
+  it("runtime worker timeout 会返回受控 504", async () => {
+    const server = buildServer({
+      runtimeExecutor: {
+        async runDaemonTick() {
+          throw new RuntimeWorkerError("runtime worker timed out after 10ms", { timedOut: true });
+        },
+        async runCoordinatorAgentSession() {
+          throw new Error("unexpected agent session invocation");
+        }
+      }
+    });
+
+    const previous = process.env.COORDINATOR_DB_PATH;
+    process.env.COORDINATOR_DB_PATH = "runtime-worker-not-used.sqlite";
+    try {
+      const response = await server.inject({
+        method: "POST",
+        url: "/daemon/tick",
+        payload: { owner: "api-test" }
+      });
+
+      expect(response.statusCode).toBe(504);
+      expect(response.json()).toMatchObject({ error: "runtime worker timed out after 10ms" });
+    } finally {
+      if (previous === undefined) {
+        delete process.env.COORDINATOR_DB_PATH;
+      } else {
+        process.env.COORDINATOR_DB_PATH = previous;
+      }
+    }
+  });
+
+  it("runtime worker infra error 会返回受控 500", async () => {
+    const server = buildServer({
+      runtimeExecutor: {
+        async runDaemonTick() {
+          throw new RuntimeWorkerError("runtime worker failed before result");
+        },
+        async runCoordinatorAgentSession() {
+          throw new Error("unexpected agent session invocation");
+        }
+      }
+    });
+
+    const previous = process.env.COORDINATOR_DB_PATH;
+    process.env.COORDINATOR_DB_PATH = "runtime-worker-not-used.sqlite";
+    try {
+      const response = await server.inject({
+        method: "POST",
+        url: "/daemon/tick",
+        payload: { owner: "api-test" }
+      });
+
+      expect(response.statusCode).toBe(500);
+      expect(response.json()).toMatchObject({ error: "runtime worker failed before result" });
+    } finally {
+      if (previous === undefined) {
+        delete process.env.COORDINATOR_DB_PATH;
+      } else {
+        process.env.COORDINATOR_DB_PATH = previous;
+      }
+    }
   });
 
   it("按 task id 返回 event timeline", async () => {
