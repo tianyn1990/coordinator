@@ -795,6 +795,8 @@ textarea {
 .lens-callout,
 .lens-section,
 .workflow-action-panel,
+.agent-activity-panel,
+.agent-activity-card,
 .panel-lite {
   min-width: 0;
   border: 1px solid #223940;
@@ -913,6 +915,56 @@ textarea {
 
 .workflow-action-card > div strong {
   color: #e6f1f2;
+  overflow-wrap: anywhere;
+}
+
+.agent-activity-panel {
+  display: grid;
+  gap: 10px;
+  background: #0b171a;
+}
+
+.agent-activity-list {
+  display: grid;
+  gap: 10px;
+}
+
+.agent-activity-card {
+  display: grid;
+  gap: 7px;
+  padding: 10px;
+}
+
+.agent-activity-card > div:first-child {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.agent-activity-card span,
+.agent-activity-card small {
+  color: #8eaab0;
+}
+
+.agent-activity-card strong,
+.agent-activity-card p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.activity-event {
+  color: #c6d9dc;
+  font-size: 13px;
+}
+
+.activity-event.warn {
+  color: #ffb09e;
+}
+
+.artifact-row {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
   overflow-wrap: anywhere;
 }
 

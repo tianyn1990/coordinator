@@ -20,7 +20,9 @@ import {
   CodexProvider,
   FakeAgentProvider,
   ProviderUnavailableError,
+  buildAgentActivitySummary,
   inspectAgentSession,
+  normalizeProviderEvent,
   runCoordinatorAgentSession,
   type AgentProviderRunInput,
   type AgentProviderRunner,
@@ -212,7 +214,12 @@ describe("agent provider runtime", () => {
     expect(events.map((event) => event.type)).toContain("agent.session_failed");
     expect(events.find((event) => event.type === "agent.session_failed")?.payload).toMatchObject({
       providerId: "failing",
-      status: "unknown"
+      status: "unknown",
+      agentActivity: {
+        state: "unknown",
+        providerId: "failing",
+        failureKind: "unknown"
+      }
     });
   });
 
@@ -562,7 +569,72 @@ describe("agent provider runtime", () => {
       implementationMode: "sdk",
       providerSessionId: "provider-session-1",
       permissionProfile: "test-readonly",
-      rawEventArtifactPath: result.artifacts.transcriptPath
+      rawEventArtifactPath: result.artifacts.transcriptPath,
+      agentActivity: {
+        state: "completed",
+        providerId: "sdk-fake",
+        providerSessionId: "provider-session-1",
+        implementationMode: "sdk",
+        permissionProfile: "test-readonly",
+        artifactRefs: {
+          rawEventArtifactPath: result.artifacts.transcriptPath,
+          finalResponsePath: result.artifacts.finalResponsePath
+        }
+      }
+    });
+  });
+
+  it("provider raw event 只归一化为白名单摘要", () => {
+    const normalized = normalizeProviderEvent({
+      type: "provider.raw_event",
+      providerId: "codex",
+      createdAt: "2026-05-25T00:00:00.000Z",
+      event: {
+        type: "item.completed",
+        item: {
+          type: "agent_message",
+          text: "raw message body should not leak"
+        }
+      }
+    });
+
+    expect(normalized).toMatchObject({
+      kind: "message_delta",
+      providerId: "codex",
+      timestamp: "2026-05-25T00:00:00.000Z",
+      metadata: { providerEventType: "item.completed" }
+    });
+    expect(JSON.stringify(normalized)).not.toContain("raw message body should not leak");
+  });
+
+  it("独立 raw event artifact 可作为 normalized activity 来源", () => {
+    const root = mkdtempSync(join(tmpdir(), "coordinator-agent-activity-"));
+    const rawEventPath = join(root, "provider-events.jsonl");
+    const transcriptPath = join(root, "transcript.jsonl");
+    writeFileSync(
+      rawEventPath,
+      `${JSON.stringify({
+        type: "provider.raw_event",
+        providerId: "codex",
+        createdAt: "2026-05-25T00:00:00.000Z",
+        event: { type: "turn.completed" }
+      })}\n`,
+      "utf8"
+    );
+    writeFileSync(transcriptPath, "", "utf8");
+
+    const activity = buildAgentActivitySummary({
+      state: "completed",
+      providerId: "codex",
+      rawEventArtifactPath: rawEventPath,
+      transcriptPath,
+      fallbackTimestamp: "2026-05-24T00:00:00.000Z"
+    });
+
+    expect(activity).toMatchObject({
+      lastActivityAt: "2026-05-25T00:00:00.000Z",
+      latestEvent: { kind: "turn_completed" },
+      artifactRefs: { rawEventArtifactPath: rawEventPath, transcriptPath }
     });
   });
 

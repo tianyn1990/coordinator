@@ -2086,6 +2086,43 @@ describe("daemon runtime", () => {
     );
   });
 
+  it("watchdog 可从 session transcript 归一化 lastActivityAt，避免 recent activity 被误判 stalled", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createTaskFixture(databasePath);
+    const now = new Date("2026-05-04T00:00:00.000Z");
+    const transcriptPath = join(mkdtempSync(join(tmpdir(), "coordinator-agent-transcript-")), "transcript.jsonl");
+    writeFileSync(
+      transcriptPath,
+      `${JSON.stringify({
+        type: "provider.raw_event",
+        providerId: "fake",
+        createdAt: "2026-05-03T23:50:00.000Z",
+        event: { type: "turn.started" }
+      })}\n`,
+      "utf8"
+    );
+    withDatabase(databasePath, (context) => {
+      createAgentSession(context, {
+        id: "active-agent-session",
+        projectId: fixture.projectId,
+        taskId: fixture.taskId,
+        providerKind: "fake",
+        role: "outer",
+        status: "running",
+        transcriptPath
+      });
+      context.db
+        .prepare("UPDATE agent_sessions SET updated_at = ? WHERE id = ?")
+        .run("2026-05-03T23:00:00.000Z", "active-agent-session");
+    });
+
+    const result = withDatabase(databasePath, (context) => runDaemonTick(context, { now, provider: new FakeAgentProvider("no-op") }));
+    const events = withDatabase(databasePath, (context) => listTaskEvents(context, fixture.taskId));
+
+    expect(result.actions.some((action) => action.agentSessionId === "active-agent-session")).toBe(false);
+    expect(events.map((event) => event.type)).not.toContain("daemon.agent_session_stalled");
+  });
+
   it("stale outer session retry 耗尽时仍停止 session 并封口 operation，避免 active session 永久阻塞", () => {
     const databasePath = createMigratedDatabase();
     const fixture = createTaskFixture(databasePath);

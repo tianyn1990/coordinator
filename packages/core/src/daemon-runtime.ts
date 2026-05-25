@@ -49,6 +49,7 @@ import {
   type AgentProvider,
   type RunCoordinatorAgentSessionInput
 } from "./agent-provider-runtime.js";
+import { buildAgentActivitySummary, extractAgentActivitySummary, type AgentActivitySummary } from "./agent-activity.js";
 import { buildTaskSurfaceFromDb, type SurfaceEnvelope } from "./surface.js";
 import {
   WorkflowProtocolError,
@@ -754,7 +755,7 @@ function watchActiveAgentSessions(
 ): DaemonActionResult[] {
   const rows = context.db
     .prepare(
-      `SELECT id, project_id, task_id, attempt_id, provider_kind, role, status, updated_at
+      `SELECT id, project_id, task_id, attempt_id, provider_kind, role, status, transcript_path, updated_at
        FROM agent_sessions
        WHERE role = 'outer' AND status IN ('starting', 'running')
        ORDER BY updated_at ASC, created_at ASC, id ASC`
@@ -767,6 +768,7 @@ function watchActiveAgentSessions(
     provider_kind: string;
     role: string;
     status: string;
+    transcript_path: string | null;
     updated_at: string;
   }>;
   const actions: DaemonActionResult[] = [];
@@ -774,7 +776,13 @@ function watchActiveAgentSessions(
     if (!isTaskInScope(input, row.task_id ?? undefined)) {
       continue;
     }
-    const ageMs = now.getTime() - Date.parse(row.updated_at);
+    const lifecycle = findLatestAgentLifecycleSignal(context, {
+      agentSessionId: row.id,
+      providerKind: row.provider_kind,
+      transcriptPath: row.transcript_path ?? undefined,
+      fallbackUpdatedAt: row.updated_at
+    });
+    const ageMs = now.getTime() - Date.parse(lifecycle.lastActivityAt ?? row.updated_at);
     if (Number.isNaN(ageMs) || ageMs < DEFAULT_AGENT_STALLED_MS) {
       continue;
     }
@@ -794,7 +802,16 @@ function watchActiveAgentSessions(
       operationId: operation.id,
       status: "running",
       now,
-      lastObservedState: { tickId, owner, agentSessionId: row.id, ageMs, observedExternalState: "unclear" }
+      lastObservedState: {
+        tickId,
+        owner,
+        agentSessionId: row.id,
+        ageMs,
+        lastActivityAt: lifecycle.lastActivityAt,
+        latestEvent: lifecycle.latestEvent,
+        failureKind: lifecycle.failureKind,
+        observedExternalState: "unclear"
+      }
     });
     const inspected = inspectAgentSession(context, { agentSessionId: row.id });
     const task = row.task_id ? getTask(context, row.task_id) : undefined;
@@ -834,7 +851,17 @@ function watchActiveAgentSessions(
         agentSessionId: row.id,
         operationId: operation.id,
         severity: decision.operatorAttentionRequired ? "warn" : "debug",
-        payload: { tickId, ageMs, providerKind: row.provider_kind, role: row.role, decision: decision.kind, retryOutcome }
+        payload: {
+          tickId,
+          ageMs,
+          providerKind: row.provider_kind,
+          role: row.role,
+          lastActivityAt: lifecycle.lastActivityAt,
+          latestEvent: lifecycle.latestEvent,
+          failureKind: lifecycle.failureKind,
+          decision: decision.kind,
+          retryOutcome
+        }
       });
       if (decision.nextAction === "stop_session") {
         // 只有 Core recovery decision 明确允许时才把 stale session 移出 active 集合。
@@ -859,6 +886,53 @@ function watchActiveAgentSessions(
     });
   }
   return actions;
+}
+
+function findLatestAgentLifecycleSignal(
+  context: DbContext,
+  input: {
+    agentSessionId: string;
+    providerKind: string;
+    transcriptPath?: string;
+    fallbackUpdatedAt: string;
+  }
+): Pick<AgentActivitySummary, "lastActivityAt" | "latestEvent" | "failureKind"> {
+  const rows = context.db
+    .prepare(
+      `SELECT payload_json FROM events
+       WHERE agent_session_id = ? AND payload_json IS NOT NULL
+       ORDER BY created_at DESC, id DESC
+       LIMIT 5`
+    )
+    .all(input.agentSessionId) as Array<{ payload_json: string | null }>;
+  for (const row of rows) {
+    if (!row.payload_json) {
+      continue;
+    }
+    try {
+      const activity = extractAgentActivitySummary(JSON.parse(row.payload_json));
+      if (activity) {
+        return {
+          lastActivityAt: activity.lastActivityAt ?? input.fallbackUpdatedAt,
+          latestEvent: activity.latestEvent,
+          failureKind: activity.failureKind
+        };
+      }
+    } catch {
+      // lifecycle signal 是探活证据，payload 损坏时回退 session updated_at，不让 daemon 解释 raw event。
+    }
+  }
+  const activityFromTranscript = buildAgentActivitySummary({
+    state: "running",
+    providerId: input.providerKind,
+    transcriptPath: input.transcriptPath,
+    fallbackTimestamp: input.fallbackUpdatedAt
+  });
+  return {
+    lastActivityAt: activityFromTranscript.lastActivityAt,
+    latestEvent: activityFromTranscript.latestEvent,
+    failureKind: activityFromTranscript.failureKind
+  };
 }
 
 function reconcileWorkflowRun(

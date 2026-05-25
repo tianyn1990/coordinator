@@ -156,19 +156,20 @@ P2 只预留接口和规划，不进入 V1 完成标准：
 
 ### 当前进度
 
-- 当前阶段：`Iteration 14: Agent lifecycle 与 SDK-first Provider Runtime` 的 `Slice 14.2: SDK-first outer Coordinator Agent provider runtime` 已完成实现、验证、review 和 OpenSpec 归档，正在提交本轮改动。
-- 当前 OpenSpec change：`adopt-sdk-first-agent-provider-runtime` 已归档为 `openspec/changes/archive/2026-05-25-adopt-sdk-first-agent-provider-runtime/`；上一轮 `align-workflow-agent-lifecycle` 已归档为 `openspec/changes/archive/2026-05-25-align-workflow-agent-lifecycle/`。
-- 当前正式规格：已同步到 `openspec/specs/agent-provider-runtime/spec.md`；上一轮已同步 `web-human-review-surface`、`operator-task-controls`、`workflow-protocol-adapter` 和 `daemon-runtime`。
+- 当前阶段：`Iteration 14: Agent lifecycle 与 SDK-first Provider Runtime` 的 `Slice 14.3: Agent event normalization and lifecycle observation` 已完成实现、验证、review 和 OpenSpec 归档，正在提交本轮改动。
+- 当前 OpenSpec change：`normalize-agent-provider-events` 已归档为 `openspec/changes/archive/2026-05-25-normalize-agent-provider-events/`；上一轮 `adopt-sdk-first-agent-provider-runtime` 已归档为 `openspec/changes/archive/2026-05-25-adopt-sdk-first-agent-provider-runtime/`；此前 `align-workflow-agent-lifecycle` 已归档为 `openspec/changes/archive/2026-05-25-align-workflow-agent-lifecycle/`。
+- 当前正式规格：本轮已同步 `agent-provider-runtime`、`coordinator-surface`、`daemon-runtime`、`observability` 和 `web-human-review-surface`；上一轮已同步 `operator-task-controls`、`workflow-protocol-adapter` 等相关规格。
 - 当前已落地事实：Web 已将 New Task 从侧栏小表单提升为完整任务下达页面，支持更长文本编辑、acceptance criteria、constraints、autonomy、workflow hint/default 说明和附件占位；Project Admin 已支持查看 project registry 摘要和注册 project，并明确 workspace init/cleanup hook 与 retention policy 仍是 disabled 预留，不执行脚本副作用；Task Cockpit 和 Workbench 已支持 `Run until blocked` operator loop，只循环调用 Core API 的 daemon tick 与 refresh/inspect，不自动执行 workflow action；Task Cockpit 和 Classic Debug 已补齐 create/update PR/MR、inspect review、request merge approval 的 operator actions，approve/reject/merge 仍由 Core gate 校验；Workflow Protocol Adapter 已适配 `@hetao-ai/workflow@0.6.10` 的 `progress` 与 `stageArtifacts` display projection，并把它们持久化到 workflow event payload，供 Web Workflow Lens 展示。
 - 当前设计修正：`add-web-workflow-action-loop` 已证明 Web -> Core -> workflow protocol action 的受控链路可用，但不应把所有 workflow `allowedActions` 都转成人工待办。Coordinator 后续应围绕 inner coding agent 生命周期观察和恢复：agent 仍在运行时只观察；agent 停止/失败/stalled/handoff 后，Core 再结合 agent evidence、workflow status/events、operation ledger 和 PR/MR/human facts 判断 owner。`materialize-change <change-id>` 等 agent/internal action 不进入 needs-me。
 - 当前 protocol 约束：本期不修改 `/Users/hetao/Documents/github/workflow`，也不要求 `workflow protocol` 新增字段。`agent.state`、`blocker.owner`、`operatorActions`、`agentActions` 只作为后续可选增强方向；Coordinator 侧先用保守 action classification 避免误报人工 gate。
 - 当前 Slice 14.1 已落地：共享层新增 workflow action classification；Core operator-facing workflow action helper 仅允许 `freeze-requirements`、`approve-planning-dossier`、review/merge approval 类 gate；API `POST /workflow-runs/:id/actions` 继续只进 Core helper，并拒绝 `materialize-change`、agent/internal 和 unknown/debug-only action；Web Task Cockpit / Workbench / Action Inbox / needs-me 只展示 operator-facing workflow gate；Workflow Lens debug/detail 仍展示 internal/debug action 和 action input hint；`Run until blocked` 对 internal/debug action 显示 observing，不把开发者拉进手动参数输入。
 - 当前 Slice 14.2 已落地：`CodexProvider` 和 `ClaudeCodeProvider` 默认走 SDK-first adapter，分别接入 `@openai/codex-sdk@0.133.0` 与 `@anthropic-ai/claude-agent-sdk@0.3.150`；现有 CLI subprocess 保留为 compatibility fallback；provider result 统一记录 implementation mode、permission profile、provider session id、provider version 和 raw event artifact ref；SDK raw events 由 bridge 直接追加到 transcript artifact，不进入 Coordinator Surface、agent tools 或 Core 状态机；Codex SDK import-only exports、`turn.failed` / `error` 和 raw event stdout buffer 风险已通过 review 修复。
+- 当前 Slice 14.3 已落地：Core 新增 provider-agnostic normalized agent event 与 agent activity summary；raw provider events 仍只保留在 transcript/provider event artifact，Core event payload 和 operator summary 只使用白名单摘要、last activity、failure kind 和 artifact ref；Coordinator Surface 只暴露 sanitized activity 摘要和 final response artifact，不暴露 provider session id、permission internals、raw JSONL 或完整 transcript；daemon/watchdog 可用 last activity 做 stalled observation，且可从 session transcript 做只读 normalization fallback，但不让 event stream 驱动 task done、PR readiness、merge、workflow handoff 或 workflow action；Web Task Cockpit / Classic Detail 展示 agent activity 摘要和 final response artifact，Action Inbox 不因 agent activity 生成 needs-me。
 - 当前可靠性补强：`/daemon/tick` 支持 operator-only task scope；Core daemon runtime 在 task scope 下先按 task 过滤 operations、workspaces、workflow runs、human requests 和 expired workspace/pr-merge locks，再应用 candidate limit，避免单任务 run-until-blocked 被其它任务的全局候选窗口 starvation；全局 run-until-blocked 仍是 operator convenience，不成为 Core 状态机。
-- 当前验证结果：`pnpm exec vitest run packages/core/src/agent-provider-runtime.test.ts packages/core/src/surface.test.ts packages/core/src/daemon-runtime.test.ts apps/api/src/server.test.ts packages/cli/src/commands.test.ts`、`pnpm typecheck`、`pnpm --filter @coordinator/core build`、`openspec validate adopt-sdk-first-agent-provider-runtime --strict`、`openspec validate --all --strict` 和 `git diff --check` 均已通过。
-- 当前 review 结论：独立 subagent review 初审发现 Codex SDK import-only exports 会导致默认 fallback、Codex `turn.failed/error` 会被误记成功、raw events 经 stdout 可能触发 buffer 后重复 fallback；均已修复并复审无 must-fix。复审确认 SDK raw events 未进入 Surface/Core 状态机/agent tools，outer cwd 与权限边界未放宽。
-- 下一阶段：进入 `Slice 14.3: Agent event normalization and lifecycle observation`。
-- 下一阶段重点：基于本轮 transcript/raw event artifact，定义 normalized agent events、last activity 和 Web 活动摘要；真实 Web smoke 后续继续验证 internal workflow action 不进入 needs-me。
+- 当前验证结果：`pnpm test`、`pnpm typecheck`、`pnpm --filter @coordinator/core build`、`pnpm --filter @coordinator/web build`、`openspec validate --all --strict` 和 `git diff --check` 均已通过。
+- 当前 review 结论：独立 subagent review 初审发现 Surface JSON 复用完整 `AgentActivitySummary`、独立 `provider-events.jsonl` 未参与 normalization、daemon active session last activity 依赖不存在的生产事件、failureKind 未收敛为固定分类；均已修复并复审无 must-fix。复审确认 daemon/outer Agent 未自动执行 workflow action，provider event 未驱动 task done、PR readiness、merge readiness 或 workflow handoff。
+- 下一阶段：进入 `Slice 14.4: Workflow runtime / inner agent lifecycle alignment`。
+- 下一阶段重点：在不修改 workflow protocol 的前提下继续对齐 inner agent lifecycle，保证现有 protocol 下不会把 agent/internal action 误报为 needs-me，并整理未来 workflow protocol 增强交接建议。
 
 ### Iteration 12 后续切片顺序
 
@@ -612,6 +613,8 @@ Iteration 14 的目标是把 Coordinator 从“轮询 workflow allowed action �
 - typecheck/build 通过；真实 provider 可用时做最小 smoke，缺少 SDK/auth 时输出受控 unavailable。
 
 #### Slice 14.3: Agent event normalization and lifecycle observation
+
+状态：已完成实现、验证、review、归档和提交准备。关键结果是 provider raw event 三层模型已落地到 Core runtime、operator summary、Coordinator Surface、daemon observation 和 Web Task Cockpit；raw event 不进入 Coordinator Agent prompt，不驱动 PR/done/merge/workflow handoff。
 
 目标：
 

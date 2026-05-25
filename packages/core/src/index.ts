@@ -27,6 +27,7 @@ export {
   recordHumanAnswerRuntime
 } from "./operator-surface.js";
 export { buildCoordinatorSurface, buildTaskSurfaceFromDb, renderSurfaceMarkdown } from "./surface.js";
+export { buildAgentActivitySummary, collectNormalizedAgentEvents, normalizeProviderEvent } from "./agent-activity.js";
 export {
   WorkspaceManagerError,
   WorkspacePathError,
@@ -82,6 +83,13 @@ export type {
   RunCoordinatorAgentSessionInput,
   SdkFirstAgentProviderOptions
 } from "./agent-provider-runtime.js";
+export type {
+  AgentActivityState,
+  AgentActivitySummary,
+  AgentProviderEventArtifactRefs,
+  NormalizedAgentEvent,
+  NormalizedAgentEventKind
+} from "./agent-activity.js";
 export type { DaemonActionResult, DaemonRuntimeInput, DaemonTickResult, ParsedAgentToolRequest } from "./daemon-runtime.js";
 export type {
   ControlTaskInput,

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { getProject, getTask, type DbContext, type ProjectRecord, type TaskRecord } from "@coordinator/db";
+import { extractAgentActivitySummary, type AgentActivitySummary, type NormalizedAgentEvent } from "./agent-activity.js";
 
 export type SurfaceKind =
   | "bootstrap"
@@ -207,6 +208,7 @@ export type AgentSessionSnapshot = {
   providerKind?: string;
   role?: string;
   status?: string;
+  activity?: SurfaceAgentActivitySummary;
 };
 
 type AgentSessionSnapshotJson = {
@@ -214,6 +216,16 @@ type AgentSessionSnapshotJson = {
   provider_kind?: string;
   role?: string;
   status?: string;
+  activity?: SurfaceAgentActivitySummary;
+};
+
+export type SurfaceAgentActivitySummary = {
+  state: AgentActivitySummary["state"];
+  lastActivityAt?: string;
+  latestEvent?: Pick<NormalizedAgentEvent, "kind" | "summary" | "timestamp" | "severity">;
+  artifactRefs?: {
+    finalResponsePath?: string;
+  };
 };
 
 export type PullRequestSnapshot = {
@@ -458,7 +470,8 @@ export function buildTaskSurfaceFromDb(context: DbContext, taskId: string): Surf
       id: session.id,
       providerKind: session.provider_kind,
       role: session.role,
-      status: session.status
+      status: session.status,
+      activity: findLatestAgentActivityForSurface(context, session.id)
     })),
     pullRequest: pullRequest
       ? {
@@ -578,6 +591,11 @@ export function renderSurfaceMarkdown(
   if (json.agent_sessions.length > 0) {
     for (const session of json.agent_sessions) {
       lines.push(`- agent_session: ${session.id ?? "unknown"} provider=${session.provider_kind ?? "unknown"} role=${session.role ?? "unknown"} status=${session.status ?? "unknown"}`);
+      if (session.activity?.lastActivityAt || session.activity?.latestEvent) {
+        lines.push(
+          `  - activity: last=${session.activity.lastActivityAt ?? "unknown"} latest=${session.activity.latestEvent?.kind ?? "none"} summary=${session.activity.latestEvent?.summary ?? "none"}`
+        );
+      }
     }
   } else {
     lines.push(`- agent_session: 当前没有 recent agent session。`);
@@ -1106,6 +1124,52 @@ function findRecentAgentSessionsForTask(
     .all(taskId) as Array<{ id: string; provider_kind: string; role: string; status: string }>;
 }
 
+function findLatestAgentActivityForSurface(context: DbContext, agentSessionId: string): SurfaceAgentActivitySummary | undefined {
+  const rows = context.db
+    .prepare(
+      `SELECT payload_json FROM events
+       WHERE agent_session_id = ? AND payload_json IS NOT NULL
+       ORDER BY created_at DESC, id DESC
+       LIMIT 5`
+    )
+    .all(agentSessionId) as Array<{ payload_json: string | null }>;
+  for (const row of rows) {
+    if (!row.payload_json) {
+      continue;
+    }
+    try {
+      const activity = extractAgentActivitySummary(JSON.parse(row.payload_json));
+      if (activity) {
+        return toSurfaceAgentActivity(activity);
+      }
+    } catch {
+      // malformed event payload 不能阻断 surface 构建；append-only event 仍保留供 operator 排查。
+    }
+  }
+  return undefined;
+}
+
+function toSurfaceAgentActivity(activity: AgentActivitySummary): SurfaceAgentActivitySummary {
+  // Surface 是 agent-facing 输入，故这里只暴露 lifecycle 摘要和 final response 引用，不泄漏 raw event artifact 或权限细节。
+  return {
+    state: activity.state,
+    lastActivityAt: activity.lastActivityAt,
+    latestEvent: activity.latestEvent
+      ? {
+          kind: activity.latestEvent.kind,
+          summary: activity.latestEvent.summary,
+          timestamp: activity.latestEvent.timestamp,
+          severity: activity.latestEvent.severity
+        }
+      : undefined,
+    artifactRefs: activity.artifactRefs.finalResponsePath
+      ? {
+          finalResponsePath: activity.artifactRefs.finalResponsePath
+        }
+      : undefined
+  };
+}
+
 function findLatestExecutionPlanForTask(
   context: DbContext,
   taskId: string
@@ -1345,7 +1409,8 @@ function toAgentSessionJson(session: AgentSessionSnapshot): AgentSessionSnapshot
     id: session.id,
     provider_kind: session.providerKind,
     role: session.role,
-    status: session.status
+    status: session.status,
+    activity: session.activity
   };
 }
 

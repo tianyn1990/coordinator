@@ -27,6 +27,7 @@ import {
   type ProjectRecord,
   type TaskRecord
 } from "@coordinator/db";
+import { buildAgentActivitySummary, type AgentActivitySummary } from "./agent-activity.js";
 import { buildTaskSurfaceFromDb, type SurfaceEnvelope } from "./surface.js";
 
 const DEFAULT_AGENT_TIMEOUT_MS = 10 * 60 * 1000;
@@ -61,6 +62,7 @@ export type AgentProviderRunResult = {
   implementationMode?: AgentProviderImplementationMode;
   permissionProfile?: string;
   rawEventArtifactPath?: string;
+  agentActivity?: AgentActivitySummary;
 };
 
 export type AgentProviderRunner = (
@@ -558,6 +560,18 @@ export function runCoordinatorAgentSession(
     writeFileSync(artifacts.finalResponsePath, finalResponse, "utf8");
     appendTranscript(artifacts.transcriptPath, provider, sessionId, providerResult);
     const completionNow = new Date();
+    const agentActivity = buildAgentActivitySummary({
+      state: "completed",
+      providerId: provider.id,
+      providerSessionId: providerResult.providerSessionId,
+      providerVersion: providerResult.providerVersion,
+      implementationMode: providerResult.implementationMode,
+      permissionProfile: providerResult.permissionProfile,
+      transcriptPath: artifacts.transcriptPath,
+      rawEventArtifactPath: providerResult.rawEventArtifactPath,
+      finalResponsePath: artifacts.finalResponsePath,
+      fallbackTimestamp: completionNow.toISOString()
+    });
 
     const completedSession = withTransaction(context, () => {
       const updated = updateAgentSession(context, {
@@ -591,7 +605,8 @@ export function runCoordinatorAgentSession(
           providerSessionId: providerResult.providerSessionId,
           providerVersion: providerResult.providerVersion,
           permissionProfile: providerResult.permissionProfile,
-          rawEventArtifactPath: providerResult.rawEventArtifactPath
+          rawEventArtifactPath: providerResult.rawEventArtifactPath,
+          agentActivity
         }
       });
       updateOperation(context, {
@@ -612,13 +627,14 @@ export function runCoordinatorAgentSession(
     };
   } catch (error) {
     const failureNow = new Date();
+    const failureKind = classifyAgentProviderFailure(error);
     if (operationId) {
       updateOperation(context, {
         operationId,
         status: sideEffectWindowStarted ? "unknown" : "failed",
         now: failureNow,
-        failureCode: error instanceof Error ? error.name : "unknown",
-        lastObservedState: { phase: "agent-session-failed", error: error instanceof Error ? error.message : String(error) }
+        failureCode: failureKind,
+        lastObservedState: { phase: "agent-session-failed", failureKind }
       });
     }
     if (session) {
@@ -647,6 +663,15 @@ export function runCoordinatorAgentSession(
             : undefined
         });
         registerSessionArtifacts(context, project.id, task.id, undefined, artifacts);
+        const agentActivity = buildAgentActivitySummary({
+          state: failedStatus === "unknown" ? "unknown" : "failed",
+          providerId: provider.id,
+          transcriptPath: artifacts.transcriptPath,
+          rawEventArtifactPath: artifacts.transcriptPath,
+          finalResponsePath: artifacts.finalResponsePath,
+          failureKind,
+          fallbackTimestamp: failureNow.toISOString()
+        });
         appendEvent(context, {
           type: "agent.session_failed",
           summary: `agent session failed: ${updated.id}`,
@@ -656,11 +681,18 @@ export function runCoordinatorAgentSession(
           operationId,
           lockToken: taskLock?.lockToken,
           severity: "warn",
-          artifactRefs: [artifacts.promptPath, artifacts.surfaceJsonPath, artifacts.surfaceMarkdownPath, artifacts.transcriptPath],
+          artifactRefs: [
+            artifacts.promptPath,
+            artifacts.surfaceJsonPath,
+            artifacts.surfaceMarkdownPath,
+            artifacts.transcriptPath,
+            artifacts.finalResponsePath
+          ],
           payload: {
             providerId: provider.id,
             status: failedStatus,
-            error: error instanceof Error ? error.message : String(error)
+            errorName: failureKind,
+            agentActivity
           }
         });
       } catch {
@@ -817,6 +849,24 @@ function assertAgentOperationCanRun(status: string): void {
 function normalizeFinalResponse(value: string): string {
   const normalized = value.trim();
   return normalized.length > 0 ? `${normalized}\n` : "provider returned empty response\n";
+}
+
+function classifyAgentProviderFailure(error: unknown): "provider_unavailable" | "timeout" | "auth_missing" | "rate_limited" | "unknown" {
+  const text = error instanceof Error ? `${error.name} ${error.message}` : String(error);
+  const lowered = text.toLowerCase();
+  if (lowered.includes("timeout") || lowered.includes("timed out") || lowered.includes("etimedout")) {
+    return "timeout";
+  }
+  if (lowered.includes("auth") || lowered.includes("unauthorized") || lowered.includes("permission denied") || lowered.includes("login")) {
+    return "auth_missing";
+  }
+  if (lowered.includes("rate limit") || lowered.includes("rate_limited") || lowered.includes("429")) {
+    return "rate_limited";
+  }
+  if (error instanceof ProviderUnavailableError || lowered.includes("unavailable")) {
+    return "provider_unavailable";
+  }
+  return "unknown";
 }
 
 function ensureTrailingNewline(value: string): string {

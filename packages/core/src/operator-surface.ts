@@ -37,10 +37,19 @@ import {
   type WorkflowRunRecord,
   type WorkspaceRecord
 } from "@coordinator/db";
+import {
+  buildAgentActivitySummary,
+  extractAgentActivitySummary,
+  type AgentActivitySummary
+} from "./agent-activity.js";
 import { buildTaskSurfaceFromDb, type SurfaceEnvelope } from "./surface.js";
 import { assertArtifactRelativePath } from "./workspace-manager.js";
 
 export type OperatorTaskListItem = TaskListRecord;
+
+export type OperatorAgentSessionSummary = AgentSessionRecord & {
+  activity?: AgentActivitySummary;
+};
 
 export type OperatorTaskDetail = {
   task: TaskRecord;
@@ -49,7 +58,7 @@ export type OperatorTaskDetail = {
   executionPlan?: ExecutionPlanRecord;
   workspace?: WorkspaceRecord;
   workflowRuns: WorkflowRunRecord[];
-  agentSessions: AgentSessionRecord[];
+  agentSessions: OperatorAgentSessionSummary[];
   pullRequests: PullRequestRecord[];
   latestPullRequest?: PullRequestRecord;
   humanRequests: HumanRequestRecord[];
@@ -145,6 +154,8 @@ export type OperatorExecutionSummary = {
     role: string;
     providerKind: string;
     status: string;
+    finalResponsePath?: string;
+    activity?: AgentActivitySummary;
   }>;
   coordinatorTools: Array<{
     eventId: number;
@@ -309,7 +320,7 @@ export function getOperatorTaskDetail(context: DbContext, taskId: string): Opera
   const humanRequests = listHumanRequestsByTask(context, task.id, 10);
   const events = listTaskEvents(context, task.id);
   const latestPullRequest = getLatestPullRequestByTask(context, task.id);
-  const agentSessions = listAgentSessionsByTask(context, task.id, 5);
+  const agentSessions = enrichAgentSessionsWithActivity(listAgentSessionsByTask(context, task.id, 5), events);
   const currentWorkflowRun = findCurrentWorkflowRun(workflowRuns, attempt);
   const currentPullRequest = findCurrentPullRequest(pullRequests, attempt);
   const currentActiveAgentSession = findCurrentAgentSession(agentSessions, attempt, isActiveAgentSessionStatus);
@@ -395,7 +406,9 @@ export function getOperatorExecutionSummary(context: DbContext, taskId: string):
       id: session.id,
       role: session.role,
       providerKind: session.providerKind,
-      status: session.status
+      status: session.status,
+      finalResponsePath: session.finalResponsePath,
+      activity: session.activity
     })),
     coordinatorTools: toolEvents.slice(-12).map(mapCoordinatorToolSummary),
     workflow: currentWorkflowRun
@@ -417,6 +430,46 @@ export function getOperatorExecutionSummary(context: DbContext, taskId: string):
       availableTools: detail.surface.json.available_tools.map((tool) => tool.name)
     }
   };
+}
+
+function enrichAgentSessionsWithActivity(
+  sessions: AgentSessionRecord[],
+  events: EventRecord[]
+): OperatorAgentSessionSummary[] {
+  return sessions.map((session) => ({
+    ...session,
+    activity: findLatestAgentActivity(session, events)
+  }));
+}
+
+function findLatestAgentActivity(session: AgentSessionRecord, events: EventRecord[]): AgentActivitySummary {
+  for (const event of [...events].reverse()) {
+    if (event.agentSessionId !== session.id) {
+      continue;
+    }
+    const activity = extractAgentActivitySummary(event.payload);
+    if (activity) {
+      return activity;
+    }
+  }
+  // 没有 normalized event 时只用 session 机器事实做 fallback，避免读取 raw transcript 扩大 operator summary。
+  return buildAgentActivitySummary({
+    state: mapAgentSessionStatusToActivityState(session.status),
+    providerId: session.providerKind,
+    transcriptPath: session.transcriptPath,
+    finalResponsePath: session.finalResponsePath,
+    fallbackTimestamp: session.updatedAt,
+    normalizedEvents: []
+  });
+}
+
+function mapAgentSessionStatusToActivityState(status: string): AgentActivitySummary["state"] {
+  if (status === "starting") return "starting";
+  if (status === "running") return "running";
+  if (status === "completed") return "completed";
+  if (status === "failed") return "failed";
+  if (status === "stalled") return "stalled";
+  return "unknown";
 }
 
 export function recordHumanAnswerRuntime(

@@ -289,6 +289,70 @@ describe("operator surface", () => {
     expect(summary.nextStep.availableTools).toEqual(["inspect_workflow_run", "ask_human"]);
   });
 
+  it("operator detail 和 execution summary 展示 agent activity 摘要且不泄漏 raw provider payload", () => {
+    const databasePath = createMigratedDatabase();
+    const rawSecret = "secret-provider-stdout-lock-token";
+    const result = withDatabase(databasePath, (context) => {
+      const project = createProject(context, { id: "project-agent-activity", name: "agent activity" });
+      const task = createTask(context, { id: "task-agent-activity", projectId: project.id, title: "agent activity" });
+      context.db
+        .prepare(
+          `INSERT INTO agent_sessions (
+             id, project_id, task_id, provider_kind, role, status, transcript_path, final_response_path
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run("agent-activity", project.id, task.id, "codex", "outer", "completed", "/tmp/raw-events.jsonl", "/tmp/final-response.md");
+      appendEvent(context, {
+        type: "agent.session_completed",
+        summary: "agent completed",
+        projectId: project.id,
+        taskId: task.id,
+        agentSessionId: "agent-activity",
+        payload: {
+          raw: rawSecret,
+          agentActivity: {
+            state: "completed",
+            providerId: "codex",
+            implementationMode: "sdk",
+            permissionProfile: "codex:read-only:approval-never",
+            lastActivityAt: "2026-05-25T00:00:00.000Z",
+            latestEvent: {
+              kind: "turn_completed",
+              summary: "codex turn completed",
+              severity: "debug"
+            },
+            eventCount: 3,
+            artifactRefs: {
+              rawEventArtifactPath: "/tmp/raw-events.jsonl",
+              finalResponsePath: "/tmp/final-response.md"
+            }
+          }
+        }
+      });
+      return {
+        detail: getOperatorTaskDetail(context, task.id),
+        summary: getOperatorExecutionSummary(context, task.id),
+        surface: buildTaskSurfaceFromDb(context, task.id)
+      };
+    });
+
+    expect(result.detail.agentSessions[0].activity).toMatchObject({
+      state: "completed",
+      latestEvent: { kind: "turn_completed" },
+      artifactRefs: { finalResponsePath: "/tmp/final-response.md" }
+    });
+    expect(result.summary.agentSessions[0].activity).toMatchObject({
+      implementationMode: "sdk",
+      permissionProfile: "codex:read-only:approval-never"
+    });
+    expect(JSON.stringify(result.summary)).not.toContain(rawSecret);
+    expect(JSON.stringify(result.surface.json)).not.toContain(rawSecret);
+    expect(JSON.stringify(result.surface.json)).not.toContain("codex:read-only:approval-never");
+    expect(JSON.stringify(result.surface.json)).not.toContain("/tmp/raw-events.jsonl");
+    expect(JSON.stringify(result.surface.json)).toContain("/tmp/final-response.md");
+    expect(result.surface.markdown).not.toContain(rawSecret);
+  });
+
   it("diagnosis 当前 attention 只看当前实体，历史 workflow/PR/session 不污染当前状态", () => {
     const databasePath = createMigratedDatabase();
     const detail = withDatabase(databasePath, (context) => {

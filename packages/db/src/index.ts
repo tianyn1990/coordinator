@@ -253,6 +253,8 @@ export type AgentSessionRecord = {
   surfaceMarkdownPath?: string;
   finalResponsePath?: string;
   stateVersion: number;
+  createdAt?: string;
+  updatedAt?: string;
 };
 
 export type UpdateAgentSessionInput = {
@@ -2234,6 +2236,8 @@ function mapAgentSessionRow(row: unknown): AgentSessionRecord {
     surface_markdown_path: string | null;
     final_response_path: string | null;
     state_version: number;
+    created_at: string;
+    updated_at: string;
   };
   return {
     id: value.id,
@@ -2248,7 +2252,9 @@ function mapAgentSessionRow(row: unknown): AgentSessionRecord {
     surfaceJsonPath: value.surface_json_path ?? undefined,
     surfaceMarkdownPath: value.surface_markdown_path ?? undefined,
     finalResponsePath: value.final_response_path ?? undefined,
-    stateVersion: value.state_version
+    stateVersion: value.state_version,
+    createdAt: value.created_at,
+    updatedAt: value.updated_at
   };
 }
 

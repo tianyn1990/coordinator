@@ -96,6 +96,31 @@ type EventRecord = {
   createdAt: string;
 };
 
+type NormalizedAgentEvent = {
+  kind: string;
+  summary: string;
+  timestamp?: string;
+  severity: string;
+};
+
+type AgentActivitySummary = {
+  state: string;
+  providerId?: string;
+  providerSessionId?: string;
+  providerVersion?: string;
+  implementationMode?: string;
+  permissionProfile?: string;
+  lastActivityAt?: string;
+  latestEvent?: NormalizedAgentEvent;
+  eventCount: number;
+  failureKind?: string;
+  artifactRefs: {
+    transcriptPath?: string;
+    rawEventArtifactPath?: string;
+    finalResponsePath?: string;
+  };
+};
+
 type ToolTracePayload = {
   toolName?: string;
   status?: string;
@@ -134,7 +159,14 @@ type TaskDetail = {
   executionPlan?: { id: string; status: string; artifactPath?: string };
   workspace?: { id: string; status: string; workspacePath?: string; repoPath?: string; branch?: string; baseBranch?: string };
   workflowRuns: Array<{ id: string; profileId: string; status: string; handoffKind?: string; stateVersion: number }>;
-  agentSessions: Array<{ id: string; providerKind: string; role: string; status: string; finalResponsePath?: string }>;
+  agentSessions: Array<{
+    id: string;
+    providerKind: string;
+    role: string;
+    status: string;
+    finalResponsePath?: string;
+    activity?: AgentActivitySummary;
+  }>;
   pullRequests: PullRequest[];
   latestPullRequest?: PullRequest;
   humanRequests: HumanRequest[];
@@ -1543,6 +1575,53 @@ function WorkflowActionPanel({
   );
 }
 
+function AgentActivityPanel({ sessions }: { sessions: TaskDetail["agentSessions"] }) {
+  const visible = sessions.slice(0, 3);
+  return (
+    <section className="agent-activity-panel" aria-label="Agent activity">
+      <div className="panel-heading compact">
+        <div>
+          <p className="eyebrow">Agent activity</p>
+          <h3>{visible.length > 0 ? `${visible.length} sessions` : "none"}</h3>
+        </div>
+      </div>
+      {visible.length === 0 ? <p className="muted">暂无 agent activity 摘要。</p> : null}
+      <div className="agent-activity-list">
+        {visible.map((session) => {
+          const activity = session.activity;
+          const latest = activity?.latestEvent;
+          return (
+            <article key={session.id} className="agent-activity-card">
+              <div>
+                <span>{session.role}</span>
+                <strong>{session.providerKind}</strong>
+              </div>
+              <p>
+                {activity?.state ?? session.status}
+                {activity?.implementationMode ? ` · ${activity.implementationMode}` : ""}
+                {activity?.permissionProfile ? ` · ${activity.permissionProfile}` : ""}
+              </p>
+              <small>last: {activity?.lastActivityAt ? formatRelativeTime(activity.lastActivityAt) : "unknown"}</small>
+              {latest ? (
+                <p className="activity-event">
+                  {latest.kind}: {latest.summary}
+                </p>
+              ) : null}
+              {activity?.failureKind ? <p className="activity-event warn">failure: {activity.failureKind}</p> : null}
+              <div className="artifact-row">
+                {activity?.artifactRefs.finalResponsePath ?? session.finalResponsePath ? (
+                  <span>final: {activity?.artifactRefs.finalResponsePath ?? session.finalResponsePath}</span>
+                ) : null}
+                {activity?.artifactRefs.rawEventArtifactPath ? <span>raw events: {activity.artifactRefs.rawEventArtifactPath}</span> : null}
+              </div>
+            </article>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 function EvidenceActionsPanel({
   detail,
   evidence,
@@ -1586,6 +1665,7 @@ function EvidenceActionsPanel({
         </div>
       </div>
       <WorkflowActionPanel detail={detail} workflow={workflow} onWorkflowAction={onWorkflowAction} />
+      <AgentActivityPanel sessions={detail.agentSessions} />
       <div className="evidence-list">
         {evidence.length === 0 ? <p className="muted">暂无需要突出的 evidence 或 action。</p> : null}
         {evidence.map((item) => (
@@ -1876,7 +1956,15 @@ function TaskDetailView({
         />
         <RecordList
           empty="暂无 agent session"
-          items={detail.agentSessions.map((session) => `${session.role} · ${session.providerKind} · ${session.status}`)}
+          items={detail.agentSessions.map((session) =>
+            [
+              `${session.role} · ${session.providerKind} · ${session.activity?.state ?? session.status}`,
+              session.activity?.lastActivityAt ? `last=${formatRelativeTime(session.activity.lastActivityAt)}` : undefined,
+              session.activity?.latestEvent ? `${session.activity.latestEvent.kind}: ${session.activity.latestEvent.summary}` : undefined
+            ]
+              .filter(Boolean)
+              .join(" · ")
+          )}
         />
       </section>
 
