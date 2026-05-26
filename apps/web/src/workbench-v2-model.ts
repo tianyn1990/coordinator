@@ -92,6 +92,8 @@ export type SurfaceEnvelope = {
     denied_actions: string[];
     available_tools: Array<{ name: string; usage: string; args: string[]; side_effect: boolean }>;
     artifact_root: string;
+    attachments?: Array<{ id: string; safe_filename: string; mime_type: string; size_bytes: number; artifact_path: string }>;
+    task_notes?: Array<{ event_id: number; artifact_path: string; summary: string }>;
   };
   markdown: string;
 };
@@ -160,10 +162,36 @@ export type TaskDetail = {
   pullRequests: PullRequest[];
   latestPullRequest?: PullRequest;
   humanRequests: HumanRequest[];
+  attachments: TaskAttachment[];
+  taskNotes: TaskNoteRef[];
   events: EventRecord[];
   surface: SurfaceEnvelope;
   currentBlocker: string;
   diagnosis: OperatorTaskDiagnosis;
+};
+
+export type TaskAttachment = {
+  id: string;
+  projectId: string;
+  taskId: string;
+  attemptId?: string;
+  artifactId: string;
+  artifactPath: string;
+  originalFilename: string;
+  safeFilename: string;
+  mimeType: string;
+  sizeBytes: number;
+  actor: string;
+  retentionKind: string;
+  createdAt: string;
+};
+
+export type TaskNoteRef = {
+  eventId: number;
+  artifactPath: string;
+  summary: string;
+  actor?: string;
+  createdAt: string;
 };
 
 export type RailTone = "done" | "active" | "waiting" | "attention" | "idle";
@@ -244,6 +272,17 @@ export type GateItem =
       label: string;
       summary: string;
     };
+
+export type UnifiedComposerMode = "new-task" | "human-answer" | "task-note";
+
+export type UnifiedComposerProjection = {
+  mode: UnifiedComposerMode;
+  taskId?: string;
+  humanRequest?: HumanRequest;
+  title: string;
+  placeholder: string;
+  submitLabel: string;
+};
 
 export type WorkbenchV2Model = {
   rows: RunMatrixRow[];
@@ -410,6 +449,41 @@ export function buildGateItems(row: RunMatrixRow): GateItem[] {
   return row.gateItems;
 }
 
+export function deriveUnifiedComposerProjection(input: {
+  selectedTask?: TaskListItem;
+  detail?: TaskDetail;
+}): UnifiedComposerProjection {
+  if (!input.selectedTask || !input.detail) {
+    return {
+      mode: "new-task",
+      title: "New task",
+      placeholder: "Describe the task",
+      submitLabel: "Create"
+    };
+  }
+  const pendingHuman = input.detail.humanRequests.find(
+    (request) => request.status === "pending" && request.kind !== "merge_approval"
+  );
+  if (pendingHuman) {
+    return {
+      mode: "human-answer",
+      taskId: input.selectedTask.id,
+      humanRequest: pendingHuman,
+      title: input.selectedTask.title,
+      placeholder: "Answer the pending request",
+      submitLabel: "Answer"
+    };
+  }
+  // Workflow operator gate、merge approval 与 internal action 都由专门 panel 处理；Composer 只追加上下文。
+  return {
+    mode: "task-note",
+    taskId: input.selectedTask.id,
+    title: input.selectedTask.title,
+    placeholder: "Add context or follow-up",
+    submitLabel: "Add note"
+  };
+}
+
 export function deriveRunUntilBlockedStopReason(input: {
   detail?: TaskDetail;
   tick: RunUntilBlockedTickSummary;
@@ -571,6 +645,8 @@ export function collectArtifactRefs(detail: TaskDetail | undefined, workflow: Wo
     detail?.executionPlan?.artifactPath,
     detail?.agentSessions.find((session) => session.finalResponsePath)?.finalResponsePath,
     detail?.latestPullRequest?.bodyArtifactPath,
+    ...(detail?.attachments.map((attachment) => attachment.artifactPath) ?? []),
+    ...(detail?.taskNotes.map((note) => note.artifactPath) ?? []),
     ...workflow.projection.stageArtifacts.map((artifact) => artifact.path),
     ...(detail?.events.flatMap((event) => event.artifactRefs) ?? [])
   ]

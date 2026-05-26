@@ -31,7 +31,8 @@ describe("runCli", () => {
         { id: "0005_agent_provider_runtime.sql", applied: true },
         { id: "0006_pr_mr_provider.sql", applied: true },
         { id: "0007_workflow_selection.sql", applied: true },
-        { id: "0008_task_workflow_selection.sql", applied: true }
+        { id: "0008_task_workflow_selection.sql", applied: true },
+        { id: "0009_task_attachments.sql", applied: true }
       ]
     });
   });

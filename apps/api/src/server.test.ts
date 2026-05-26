@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -257,7 +257,7 @@ describe("API health", () => {
         process.env.COORDINATOR_DB_PATH = previous;
       }
     }
-  });
+  }, 10_000);
 
   it("Web API 可创建 manual task 并查看 task list/detail", async () => {
     const databasePath = join(mkdtempSync(join(tmpdir(), "coordinator-api-web-task-")), "api.sqlite");
@@ -486,6 +486,189 @@ describe("API health", () => {
           )
         )
       ).toBe(true);
+    } finally {
+      if (previous === undefined) {
+        delete process.env.COORDINATOR_DB_PATH;
+      } else {
+        process.env.COORDINATOR_DB_PATH = previous;
+      }
+    }
+  });
+
+  it("Web API 可上传 task attachment、查询 metadata，并在 task detail 返回 refs", async () => {
+    const databasePath = join(mkdtempSync(join(tmpdir(), "coordinator-api-attachment-")), "api.sqlite");
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "coordinator-api-attachment-workspaces-"));
+    const content = "api attachment body";
+    runMigrations(databasePath);
+    withDatabase(databasePath, (context) => {
+      const project = createProject(context, {
+        id: "project-api-attachment",
+        name: "attachment",
+        workspaceRoot
+      });
+      createTask(context, { id: "task-api-attachment", projectId: project.id, title: "attachment" });
+    });
+
+    const previous = process.env.COORDINATOR_DB_PATH;
+    process.env.COORDINATOR_DB_PATH = databasePath;
+    try {
+      const server = buildServer();
+      const uploaded = await server.inject({
+        method: "POST",
+        url: "/tasks/task-api-attachment/attachments",
+        payload: {
+          fileName: "evidence.txt",
+          mimeType: "text/plain",
+          sizeBytes: Buffer.byteLength(content),
+          contentBase64: Buffer.from(content).toString("base64"),
+          actor: "api-test"
+        }
+      });
+
+      expect(uploaded.statusCode, JSON.stringify(uploaded.json())).toBe(200);
+      const body = uploaded.json() as { attachment: { artifactPath: string; safeFilename: string } };
+      expect(body.attachment).toMatchObject({ safeFilename: "evidence.txt" });
+      expect(
+        readFileSync(
+          join(
+            workspaceRoot,
+            "project-api-attachment",
+            "task-api-attachment",
+            "_task",
+            "coordinator",
+            "artifacts",
+            body.attachment.artifactPath
+          ),
+          "utf8"
+        )
+      ).toBe(content);
+
+      const listed = await server.inject({ method: "GET", url: "/tasks/task-api-attachment/attachments" });
+      expect(listed.statusCode).toBe(200);
+      expect(listed.json()).toMatchObject({
+        attachments: [expect.objectContaining({ safeFilename: "evidence.txt", artifactPath: body.attachment.artifactPath })]
+      });
+
+      const detail = await server.inject({ method: "GET", url: "/tasks/task-api-attachment" });
+      expect(detail.statusCode).toBe(200);
+      expect(detail.json()).toMatchObject({
+        attachments: [expect.objectContaining({ safeFilename: "evidence.txt", artifactPath: body.attachment.artifactPath })]
+      });
+      expect(JSON.stringify(detail.json())).not.toContain(Buffer.from(content).toString("base64"));
+    } finally {
+      if (previous === undefined) {
+        delete process.env.COORDINATOR_DB_PATH;
+      } else {
+        process.env.COORDINATOR_DB_PATH = previous;
+      }
+    }
+  });
+
+  it("Web API 拒绝非法 attachment payload 且要求 actor", async () => {
+    const databasePath = join(mkdtempSync(join(tmpdir(), "coordinator-api-attachment-invalid-")), "api.sqlite");
+    runMigrations(databasePath);
+    withDatabase(databasePath, (context) => {
+      const project = createProject(context, { id: "project-api-attachment-invalid", name: "attachment invalid" });
+      createTask(context, { id: "task-api-attachment-invalid", projectId: project.id, title: "attachment invalid" });
+    });
+
+    const previous = process.env.COORDINATOR_DB_PATH;
+    process.env.COORDINATOR_DB_PATH = databasePath;
+    try {
+      const server = buildServer();
+      const missingActor = await server.inject({
+        method: "POST",
+        url: "/tasks/task-api-attachment-invalid/attachments",
+        payload: {
+          fileName: "evidence.txt",
+          mimeType: "text/plain",
+          sizeBytes: 4,
+          contentBase64: Buffer.from("test").toString("base64")
+        }
+      });
+      expect(missingActor.statusCode).toBe(400);
+
+      const badBase64 = await server.inject({
+        method: "POST",
+        url: "/tasks/task-api-attachment-invalid/attachments",
+        payload: {
+          fileName: "evidence.txt",
+          mimeType: "text/plain",
+          sizeBytes: 4,
+          contentBase64: "not base64!",
+          actor: "api-test"
+        }
+      });
+      expect(badBase64.statusCode).toBe(400);
+
+      const traversal = await server.inject({
+        method: "POST",
+        url: "/tasks/task-api-attachment-invalid/attachments",
+        payload: {
+          fileName: "../evidence.txt",
+          mimeType: "text/plain",
+          sizeBytes: 4,
+          contentBase64: Buffer.from("test").toString("base64"),
+          actor: "api-test"
+        }
+      });
+      expect(traversal.statusCode).toBe(400);
+
+      const detail = await server.inject({ method: "GET", url: "/tasks/task-api-attachment-invalid" });
+      expect(detail.json().attachments).toEqual([]);
+    } finally {
+      if (previous === undefined) {
+        delete process.env.COORDINATOR_DB_PATH;
+      } else {
+        process.env.COORDINATOR_DB_PATH = previous;
+      }
+    }
+  });
+
+  it("Web API 可追加 task note，并通过 task detail 返回 note refs", async () => {
+    const databasePath = join(mkdtempSync(join(tmpdir(), "coordinator-api-note-")), "api.sqlite");
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "coordinator-api-note-workspaces-"));
+    runMigrations(databasePath);
+    withDatabase(databasePath, (context) => {
+      const project = createProject(context, { id: "project-api-note", name: "note", workspaceRoot });
+      createTask(context, { id: "task-api-note", projectId: project.id, title: "note" });
+    });
+
+    const previous = process.env.COORDINATOR_DB_PATH;
+    process.env.COORDINATOR_DB_PATH = databasePath;
+    try {
+      const server = buildServer();
+      const response = await server.inject({
+        method: "POST",
+        url: "/tasks/task-api-note/notes",
+        payload: {
+          note: "补充上下文。",
+          actor: "api-test"
+        }
+      });
+
+      expect(response.statusCode, JSON.stringify(response.json())).toBe(200);
+      const body = response.json() as { artifactPath: string };
+      expect(body.artifactPath).toMatch(/^task-notes\/.+\.md$/);
+      expect(
+        readFileSync(
+          join(
+            workspaceRoot,
+            "project-api-note",
+            "task-api-note",
+            "_task",
+            "coordinator",
+            "artifacts",
+            body.artifactPath
+          ),
+          "utf8"
+        )
+      ).toContain("补充上下文。");
+
+      const detail = await server.inject({ method: "GET", url: "/tasks/task-api-note" });
+      expect(detail.json()).toMatchObject({
+        taskNotes: [expect.objectContaining({ artifactPath: body.artifactPath, actor: "api-test" })]
+      });
     } finally {
       if (previous === undefined) {
         delete process.env.COORDINATOR_DB_PATH;

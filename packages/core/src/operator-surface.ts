@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, isAbsolute, normalize, relative, resolve, sep } from "node:path";
+import { dirname, extname, isAbsolute, normalize, relative, resolve, sep } from "node:path";
 import {
   ActiveResourceConflictError,
   appendEvent,
   createArtifact,
+  createTaskAttachment,
   createTask,
   getHumanRequest,
   getLatestAttemptByTask,
@@ -17,6 +18,7 @@ import {
   listHumanRequestsByTask,
   listOperationsByTask,
   listPullRequestsByTask,
+  listTaskAttachmentsByTask,
   listTaskEvents,
   listTasksForOperator,
   listWorkflowRunsByTask,
@@ -32,6 +34,7 @@ import {
   type OperationRecord,
   type ProjectRecord,
   type PullRequestRecord,
+  type TaskAttachmentRecord,
   type TaskListRecord,
   type TaskRecord,
   type WorkflowRunRecord,
@@ -65,6 +68,8 @@ export type OperatorTaskDetail = {
   pullRequests: PullRequestRecord[];
   latestPullRequest?: PullRequestRecord;
   humanRequests: HumanRequestRecord[];
+  attachments: TaskAttachmentRecord[];
+  taskNotes: OperatorTaskNoteRef[];
   events: EventRecord[];
   surface: SurfaceEnvelope;
   currentBlocker: string;
@@ -128,6 +133,14 @@ export type OperatorInspectionSummary = {
   createdAt: string;
 };
 
+export type OperatorTaskNoteRef = {
+  eventId: number;
+  artifactPath: string;
+  summary: string;
+  actor?: string;
+  createdAt: string;
+};
+
 export type OperatorExecutionSummary = {
   task: {
     id: string;
@@ -185,6 +198,15 @@ export type OperatorExecutionSummary = {
     sourceEventType?: string;
     extra: boolean;
   }>;
+  attachments: Array<{
+    id: string;
+    safeFilename: string;
+    mimeType: string;
+    sizeBytes: number;
+    artifactPath: string;
+    retentionKind: string;
+  }>;
+  taskNotes: OperatorTaskNoteRef[];
   nextStep: {
     recommended: string;
     currentBlocker: string;
@@ -210,6 +232,32 @@ export type RecordHumanAnswerInput = {
 export type RecordHumanAnswerResult = {
   humanRequest: HumanRequestRecord;
   artifactPath: string;
+};
+
+export type UploadTaskAttachmentInput = {
+  taskId: string;
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+  contentBase64: string;
+  actor: string;
+  retentionKind?: string;
+};
+
+export type UploadTaskAttachmentResult = {
+  attachment: TaskAttachmentRecord;
+  artifactPath: string;
+};
+
+export type AddTaskNoteInput = {
+  taskId: string;
+  note: string;
+  actor: string;
+};
+
+export type AddTaskNoteResult = {
+  artifactPath: string;
+  event: EventRecord;
 };
 
 export type OperatorTaskControlAction = "pause" | "resume" | "cancel" | "retry";
@@ -239,6 +287,21 @@ export class OperatorSurfaceError extends Error {
   }
 }
 
+export const MAX_TASK_ATTACHMENT_BYTES = 2 * 1024 * 1024;
+
+const MAX_TASK_ATTACHMENT_BASE64_LENGTH = Math.ceil((MAX_TASK_ATTACHMENT_BYTES * 4) / 3) + 8;
+const ATTACHMENT_RETENTION_KIND = "task-local";
+const ATTACHMENT_MIME_EXTENSIONS = new Map<string, string[]>([
+  ["image/png", [".png"]],
+  ["image/jpeg", [".jpg", ".jpeg"]],
+  ["image/webp", [".webp"]],
+  ["image/gif", [".gif"]],
+  ["text/plain", [".txt", ".log"]],
+  ["text/markdown", [".md", ".markdown"]],
+  ["application/json", [".json"]],
+  ["application/pdf", [".pdf"]]
+]);
+
 export function listOperatorTasks(context: DbContext, limit = 50): OperatorTaskListItem[] {
   return listTasksForOperator(context, { limit });
 }
@@ -260,6 +323,126 @@ export function createManualTask(context: DbContext, input: CreateManualTaskInpu
     requestedWorkflowProfile,
     sourceKind: "manual"
   });
+}
+
+export function uploadTaskAttachmentRuntime(
+  context: DbContext,
+  input: UploadTaskAttachmentInput
+): UploadTaskAttachmentResult {
+  const task = getTask(context, input.taskId);
+  if (!task) {
+    throw new OperatorSurfaceError(`task not found: ${input.taskId}`);
+  }
+  const project = getProject(context, task.projectId);
+  if (!project) {
+    throw new OperatorSurfaceError(`project not found: ${task.projectId}`);
+  }
+  const actor = normalizeRequiredText(input.actor, "actor", 120);
+  const mimeType = normalizeAttachmentMimeType(input.mimeType);
+  const safeName = normalizeAttachmentFilename(input.fileName, mimeType);
+  const payload = decodeAttachmentPayload(input.contentBase64);
+  if (input.sizeBytes !== payload.byteLength) {
+    throw new OperatorSurfaceError(`attachment size mismatch`);
+  }
+  const attempt = getLatestAttemptByTask(context, task.id);
+  const surface = buildTaskSurfaceFromDb(context, task.id);
+  const attachmentId = randomUUID();
+  const artifact = writeAttachmentArtifact(surface, attachmentId, safeName, payload);
+
+  try {
+    return withTransaction(context, () => {
+      const artifactRecord = createArtifact(context, {
+        projectId: project.id,
+        taskId: task.id,
+        attemptId: attempt?.id,
+        kind: "task-attachment",
+        owner: actor,
+        path: artifact.relativePath
+      });
+      const attachment = createTaskAttachment(context, {
+        id: attachmentId,
+        projectId: project.id,
+        taskId: task.id,
+        attemptId: attempt?.id,
+        artifactId: artifactRecord.id,
+        artifactPath: artifact.relativePath,
+        originalFilename: input.fileName,
+        safeFilename: safeName,
+        mimeType,
+        sizeBytes: payload.byteLength,
+        actor,
+        retentionKind: ATTACHMENT_RETENTION_KIND
+      });
+      appendEvent(context, {
+        type: "task.attachment_uploaded",
+        summary: `task attachment uploaded: ${safeName}`,
+        projectId: project.id,
+        taskId: task.id,
+        attemptId: attempt?.id,
+        payload: {
+          attachmentId: attachment.id,
+          safeFilename: attachment.safeFilename,
+          mimeType: attachment.mimeType,
+          sizeBytes: attachment.sizeBytes,
+          actor,
+          retentionKind: attachment.retentionKind
+        },
+        artifactRefs: [attachment.artifactPath]
+      });
+      return { attachment, artifactPath: attachment.artifactPath };
+    });
+  } catch (error) {
+    // 文件先落盘是为了让 DB 只指向已存在 artifact；事务失败时删除本次唯一文件避免孤儿 artifact。
+    rmSync(artifact.absolutePath, { force: true });
+    throw error;
+  }
+}
+
+export function addTaskNoteRuntime(context: DbContext, input: AddTaskNoteInput): AddTaskNoteResult {
+  const task = getTask(context, input.taskId);
+  if (!task) {
+    throw new OperatorSurfaceError(`task not found: ${input.taskId}`);
+  }
+  const project = getProject(context, task.projectId);
+  if (!project) {
+    throw new OperatorSurfaceError(`project not found: ${task.projectId}`);
+  }
+  const actor = normalizeRequiredText(input.actor, "actor", 120);
+  const note = normalizeRequiredText(input.note, "note", 50_000);
+  const attempt = getLatestAttemptByTask(context, task.id);
+  const surface = buildTaskSurfaceFromDb(context, task.id);
+  const artifact = writeTaskNoteArtifact(surface, task.id, note, actor);
+
+  try {
+    return withTransaction(context, () => {
+      createArtifact(context, {
+        projectId: project.id,
+        taskId: task.id,
+        attemptId: attempt?.id,
+        kind: "task-note",
+        owner: actor,
+        path: artifact.relativePath
+      });
+      const event = appendEvent(context, {
+        type: "task.note_added",
+        summary: `task note added: ${task.id}`,
+        projectId: project.id,
+        taskId: task.id,
+        attemptId: attempt?.id,
+        payload: {
+          actor,
+          artifactPath: artifact.relativePath,
+          // note 正文只进入 artifact，event 保留短摘要方便 operator timeline 扫描。
+          excerpt: truncateText(note.replace(/\s+/g, " "), 180)
+        },
+        artifactRefs: [artifact.relativePath]
+      });
+      return { artifactPath: artifact.relativePath, event };
+    });
+  } catch (error) {
+    rmSync(artifact.absolutePath, { force: true });
+    throw error;
+  }
 }
 
 export function controlTaskRuntime(context: DbContext, input: ControlTaskInput): ControlTaskResult {
@@ -322,7 +505,9 @@ export function getOperatorTaskDetail(context: DbContext, taskId: string): Opera
   const workflowRuns = listWorkflowRunsByTask(context, task.id, 5);
   const pullRequests = listPullRequestsByTask(context, task.id, 5);
   const humanRequests = listHumanRequestsByTask(context, task.id, 10);
+  const attachments = listTaskAttachmentsByTask(context, task.id, 20);
   const events = listTaskEvents(context, task.id);
+  const taskNotes = summarizeTaskNoteRefs(events);
   const latestPullRequest = getLatestPullRequestByTask(context, task.id);
   const agentSessions = enrichAgentSessionsWithActivity(listAgentSessionsByTask(context, task.id, 5), events);
   const currentWorkflowRun = findCurrentWorkflowRun(workflowRuns, attempt);
@@ -366,6 +551,8 @@ export function getOperatorTaskDetail(context: DbContext, taskId: string): Opera
     pullRequests,
     latestPullRequest,
     humanRequests,
+    attachments,
+    taskNotes,
     events,
     surface,
     currentBlocker,
@@ -433,6 +620,15 @@ export function getOperatorExecutionSummary(context: DbContext, taskId: string):
         }
       : undefined,
     artifacts: summarizeArtifactRefs(detail.events),
+    attachments: detail.attachments.map((attachment) => ({
+      id: attachment.id,
+      safeFilename: attachment.safeFilename,
+      mimeType: attachment.mimeType,
+      sizeBytes: attachment.sizeBytes,
+      artifactPath: attachment.artifactPath,
+      retentionKind: attachment.retentionKind
+    })),
+    taskNotes: detail.taskNotes,
     nextStep: {
       recommended: detail.surface.json.recommended_next_step,
       currentBlocker: detail.currentBlocker,
@@ -575,6 +771,131 @@ function writeHumanAnswerArtifact(
     "utf8"
   );
   return { relativePath, absolutePath };
+}
+
+function writeAttachmentArtifact(
+  surface: SurfaceEnvelope,
+  attachmentId: string,
+  safeName: string,
+  payload: Buffer
+): { relativePath: string; absolutePath: string } {
+  const relativePath = assertArtifactRelativePath(`attachments/${attachmentId}/${safeName}`);
+  const absolutePath = resolveArtifactPath(surface, relativePath, "attachment artifact");
+  writeFileSync(absolutePath, payload);
+  return { relativePath, absolutePath };
+}
+
+function writeTaskNoteArtifact(
+  surface: SurfaceEnvelope,
+  taskId: string,
+  note: string,
+  actor: string
+): { relativePath: string; absolutePath: string } {
+  const relativePath = assertArtifactRelativePath(`task-notes/${randomUUID()}.md`);
+  const absolutePath = resolveArtifactPath(surface, relativePath, "task note artifact");
+  writeFileSync(
+    absolutePath,
+    [
+      `# Task Note`,
+      ``,
+      `- task_id: ${taskId}`,
+      `- actor: ${actor}`,
+      `- created_at: ${new Date().toISOString()}`,
+      ``,
+      note,
+      ``
+    ].join("\n"),
+    "utf8"
+  );
+  return { relativePath, absolutePath };
+}
+
+function resolveArtifactPath(surface: SurfaceEnvelope, relativePath: string, label: string): string {
+  const root = resolve(surface.json.artifact_root);
+  mkdirSync(root, { recursive: true });
+  const rootReal = realpathSync(root);
+  const absolutePath = resolve(rootReal, relativePath);
+  if (!isPathInside(rootReal, dirname(absolutePath))) {
+    throw new OperatorSurfaceError(`${label} 逃逸 root：${relativePath}`);
+  }
+  mkdirSync(dirname(absolutePath), { recursive: true });
+  const parentReal = realpathSync(dirname(absolutePath));
+  if (!isPathInside(rootReal, parentReal)) {
+    throw new OperatorSurfaceError(`${label} parent 逃逸 root：${relativePath}`);
+  }
+  return absolutePath;
+}
+
+function decodeAttachmentPayload(contentBase64: string): Buffer {
+  const normalized = normalizeRequiredText(contentBase64, "contentBase64", MAX_TASK_ATTACHMENT_BASE64_LENGTH);
+  if (normalized.includes(",")) {
+    throw new OperatorSurfaceError("contentBase64 必须是不含 data URL 前缀的 base64");
+  }
+  if (normalized.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(normalized)) {
+    throw new OperatorSurfaceError("contentBase64 不是有效 base64");
+  }
+  const payload = Buffer.from(normalized, "base64");
+  if (payload.length === 0) {
+    throw new OperatorSurfaceError("attachment payload 不能为空");
+  }
+  if (payload.toString("base64") !== normalized) {
+    throw new OperatorSurfaceError("contentBase64 不是规范 base64");
+  }
+  if (payload.length > MAX_TASK_ATTACHMENT_BYTES) {
+    throw new OperatorSurfaceError(`attachment payload 超过 ${MAX_TASK_ATTACHMENT_BYTES} bytes`);
+  }
+  return payload;
+}
+
+function normalizeAttachmentMimeType(value: string): string {
+  const normalized = normalizeRequiredText(value, "mimeType", 120).toLowerCase();
+  if (!ATTACHMENT_MIME_EXTENSIONS.has(normalized)) {
+    throw new OperatorSurfaceError(`不支持的 attachment MIME type：${value}`);
+  }
+  return normalized;
+}
+
+function normalizeAttachmentFilename(value: string, mimeType: string): string {
+  const original = normalizeRequiredText(value, "fileName", 255);
+  if (original.includes("/") || original.includes("\\") || original.includes("..")) {
+    throw new OperatorSurfaceError(`attachment fileName 包含非法路径片段`);
+  }
+  const extension = extname(original).toLowerCase();
+  const allowedExtensions = ATTACHMENT_MIME_EXTENSIONS.get(mimeType) ?? [];
+  if (!extension || !allowedExtensions.includes(extension)) {
+    throw new OperatorSurfaceError(`attachment extension 与 MIME type 不匹配`);
+  }
+  const stem = original.slice(0, -extension.length);
+  const safeStem = stem
+    .normalize("NFKD")
+    .replace(/[^A-Za-z0-9_-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  if (!safeStem) {
+    // 空 safe stem 说明文件名无法稳定映射到 operator surface，拒绝比静默折叠更可追踪。
+    throw new OperatorSurfaceError(`attachment safe filename 为空`);
+  }
+  const safeName = `${safeStem}${extension}`;
+  if (!safeName || safeName === extension || safeName.includes("..")) {
+    throw new OperatorSurfaceError(`attachment safe filename 为空`);
+  }
+  return safeName;
+}
+
+function summarizeTaskNoteRefs(events: EventRecord[]): OperatorTaskNoteRef[] {
+  return events
+    .filter((event) => event.type === "task.note_added" && event.artifactRefs.length > 0)
+    .slice(-8)
+    .map((event) => {
+      const payload = isRecord(event.payload) ? event.payload : undefined;
+      return {
+        eventId: event.id,
+        artifactPath: event.artifactRefs[0],
+        summary: truncateText(readString(payload, "excerpt") ?? event.summary, 180) ?? event.summary,
+        actor: readString(payload, "actor"),
+        createdAt: event.createdAt
+      };
+    });
 }
 
 function deriveCurrentBlocker(input: {

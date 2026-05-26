@@ -4,6 +4,7 @@ import {
   buildGateItems,
   buildRunMatrixRow,
   buildWorkbenchV2Model,
+  deriveUnifiedComposerProjection,
   deriveRunUntilBlockedStopReason,
   type EventRecord,
   type TaskDetail,
@@ -230,6 +231,74 @@ describe("workbench v2 display model", () => {
   it("Debug Detail 默认折叠，由 Focus Drawer 内入口按需展开", () => {
     expect(WEB_V2_DEBUG_DETAIL_DEFAULT_OPEN).toBe(false);
   });
+
+  it("Unified Composer mode 只响应 new task、human answer 和 note context", () => {
+    expect(deriveUnifiedComposerProjection({}).mode).toBe("new-task");
+
+    const humanDetail = buildDetail({
+      humanRequests: [
+        {
+          id: "hr-composer",
+          kind: "clarification",
+          status: "pending",
+          blockedKey: "scope",
+          stateVersion: 1
+        }
+      ]
+    });
+    expect(deriveUnifiedComposerProjection({ selectedTask: baseTask, detail: humanDetail })).toMatchObject({
+      mode: "human-answer",
+      taskId: "task-1"
+    });
+
+    const internalWorkflowDetail = buildDetail({
+      events: [
+        workflowEvent({
+          status: {
+            lifecycle: "active",
+            status: "running",
+            allowedActions: ["materialize-change"]
+          }
+        })
+      ]
+    });
+    expect(deriveUnifiedComposerProjection({ selectedTask: baseTask, detail: internalWorkflowDetail }).mode).toBe("task-note");
+  });
+
+  it("artifact refs 汇总包含 attachments 与 task note refs", () => {
+    const detail = buildDetail({
+      attachments: [
+        {
+          id: "attachment-1",
+          projectId: "project-1",
+          taskId: "task-1",
+          artifactId: "artifact-1",
+          artifactPath: "attachments/attachment-1/spec.md",
+          originalFilename: "spec.md",
+          safeFilename: "spec.md",
+          mimeType: "text/markdown",
+          sizeBytes: 42,
+          actor: "web-operator",
+          retentionKind: "task-local",
+          createdAt: "2026-05-26 10:00:00"
+        }
+      ],
+      taskNotes: [
+        {
+          eventId: 9,
+          artifactPath: "task-notes/note.md",
+          summary: "note",
+          actor: "web-operator",
+          createdAt: "2026-05-26 10:01:00"
+        }
+      ]
+    });
+    const row = buildRunMatrixRow(baseTask, detail);
+
+    expect(row.artifactRefs).toEqual(
+      expect.arrayContaining(["attachments/attachment-1/spec.md", "task-notes/note.md"])
+    );
+  });
 });
 
 describe("run until blocked stop reason", () => {
@@ -382,6 +451,8 @@ function buildDetail(overrides: Partial<TaskDetail> = {}): TaskDetail {
     agentSessions: [],
     pullRequests: [],
     humanRequests: [],
+    attachments: [],
+    taskNotes: [],
     events: [],
     surface: {
       surfaceKind: "operator_task_detail",

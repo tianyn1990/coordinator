@@ -9,6 +9,7 @@ import {
   PullRequestProviderError,
   WorkspaceManagerError,
   WorkflowProtocolError,
+  addTaskNoteRuntime,
   approveMergeRuntime,
   buildTaskSurfaceFromDb,
   controlTaskRuntime,
@@ -34,6 +35,7 @@ import {
   resumeWorkspacePreflight,
   startWorkflowRun,
   updatePullRequestRuntime,
+  uploadTaskAttachmentRuntime,
   viewProjectRegistry,
   type GitProviderKind
 } from "@coordinator/core";
@@ -51,7 +53,7 @@ export type BuildServerOptions = {
 };
 
 export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
-  const server = Fastify({ logger: true });
+  const server = Fastify({ logger: true, bodyLimit: 4 * 1024 * 1024 });
   const runtimeExecutor = options.runtimeExecutor ?? createRuntimeWorkerExecutor();
 
   server.addHook("onRequest", (request, reply, done) => {
@@ -161,6 +163,108 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
           error instanceof ActiveResourceConflictError ||
           error instanceof CasConflictError
         ) {
+          return reply.code(400).send({ error: error.message });
+        }
+        throw error;
+      }
+    }
+  );
+  server.post<{
+    Params: { taskId: string };
+    Body: UploadTaskAttachmentBody;
+  }>(
+    "/tasks/:taskId/attachments",
+    {
+      schema: {
+        body: {
+          type: "object",
+          required: ["fileName", "mimeType", "sizeBytes", "contentBase64", "actor"],
+          additionalProperties: false,
+          properties: {
+            fileName: { type: "string", minLength: 1, maxLength: 255 },
+            mimeType: { type: "string", minLength: 1, maxLength: 120 },
+            sizeBytes: { type: "integer", minimum: 1, maximum: 2 * 1024 * 1024 },
+            contentBase64: { type: "string", minLength: 1, maxLength: 2_800_000 },
+            actor: { type: "string", minLength: 1, maxLength: 120 }
+          }
+        }
+      }
+    },
+    async (request, reply) => {
+      const databasePath = process.env.COORDINATOR_DB_PATH;
+      if (!databasePath) {
+        return reply.code(503).send({ error: "COORDINATOR_DB_PATH 未配置" });
+      }
+
+      try {
+        return withDatabase(databasePath, (context) =>
+          uploadTaskAttachmentRuntime(context, {
+            taskId: request.params.taskId,
+            fileName: request.body.fileName,
+            mimeType: request.body.mimeType,
+            sizeBytes: request.body.sizeBytes,
+            contentBase64: request.body.contentBase64,
+            actor: request.body.actor
+          })
+        );
+      } catch (error) {
+        if (error instanceof OperatorSurfaceError || error instanceof ActiveResourceConflictError) {
+          return reply.code(400).send({ error: error.message });
+        }
+        throw error;
+      }
+    }
+  );
+  server.get<{ Params: { taskId: string } }>("/tasks/:taskId/attachments", async (request, reply) => {
+    const databasePath = process.env.COORDINATOR_DB_PATH;
+    if (!databasePath) {
+      return reply.code(503).send({ error: "COORDINATOR_DB_PATH 未配置" });
+    }
+
+    try {
+      const detail = withDatabase(databasePath, (context) => getOperatorTaskDetail(context, request.params.taskId));
+      return { taskId: request.params.taskId, attachments: detail.attachments };
+    } catch (error) {
+      if (error instanceof OperatorSurfaceError) {
+        return reply.code(404).send({ error: error.message });
+      }
+      throw error;
+    }
+  });
+  server.post<{
+    Params: { taskId: string };
+    Body: AddTaskNoteBody;
+  }>(
+    "/tasks/:taskId/notes",
+    {
+      schema: {
+        body: {
+          type: "object",
+          required: ["note", "actor"],
+          additionalProperties: false,
+          properties: {
+            note: { type: "string", minLength: 1, maxLength: 50_000 },
+            actor: { type: "string", minLength: 1, maxLength: 120 }
+          }
+        }
+      }
+    },
+    async (request, reply) => {
+      const databasePath = process.env.COORDINATOR_DB_PATH;
+      if (!databasePath) {
+        return reply.code(503).send({ error: "COORDINATOR_DB_PATH 未配置" });
+      }
+
+      try {
+        return withDatabase(databasePath, (context) =>
+          addTaskNoteRuntime(context, {
+            taskId: request.params.taskId,
+            note: request.body.note,
+            actor: request.body.actor
+          })
+        );
+      } catch (error) {
+        if (error instanceof OperatorSurfaceError || error instanceof ActiveResourceConflictError) {
           return reply.code(400).send({ error: error.message });
         }
         throw error;
@@ -968,6 +1072,19 @@ type TaskControlBody = {
   reason?: string;
   actor?: string;
   retryDelayMs?: number;
+};
+
+type UploadTaskAttachmentBody = {
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+  contentBase64: string;
+  actor: string;
+};
+
+type AddTaskNoteBody = {
+  note: string;
+  actor: string;
 };
 
 type CreateWorkspaceBody = {

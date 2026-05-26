@@ -20,7 +20,8 @@ describe("runMigrations", () => {
       { id: "0005_agent_provider_runtime.sql", applied: true },
       { id: "0006_pr_mr_provider.sql", applied: true },
       { id: "0007_workflow_selection.sql", applied: true },
-      { id: "0008_task_workflow_selection.sql", applied: true }
+      { id: "0008_task_workflow_selection.sql", applied: true },
+      { id: "0009_task_attachments.sql", applied: true }
     ]);
     expect(second.applied).toEqual([
       { id: "0001_metadata.sql", applied: false },
@@ -30,13 +31,14 @@ describe("runMigrations", () => {
       { id: "0005_agent_provider_runtime.sql", applied: false },
       { id: "0006_pr_mr_provider.sql", applied: false },
       { id: "0007_workflow_selection.sql", applied: false },
-      { id: "0008_task_workflow_selection.sql", applied: false }
+      { id: "0008_task_workflow_selection.sql", applied: false },
+      { id: "0009_task_attachments.sql", applied: false }
     ]);
 
     const db = new DatabaseSync(databasePath);
     try {
       const row = db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get() as { count: number };
-      expect(row.count).toBe(8);
+      expect(row.count).toBe(9);
     } finally {
       db.close();
     }

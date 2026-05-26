@@ -389,6 +389,37 @@ export type ArtifactRecord = {
   path: string;
 };
 
+export type CreateTaskAttachmentInput = {
+  id?: string;
+  projectId: string;
+  taskId: string;
+  attemptId?: string;
+  artifactId: string;
+  artifactPath: string;
+  originalFilename: string;
+  safeFilename: string;
+  mimeType: string;
+  sizeBytes: number;
+  actor: string;
+  retentionKind?: string;
+};
+
+export type TaskAttachmentRecord = {
+  id: string;
+  projectId: string;
+  taskId: string;
+  attemptId?: string;
+  artifactId: string;
+  artifactPath: string;
+  originalFilename: string;
+  safeFilename: string;
+  mimeType: string;
+  sizeBytes: number;
+  actor: string;
+  retentionKind: string;
+  createdAt: string;
+};
+
 export type AppendEventInput = {
   type: string;
   summary: string;
@@ -1214,6 +1245,46 @@ export function createArtifact(context: DbContext, input: CreateArtifactInput): 
   });
 }
 
+export function createTaskAttachment(context: DbContext, input: CreateTaskAttachmentInput): TaskAttachmentRecord {
+  return withTransaction(context, () => {
+    const id = input.id ?? randomUUID();
+    context.db
+      .prepare(
+        `INSERT INTO task_attachments (
+          id, project_id, task_id, attempt_id, artifact_id, artifact_path,
+          original_filename, safe_filename, mime_type, size_bytes, actor, retention_kind
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        id,
+        input.projectId,
+        input.taskId,
+        input.attemptId ?? null,
+        input.artifactId,
+        input.artifactPath,
+        input.originalFilename,
+        input.safeFilename,
+        input.mimeType,
+        input.sizeBytes,
+        input.actor,
+        input.retentionKind ?? "task-local"
+      );
+    return requireTaskAttachment(context, id);
+  });
+}
+
+export function listTaskAttachmentsByTask(context: DbContext, taskId: string, limit = 20): TaskAttachmentRecord[] {
+  return context.db
+    .prepare(
+      `SELECT * FROM task_attachments
+       WHERE task_id = ?
+       ORDER BY created_at ASC, id ASC
+       LIMIT ?`
+    )
+    .all(taskId, limit)
+    .map(mapTaskAttachmentRow);
+}
+
 export function updateTaskStatus(
   context: DbContext,
   taskId: string,
@@ -1986,6 +2057,14 @@ function requireArtifact(context: DbContext, id: string): ArtifactRecord {
   return mapArtifactRow(row);
 }
 
+function requireTaskAttachment(context: DbContext, id: string): TaskAttachmentRecord {
+  const row = context.db.prepare("SELECT * FROM task_attachments WHERE id = ?").get(id);
+  if (!row) {
+    throw new Error(`task attachment not found: ${id}`);
+  }
+  return mapTaskAttachmentRow(row);
+}
+
 function requireEvent(context: DbContext, id: number): EventRecord {
   const row = context.db.prepare("SELECT * FROM events WHERE id = ?").get(id);
   if (!row) {
@@ -2354,6 +2433,39 @@ function mapArtifactRow(row: unknown): ArtifactRecord {
     kind: value.kind,
     owner: value.owner,
     path: value.path
+  };
+}
+
+function mapTaskAttachmentRow(row: unknown): TaskAttachmentRecord {
+  const value = row as {
+    id: string;
+    project_id: string;
+    task_id: string;
+    attempt_id: string | null;
+    artifact_id: string;
+    artifact_path: string;
+    original_filename: string;
+    safe_filename: string;
+    mime_type: string;
+    size_bytes: number;
+    actor: string;
+    retention_kind: string;
+    created_at: string;
+  };
+  return {
+    id: value.id,
+    projectId: value.project_id,
+    taskId: value.task_id,
+    attemptId: value.attempt_id ?? undefined,
+    artifactId: value.artifact_id,
+    artifactPath: value.artifact_path,
+    originalFilename: value.original_filename,
+    safeFilename: value.safe_filename,
+    mimeType: value.mime_type,
+    sizeBytes: value.size_bytes,
+    actor: value.actor,
+    retentionKind: value.retention_kind,
+    createdAt: value.created_at
   };
 }
 

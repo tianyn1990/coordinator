@@ -23,6 +23,8 @@ function baseSnapshot(overrides: Partial<SurfaceSnapshot> = {}): SurfaceSnapshot
     workflowRuns: [],
     agentSessions: [],
     humanRequests: [],
+    attachments: [],
+    taskNotes: [],
     artifactRoot: "coordinator/artifacts/",
     createdAt: "2026-05-03T00:00:00.000Z",
     autonomyGuidance: { level: "balanced" },

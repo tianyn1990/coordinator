@@ -717,22 +717,28 @@ textarea {
   font-weight: 760;
 }
 
-.attachment-well {
-  min-height: 44px;
-  border: 1px dashed var(--line-strong);
-  border-radius: 6px;
-  display: grid;
-  place-items: center;
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 760;
-}
-
+.attachment-list,
 .artifact-list {
   display: grid;
   gap: 5px;
   margin: 0;
   padding-left: 18px;
+}
+
+.attachment-list li {
+  display: grid;
+  gap: 2px;
+  overflow-wrap: anywhere;
+}
+
+.attachment-list strong {
+  font-size: 12px;
+}
+
+.attachment-list span,
+.attachment-list small {
+  color: var(--muted);
+  font-size: 11px;
 }
 
 .debug-detail summary {
@@ -767,7 +773,7 @@ textarea {
 
 .composer {
   display: grid;
-  grid-template-columns: minmax(180px, 0.25fr) minmax(0, 1fr) 82px 82px;
+  grid-template-columns: minmax(180px, 0.22fr) minmax(0, 1fr) minmax(160px, 0.18fr) 94px;
   gap: 8px;
   align-items: center;
   max-width: 1760px;
@@ -777,6 +783,21 @@ textarea {
   background: rgba(251, 252, 248, 0.96);
   box-shadow: var(--shadow);
   padding: 10px;
+}
+
+.composer.new-task {
+  grid-template-columns: minmax(160px, 0.18fr) minmax(420px, 0.44fr) minmax(0, 1fr) minmax(160px, 0.18fr) 94px;
+}
+
+.composer-mode,
+.composer-new-task {
+  min-width: 0;
+}
+
+.composer-new-task {
+  display: grid;
+  grid-template-columns: minmax(130px, 0.95fr) minmax(180px, 1.2fr) minmax(112px, 0.7fr) minmax(130px, 0.75fr);
+  gap: 6px;
 }
 
 .composer strong {
@@ -790,6 +811,41 @@ textarea {
 .composer textarea {
   min-height: 40px;
   resize: none;
+}
+
+.file-button {
+  display: grid;
+  min-width: 0;
+}
+
+.file-button input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.file-button span {
+  display: block;
+  min-height: 32px;
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: #ffffff;
+  color: var(--ink);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 760;
+  padding: 7px 10px;
+  text-overflow: ellipsis;
+  text-transform: none;
+  white-space: nowrap;
+}
+
+.file-button:hover span {
+  border-color: var(--cyan);
+  background: var(--cyan-soft);
 }
 
 @keyframes pinPulse {

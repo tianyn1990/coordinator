@@ -1,4 +1,4 @@
-import { StrictMode, useEffect, useMemo, useState, type FormEvent } from "react";
+import { StrictMode, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { workflowActionButtonLabel } from "./workflow-actions.js";
 import {
@@ -6,6 +6,7 @@ import {
   buildRunMatrixRow,
   buildWorkbenchV2Model,
   collectArtifactRefs,
+  deriveUnifiedComposerProjection,
   deriveRunUntilBlockedStopReason,
   isTerminalTaskStatus,
   type GateItem,
@@ -15,8 +16,10 @@ import {
   type RailNode,
   type RunMatrixRow,
   type RunUntilBlockedStopReason,
+  type TaskAttachment,
   type TaskDetail,
   type TaskListItem,
+  type UnifiedComposerProjection,
   type WorkflowLensSummary
 } from "./workbench-v2-model.js";
 import "./styles.css";
@@ -57,8 +60,19 @@ type WorkflowActionSubmitInput = {
   arg?: string;
 };
 
+type ComposerSubmitInput = {
+  projection: UnifiedComposerProjection;
+  projectId: string;
+  title: string;
+  body: string;
+  autonomy: "conservative" | "balanced" | "aggressive";
+  requestedWorkflowProfile?: string;
+  file?: File;
+};
+
 const apiBase = import.meta.env.VITE_COORDINATOR_API_BASE ?? "http://127.0.0.1:4310";
 const RUN_UNTIL_BLOCKED_MAX_TICKS = 8;
+const MAX_WEB_ATTACHMENT_BYTES = 2 * 1024 * 1024;
 
 function App() {
   return <WorkbenchShell />;
@@ -76,6 +90,7 @@ function WorkbenchShell() {
   const [loading, setLoading] = useState(false);
   const [flash, setFlash] = useState<Flash | undefined>();
   const [runState, setRunState] = useState<RunUntilBlockedState | undefined>();
+  const [composerResetToken, setComposerResetToken] = useState(0);
 
   const model = useMemo(
     () => buildWorkbenchV2Model({ tasks, details, projectId: selectedProjectId, query }),
@@ -234,25 +249,6 @@ function WorkbenchShell() {
     }
   }
 
-  async function answerHumanRequest(event: FormEvent<HTMLFormElement>, requestItem: HumanRequest) {
-    event.preventDefault();
-    const form = new FormData(event.currentTarget);
-    try {
-      await request(`/human-requests/${requestItem.id}/answer`, {
-        method: "POST",
-        body: JSON.stringify({
-          expectedStateVersion: requestItem.stateVersion,
-          answer: String(form.get("answer") ?? ""),
-          answeredBy: String(form.get("answeredBy") ?? "web-operator")
-        })
-      });
-      setFlash({ tone: "ok", message: "human answer recorded" });
-      await refresh(focusedTaskId);
-    } catch (error) {
-      setFlash({ tone: "error", message: error instanceof Error ? error.message : String(error) });
-    }
-  }
-
   async function submitWorkflowAction(input: WorkflowActionSubmitInput) {
     try {
       await request(`/workflow-runs/${input.workflowRunId}/actions`, {
@@ -315,6 +311,63 @@ function WorkbenchShell() {
     }
   }
 
+  async function submitComposer(input: ComposerSubmitInput) {
+    let targetTaskId = input.projection.taskId;
+    let primaryCommitted = false;
+    try {
+      if (input.projection.mode === "new-task") {
+        const created = await request<{ task: TaskListItem }>("/tasks", {
+          method: "POST",
+          body: JSON.stringify({
+            projectId: input.projectId,
+            title: input.title,
+            description: input.body,
+            autonomy: input.autonomy,
+            requestedWorkflowProfile: input.requestedWorkflowProfile || undefined
+          })
+        });
+        targetTaskId = created.task.id;
+        primaryCommitted = true;
+      } else if (input.projection.mode === "human-answer" && input.projection.humanRequest) {
+        await request(`/human-requests/${input.projection.humanRequest.id}/answer`, {
+          method: "POST",
+          body: JSON.stringify({
+            expectedStateVersion: input.projection.humanRequest.stateVersion,
+            answer: input.body,
+            answeredBy: "web-operator"
+          })
+        });
+        primaryCommitted = true;
+      } else if (input.projection.mode === "task-note" && targetTaskId && input.body.trim()) {
+        await request(`/tasks/${targetTaskId}/notes`, {
+          method: "POST",
+          body: JSON.stringify({
+            note: input.body,
+            actor: "web-operator"
+          })
+        });
+        primaryCommitted = true;
+      }
+
+      if (input.file && targetTaskId) {
+        await uploadAttachment(targetTaskId, input.file);
+      }
+      setFlash({ tone: "ok", message: input.file ? "composer submitted with attachment" : "composer submitted" });
+      setComposerResetToken((value) => value + 1);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (primaryCommitted && input.file) {
+        // 主操作成功后附件失败属于部分成功，必须刷新到最新 task，避免用户误以为 task 未创建。
+        setComposerResetToken((value) => value + 1);
+        setFlash({ tone: "error", message: `main update saved; attachment failed: ${message}` });
+      } else {
+        setFlash({ tone: "error", message });
+      }
+    } finally {
+      await refresh(targetTaskId ?? focusedTaskId);
+    }
+  }
+
   return (
     <main className="v2-shell">
       <CommandBar
@@ -347,7 +400,6 @@ function WorkbenchShell() {
           inbox={model.inbox.filter((item) => item.taskId === focusedTaskId)}
           debugOpen={debugOpen}
           onDebugOpenChange={setDebugOpen}
-          onAnswer={answerHumanRequest}
           onWorkflowAction={submitWorkflowAction}
           onDecideMerge={decideMerge}
           onMerge={mergeAfterApproval}
@@ -356,7 +408,14 @@ function WorkbenchShell() {
         />
       </section>
 
-      <UnifiedComposerPlaceholder selectedTask={focusedRow?.task} />
+      <UnifiedComposer
+        projects={projects}
+        selectedProjectId={selectedProjectId}
+        selectedTask={focusedRow?.task}
+        detail={focusedDetail}
+        resetToken={composerResetToken}
+        onSubmit={(input) => void submitComposer(input)}
+      />
     </main>
   );
 }
@@ -536,7 +595,6 @@ function FocusDrawer({
   inbox,
   debugOpen,
   onDebugOpenChange,
-  onAnswer,
   onWorkflowAction,
   onDecideMerge,
   onMerge,
@@ -548,7 +606,6 @@ function FocusDrawer({
   inbox: GateItem[];
   debugOpen: boolean;
   onDebugOpenChange: (open: boolean) => void;
-  onAnswer: (event: FormEvent<HTMLFormElement>, request: HumanRequest) => void;
   onWorkflowAction: (input: WorkflowActionSubmitInput) => Promise<void>;
   onDecideMerge: (pr: PullRequest, request: HumanRequest, decision: "approve" | "reject") => void;
   onMerge: (pr: PullRequest) => void;
@@ -583,7 +640,6 @@ function FocusDrawer({
         detail={detail}
         row={row}
         inbox={inbox}
-        onAnswer={onAnswer}
         onWorkflowAction={onWorkflowAction}
         onDecideMerge={onDecideMerge}
         onMerge={onMerge}
@@ -606,7 +662,7 @@ function FocusDrawer({
 
       <WorkflowLens workflow={row.workflow} />
       <AgentActivity detail={detail} />
-      <AttachmentShelf />
+      <AttachmentShelf attachments={detail.attachments} />
       <EvidenceShelf artifacts={artifacts} />
       <DebugDetail detail={detail} open={debugOpen} onOpenChange={onDebugOpenChange} />
     </aside>
@@ -617,7 +673,6 @@ function GatePanel({
   detail,
   row,
   inbox,
-  onAnswer,
   onWorkflowAction,
   onDecideMerge,
   onMerge
@@ -625,7 +680,6 @@ function GatePanel({
   detail: TaskDetail;
   row: RunMatrixRow;
   inbox: GateItem[];
-  onAnswer: (event: FormEvent<HTMLFormElement>, request: HumanRequest) => void;
   onWorkflowAction: (input: WorkflowActionSubmitInput) => Promise<void>;
   onDecideMerge: (pr: PullRequest, request: HumanRequest, decision: "approve" | "reject") => void;
   onMerge: (pr: PullRequest) => void;
@@ -646,15 +700,7 @@ function GatePanel({
         if (item.kind === "human") {
           const request = humanRequestByGateId.get(item.id);
           if (!request) return <StaticGateCard key={item.id} item={item} />;
-          return (
-            <form key={item.id} className="gate-card" onSubmit={(event) => onAnswer(event, request)}>
-              <strong>{item.label}</strong>
-              <small>{item.summary}</small>
-              <textarea name="answer" rows={3} placeholder="answer" required />
-              <input name="answeredBy" defaultValue="web-operator" />
-              <button type="submit">Send answer</button>
-            </form>
-          );
+          return <StaticGateCard key={item.id} item={item} />;
         }
         if (item.kind === "merge") {
           const request = mergeRequestByGateId.get(item.id);
@@ -803,16 +849,25 @@ function AgentActivity({ detail }: { detail: TaskDetail }) {
   );
 }
 
-function AttachmentShelf() {
+function AttachmentShelf({ attachments }: { attachments: TaskAttachment[] }) {
   return (
     <section className="mini-panel attachment-shelf">
       <div className="section-label">
         <span>Attachments</span>
-        <strong>local</strong>
+        <strong>{attachments.length}</strong>
       </div>
-      <div className="attachment-well">
-        <span>Reserved drop zone</span>
-      </div>
+      {attachments.length === 0 ? <p className="muted">No local attachment refs.</p> : null}
+      <ul className="attachment-list">
+        {attachments.map((attachment) => (
+          <li key={attachment.id}>
+            <strong>{attachment.safeFilename}</strong>
+            <span>
+              {attachment.mimeType} / {formatBytes(attachment.sizeBytes)}
+            </span>
+            <small>{attachment.artifactPath}</small>
+          </li>
+        ))}
+      </ul>
     </section>
   );
 }
@@ -860,21 +915,112 @@ function DebugDetail({ detail, open, onOpenChange }: { detail: TaskDetail; open:
   );
 }
 
-function UnifiedComposerPlaceholder({ selectedTask }: { selectedTask?: TaskListItem }) {
+function UnifiedComposer({
+  projects,
+  selectedProjectId,
+  selectedTask,
+  detail,
+  resetToken,
+  onSubmit
+}: {
+  projects: Project[];
+  selectedProjectId: string;
+  selectedTask?: TaskListItem;
+  detail?: TaskDetail;
+  resetToken: number;
+  onSubmit: (input: ComposerSubmitInput) => void;
+}) {
+  const projection = deriveUnifiedComposerProjection({ selectedTask, detail });
+  const defaultProjectId =
+    projection.mode === "new-task"
+      ? selectedProjectId !== "all"
+        ? selectedProjectId
+        : projects[0]?.id ?? ""
+      : selectedTask?.projectId ?? selectedProjectId;
+  const [projectId, setProjectId] = useState(defaultProjectId);
+  const [title, setTitle] = useState("");
+  const [body, setBody] = useState("");
+  const [autonomy, setAutonomy] = useState<ComposerSubmitInput["autonomy"]>("balanced");
+  const [requestedWorkflowProfile, setRequestedWorkflowProfile] = useState("");
+  const [file, setFile] = useState<File | undefined>();
+
+  useEffect(() => {
+    setProjectId(defaultProjectId);
+    setTitle("");
+    setBody("");
+    setRequestedWorkflowProfile("");
+    setFile(undefined);
+  }, [defaultProjectId, projection.mode, projection.taskId, projection.humanRequest?.id, resetToken]);
+
+  const canSubmit =
+    projection.mode === "new-task"
+      ? Boolean(projectId && title.trim())
+      : projection.mode === "human-answer"
+        ? Boolean(body.trim())
+        : Boolean(body.trim() || file);
+
   return (
-    <section className="composer" aria-label="Unified Composer">
-      <div>
-        <span>Composer</span>
-        <strong>{selectedTask ? selectedTask.title : "New task"}</strong>
+    <form
+      className={`composer ${projection.mode}`}
+      aria-label="Unified Composer"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (!canSubmit) return;
+        onSubmit({
+          projection,
+          projectId,
+          title: title.trim() || body.trim().slice(0, 80) || "Untitled task",
+          body,
+          autonomy,
+          requestedWorkflowProfile: requestedWorkflowProfile.trim() || undefined,
+          file
+        });
+      }}
+    >
+      <div className="composer-mode">
+        <span>{projection.mode}</span>
+        <strong>{projection.title}</strong>
       </div>
-      <textarea placeholder="Unified input and local attachments land in a later slice" disabled />
-      <button type="button" disabled>
-        Attach
+      {projection.mode === "new-task" ? (
+        <div className="composer-new-task">
+          <select value={projectId} onChange={(event) => setProjectId(event.target.value)} aria-label="Task project" required>
+            <option value="" disabled>
+              Project
+            </option>
+            {projects.map((project) => (
+              <option key={project.id} value={project.id}>
+                {project.name}
+              </option>
+            ))}
+          </select>
+          <input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Task title" required />
+          <select value={autonomy} onChange={(event) => setAutonomy(event.target.value as ComposerSubmitInput["autonomy"])} aria-label="Autonomy">
+            <option value="balanced">balanced</option>
+            <option value="conservative">conservative</option>
+            <option value="aggressive">aggressive</option>
+          </select>
+          <input
+            value={requestedWorkflowProfile}
+            onChange={(event) => setRequestedWorkflowProfile(event.target.value)}
+            placeholder="workflow profile"
+          />
+        </div>
+      ) : null}
+      <textarea value={body} onChange={(event) => setBody(event.target.value)} placeholder={projection.placeholder} rows={2} />
+      <label className="file-button">
+        <input
+          type="file"
+          onChange={(event) => {
+            const nextFile = event.target.files?.[0];
+            setFile(nextFile);
+          }}
+        />
+        <span>{file ? `${file.name} / ${formatBytes(file.size)}` : "Attach"}</span>
+      </label>
+      <button type="submit" disabled={!canSubmit}>
+        {projection.submitLabel}
       </button>
-      <button type="button" disabled>
-        Send
-      </button>
-    </section>
+    </form>
   );
 }
 
@@ -928,6 +1074,60 @@ function ChipList({ label, items }: { label: string; items: string[] }) {
   );
 }
 
+async function uploadAttachment(taskId: string, file: File): Promise<void> {
+  if (file.size > MAX_WEB_ATTACHMENT_BYTES) {
+    throw new Error(`attachment exceeds ${formatBytes(MAX_WEB_ATTACHMENT_BYTES)}`);
+  }
+  const mimeType = inferMimeType(file);
+  const contentBase64 = await readFileAsBase64(file);
+  await request(`/tasks/${taskId}/attachments`, {
+    method: "POST",
+    body: JSON.stringify({
+      fileName: file.name,
+      mimeType,
+      sizeBytes: file.size,
+      contentBase64,
+      actor: "web-operator"
+    })
+  });
+}
+
+function inferMimeType(file: File): string {
+  if (file.type) return file.type;
+  const extension = file.name.toLowerCase().split(".").pop();
+  const byExtension: Record<string, string> = {
+    png: "image/png",
+    jpg: "image/jpeg",
+    jpeg: "image/jpeg",
+    webp: "image/webp",
+    gif: "image/gif",
+    txt: "text/plain",
+    log: "text/plain",
+    md: "text/markdown",
+    markdown: "text/markdown",
+    json: "application/json",
+    pdf: "application/pdf"
+  };
+  if (extension && byExtension[extension]) {
+    return byExtension[extension];
+  }
+  throw new Error("unsupported attachment type");
+}
+
+function readFileAsBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("failed to read attachment"));
+    reader.onload = () => {
+      const result = typeof reader.result === "string" ? reader.result : "";
+      const marker = "base64,";
+      const index = result.indexOf(marker);
+      resolve(index >= 0 ? result.slice(index + marker.length) : result);
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
 async function hydrateTaskDetails(tasks: TaskListItem[]): Promise<Record<string, TaskDetail>> {
   const entries = await Promise.all(
     tasks.map(async (task) => {
@@ -951,6 +1151,14 @@ function formatRelativeTime(value: string | undefined): string {
   const diffHours = Math.round(diffMinutes / 60);
   if (diffHours < 48) return `${diffHours}h`;
   return `${Math.round(diffHours / 24)}d`;
+}
+
+function formatBytes(value: number): string {
+  if (value < 1024) return `${value} B`;
+  const kb = value / 1024;
+  if (kb < 1024) return `${kb.toFixed(kb >= 100 ? 0 : 1)} KB`;
+  const mb = kb / 1024;
+  return `${mb.toFixed(mb >= 100 ? 0 : 1)} MB`;
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {

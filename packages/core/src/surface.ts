@@ -1,7 +1,17 @@
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { getProject, getTask, type DbContext, type ProjectRecord, type TaskRecord } from "@coordinator/db";
+import {
+  getProject,
+  getTask,
+  listTaskAttachmentsByTask,
+  listTaskEvents,
+  type DbContext,
+  type EventRecord,
+  type ProjectRecord,
+  type TaskAttachmentRecord,
+  type TaskRecord
+} from "@coordinator/db";
 import { extractAgentActivitySummary, type AgentActivitySummary, type NormalizedAgentEvent } from "./agent-activity.js";
 import {
   deriveWorkflowRuntimeObservationFromPayload,
@@ -35,6 +45,8 @@ export type SurfaceSnapshot = {
   mergeApproval?: MergeApprovalSnapshot;
   noPrCompletion?: NoPrCompletionSnapshot;
   humanRequests: HumanRequestSnapshot[];
+  attachments: AttachmentSnapshot[];
+  taskNotes: TaskNoteSnapshot[];
   autonomyGuidance?: AutonomyGuidanceSnapshot;
   memoryTrustBoundary?: MemoryTrustBoundarySnapshot;
   validationContract?: ValidationContractSnapshot;
@@ -64,6 +76,8 @@ export type CoordinatorSurfaceJson = {
   merge_approval: MergeApprovalSnapshotJson | null;
   no_pr_completion: NoPrCompletionSnapshotJson | null;
   human_requests: HumanRequestSnapshotJson[];
+  attachments: AttachmentSnapshotJson[];
+  task_notes: TaskNoteSnapshotJson[];
   autonomy_guidance: AutonomyGuidanceSnapshotJson | null;
   denied_actions: string[];
   recommended_next_step: string;
@@ -315,6 +329,42 @@ type HumanRequestSnapshotJson = {
   answer_artifact_path?: string;
 };
 
+export type AttachmentSnapshot = {
+  id: string;
+  safeFilename: string;
+  mimeType: string;
+  sizeBytes: number;
+  artifactPath: string;
+  retentionKind: string;
+  createdAt: string;
+};
+
+type AttachmentSnapshotJson = {
+  id: string;
+  safe_filename: string;
+  mime_type: string;
+  size_bytes: number;
+  artifact_path: string;
+  retention_kind: string;
+  created_at: string;
+};
+
+export type TaskNoteSnapshot = {
+  eventId: number;
+  artifactPath: string;
+  summary: string;
+  actor?: string;
+  createdAt: string;
+};
+
+type TaskNoteSnapshotJson = {
+  event_id: number;
+  artifact_path: string;
+  summary: string;
+  actor?: string;
+  created_at: string;
+};
+
 export type AutonomyGuidanceSnapshot = {
   level: "conservative" | "balanced" | "aggressive";
 };
@@ -377,6 +427,8 @@ export function buildCoordinatorSurface(snapshot: SurfaceSnapshot): SurfaceEnvel
     merge_approval: snapshot.mergeApproval ? toMergeApprovalJson(snapshot.mergeApproval) : null,
     no_pr_completion: snapshot.noPrCompletion ? toNoPrCompletionJson(snapshot.noPrCompletion) : null,
     human_requests: snapshot.humanRequests.map(toHumanRequestJson),
+    attachments: snapshot.attachments.map(toAttachmentJson),
+    task_notes: snapshot.taskNotes.map(toTaskNoteJson),
     autonomy_guidance: autonomyGuidance ? { level: snapshot.autonomyGuidance!.level } : null,
     denied_actions: deniedActions,
     recommended_next_step: recommendedNextStep,
@@ -426,6 +478,8 @@ export function buildTaskSurfaceFromDb(context: DbContext, taskId: string): Surf
   const recentAgentSessions = findRecentAgentSessionsForTask(context, task.id);
   const executionPlan = findLatestExecutionPlanForTask(context, task.id);
   const humanRequests = findHumanRequestsForTask(context, task.id);
+  const attachments = listTaskAttachmentsByTask(context, task.id, 10).map(toAttachmentSnapshot);
+  const taskNotes = summarizeTaskNotesForSurface(listTaskEvents(context, task.id));
   const pullRequest = latestAttempt ? findLatestPullRequestForAttempt(context, latestAttempt.id) : undefined;
   const mergeApproval = pullRequest ? findLatestMergeApprovalForPr(context, pullRequest.id) : undefined;
 
@@ -520,6 +574,8 @@ export function buildTaskSurfaceFromDb(context: DbContext, taskId: string): Surf
       questionArtifactPath: request.question_artifact_path ?? undefined,
       answerArtifactPath: request.answer_artifact_path ?? undefined
     })),
+    attachments,
+    taskNotes,
     autonomyGuidance: {
       level: normalizeAutonomy(task.autonomy)
     },
@@ -638,6 +694,22 @@ export function renderSurfaceMarkdown(
     }
     if (json.merge_approval.merge_strategy) {
       lines.push(`- merge_strategy: ${json.merge_approval.merge_strategy}`);
+    }
+    lines.push(``);
+  }
+  if (json.attachments.length > 0) {
+    lines.push(`## Attachments`);
+    for (const attachment of json.attachments) {
+      lines.push(
+        `- ${attachment.safe_filename}: ${attachment.mime_type}, ${attachment.size_bytes} bytes, ${attachment.artifact_path}`
+      );
+    }
+    lines.push(``);
+  }
+  if (json.task_notes.length > 0) {
+    lines.push(`## Recent Task Notes`);
+    for (const note of json.task_notes) {
+      lines.push(`- event ${note.event_id}: ${note.summary} (${note.artifact_path})`);
     }
     lines.push(``);
   }
@@ -1490,4 +1562,69 @@ function toHumanRequestJson(request: HumanRequestSnapshot): HumanRequestSnapshot
     question_artifact_path: request.questionArtifactPath,
     answer_artifact_path: request.answerArtifactPath
   };
+}
+
+function toAttachmentSnapshot(attachment: TaskAttachmentRecord): AttachmentSnapshot {
+  return {
+    id: attachment.id,
+    safeFilename: attachment.safeFilename,
+    mimeType: attachment.mimeType,
+    sizeBytes: attachment.sizeBytes,
+    artifactPath: attachment.artifactPath,
+    retentionKind: attachment.retentionKind,
+    createdAt: attachment.createdAt
+  };
+}
+
+function toAttachmentJson(attachment: AttachmentSnapshot): AttachmentSnapshotJson {
+  return {
+    id: attachment.id,
+    safe_filename: attachment.safeFilename,
+    mime_type: attachment.mimeType,
+    size_bytes: attachment.sizeBytes,
+    artifact_path: attachment.artifactPath,
+    retention_kind: attachment.retentionKind,
+    created_at: attachment.createdAt
+  };
+}
+
+function toTaskNoteJson(note: TaskNoteSnapshot): TaskNoteSnapshotJson {
+  return {
+    event_id: note.eventId,
+    artifact_path: note.artifactPath,
+    summary: note.summary,
+    actor: note.actor,
+    created_at: note.createdAt
+  };
+}
+
+function summarizeTaskNotesForSurface(events: EventRecord[]): TaskNoteSnapshot[] {
+  return events
+    .filter((event) => event.type === "task.note_added" && event.artifactRefs.length > 0)
+    .slice(-5)
+    .map((event) => {
+      const payload = parseEventPayload(event.payload);
+      return {
+        eventId: event.id,
+        artifactPath: event.artifactRefs[0],
+        summary: truncateSurfaceText(readPayloadString(payload, "excerpt") ?? event.summary, 160),
+        actor: readPayloadString(payload, "actor"),
+        createdAt: event.createdAt
+      };
+    });
+}
+
+function parseEventPayload(payload: unknown): Record<string, unknown> | undefined {
+  return typeof payload === "object" && payload !== null && !Array.isArray(payload)
+    ? (payload as Record<string, unknown>)
+    : undefined;
+}
+
+function readPayloadString(payload: Record<string, unknown> | undefined, key: string): string | undefined {
+  const value = payload?.[key];
+  return typeof value === "string" && value.trim().length > 0 ? value : undefined;
+}
+
+function truncateSurfaceText(value: string, maxLength: number): string {
+  return value.length > maxLength ? `${value.slice(0, maxLength - 3)}...` : value;
 }

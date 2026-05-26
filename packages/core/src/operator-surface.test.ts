@@ -13,6 +13,7 @@ import {
   createPullRequest,
   createTask,
   createWorkspace,
+  listTaskAttachmentsByTask,
   listTaskEvents,
   runMigrations,
   updateOperation,
@@ -20,13 +21,15 @@ import {
 } from "@coordinator/db";
 import {
   OperatorSurfaceError,
+  addTaskNoteRuntime,
   buildTaskSurfaceFromDb,
   controlTaskRuntime,
   createManualTask,
   getOperatorTaskDetail,
   getOperatorExecutionSummary,
   listOperatorTasks,
-  recordHumanAnswerRuntime
+  recordHumanAnswerRuntime,
+  uploadTaskAttachmentRuntime
 } from "./index.js";
 
 function createMigratedDatabase(): string {
@@ -590,6 +593,182 @@ describe("operator surface", () => {
         });
       })
     ).toThrow(ActiveResourceConflictError);
+  });
+
+  it("uploadTaskAttachmentRuntime 写入受控 artifact、metadata、event 与 surface refs", () => {
+    const databasePath = createMigratedDatabase();
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "coordinator-operator-attachments-"));
+    const content = "attachment secret body should stay outside surface markdown";
+
+    const result = withDatabase(databasePath, (context) => {
+      const project = createProject(context, { id: "project-attachment", name: "attachment", workspaceRoot });
+      const task = createTask(context, { id: "task-attachment", projectId: project.id, title: "attachment" });
+      const attempt = createAttempt(context, { id: "attempt-attachment", projectId: project.id, taskId: task.id });
+      const uploaded = uploadTaskAttachmentRuntime(context, {
+        taskId: task.id,
+        fileName: "evidence.txt",
+        mimeType: "text/plain",
+        sizeBytes: Buffer.byteLength(content),
+        contentBase64: Buffer.from(content).toString("base64"),
+        actor: "web-operator"
+      });
+      return {
+        uploaded,
+        attemptId: attempt.id,
+        attachments: listTaskAttachmentsByTask(context, task.id),
+        detail: getOperatorTaskDetail(context, task.id),
+        summary: getOperatorExecutionSummary(context, task.id),
+        surface: buildTaskSurfaceFromDb(context, task.id),
+        events: listTaskEvents(context, task.id)
+      };
+    });
+
+    const artifactFullPath = join(
+      workspaceRoot,
+      "project-attachment",
+      "task-attachment",
+      "_task",
+      "coordinator",
+      "artifacts",
+      result.uploaded.artifactPath
+    );
+    expect(result.uploaded.attachment).toMatchObject({
+      taskId: "task-attachment",
+      attemptId: result.attemptId,
+      originalFilename: "evidence.txt",
+      safeFilename: "evidence.txt",
+      mimeType: "text/plain",
+      sizeBytes: Buffer.byteLength(content),
+      actor: "web-operator",
+      retentionKind: "task-local"
+    });
+    expect(result.attachments).toHaveLength(1);
+    expect(readFileSync(artifactFullPath, "utf8")).toBe(content);
+    expect(result.detail.attachments[0]).toMatchObject({ artifactPath: result.uploaded.artifactPath });
+    expect(result.summary.attachments[0]).toMatchObject({ artifactPath: result.uploaded.artifactPath });
+    expect(result.surface.json.attachments[0]).toMatchObject({ artifact_path: result.uploaded.artifactPath });
+    expect(result.surface.markdown).toContain(result.uploaded.artifactPath);
+    expect(result.surface.markdown).not.toContain(content);
+    expect(result.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "task.attachment_uploaded",
+          artifactRefs: [result.uploaded.artifactPath]
+        })
+      ])
+    );
+    expect(JSON.stringify(result.events.find((event) => event.type === "task.attachment_uploaded")?.payload)).not.toContain(
+      Buffer.from(content).toString("base64")
+    );
+  });
+
+  it("uploadTaskAttachmentRuntime 拒绝 traversal、非法 type 和超限 payload，且不写成功事件", () => {
+    const databasePath = createMigratedDatabase();
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "coordinator-operator-attachment-reject-"));
+
+    const taskId = withDatabase(databasePath, (context) => {
+      const project = createProject(context, { id: "project-attachment-reject", name: "attachment reject", workspaceRoot });
+      const task = createTask(context, { id: "task-attachment-reject", projectId: project.id, title: "attachment reject" });
+      return task.id;
+    });
+
+    expect(() =>
+      withDatabase(databasePath, (context) =>
+        uploadTaskAttachmentRuntime(context, {
+          taskId,
+          fileName: "../evidence.txt",
+          mimeType: "text/plain",
+          sizeBytes: 4,
+          contentBase64: Buffer.from("test").toString("base64"),
+          actor: "web-operator"
+        })
+      )
+    ).toThrow(OperatorSurfaceError);
+
+    expect(() =>
+      withDatabase(databasePath, (context) =>
+        uploadTaskAttachmentRuntime(context, {
+          taskId,
+          fileName: "script.sh",
+          mimeType: "text/plain",
+          sizeBytes: 4,
+          contentBase64: Buffer.from("test").toString("base64"),
+          actor: "web-operator"
+        })
+      )
+    ).toThrow(OperatorSurfaceError);
+
+    expect(() =>
+      withDatabase(databasePath, (context) =>
+        uploadTaskAttachmentRuntime(context, {
+          taskId,
+          fileName: "中文.txt",
+          mimeType: "text/plain",
+          sizeBytes: 4,
+          contentBase64: Buffer.from("test").toString("base64"),
+          actor: "web-operator"
+        })
+      )
+    ).toThrow(OperatorSurfaceError);
+
+    expect(() =>
+      withDatabase(databasePath, (context) =>
+        uploadTaskAttachmentRuntime(context, {
+          taskId,
+          fileName: "large.txt",
+          mimeType: "text/plain",
+          sizeBytes: 2 * 1024 * 1024 + 1,
+          contentBase64: Buffer.alloc(2 * 1024 * 1024 + 1, "x").toString("base64"),
+          actor: "web-operator"
+        })
+      )
+    ).toThrow(OperatorSurfaceError);
+
+    const post = withDatabase(databasePath, (context) => ({
+      attachments: listTaskAttachmentsByTask(context, taskId),
+      events: listTaskEvents(context, taskId)
+    }));
+    expect(post.attachments).toEqual([]);
+    expect(post.events.map((event) => event.type)).not.toContain("task.attachment_uploaded");
+  });
+
+  it("addTaskNoteRuntime 写 note artifact/event，并只通过 refs 暴露给 operator surface", () => {
+    const databasePath = createMigratedDatabase();
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "coordinator-operator-notes-"));
+    const note = "请在实现时参考附件，但不要把正文无限拼入 surface。";
+
+    const result = withDatabase(databasePath, (context) => {
+      const project = createProject(context, { id: "project-note", name: "note", workspaceRoot });
+      const task = createTask(context, { id: "task-note", projectId: project.id, title: "note" });
+      const added = addTaskNoteRuntime(context, {
+        taskId: task.id,
+        note,
+        actor: "web-operator"
+      });
+      return {
+        added,
+        detail: getOperatorTaskDetail(context, task.id),
+        summary: getOperatorExecutionSummary(context, task.id),
+        surface: buildTaskSurfaceFromDb(context, task.id),
+        events: listTaskEvents(context, task.id)
+      };
+    });
+
+    const artifactFullPath = join(
+      workspaceRoot,
+      "project-note",
+      "task-note",
+      "_task",
+      "coordinator",
+      "artifacts",
+      result.added.artifactPath
+    );
+    expect(readFileSync(artifactFullPath, "utf8")).toContain(note);
+    expect(result.detail.taskNotes[0]).toMatchObject({ artifactPath: result.added.artifactPath, actor: "web-operator" });
+    expect(result.summary.taskNotes[0]).toMatchObject({ artifactPath: result.added.artifactPath });
+    expect(result.surface.json.task_notes[0]).toMatchObject({ artifact_path: result.added.artifactPath });
+    expect(result.surface.markdown).toContain(result.added.artifactPath);
+    expect(result.events.map((event) => event.type)).toContain("task.note_added");
   });
 
   it("recordHumanAnswerRuntime 写 artifact、更新 request 为 answered，并只唤醒 task", () => {

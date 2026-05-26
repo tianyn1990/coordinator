@@ -19,12 +19,14 @@ export {
 export { DaemonRuntimeError, parseAgentToolRequest, runDaemonTick } from "./daemon-runtime.js";
 export {
   OperatorSurfaceError,
+  addTaskNoteRuntime,
   controlTaskRuntime,
   createManualTask,
   getOperatorExecutionSummary,
   getOperatorTaskDetail,
   listOperatorTasks,
-  recordHumanAnswerRuntime
+  recordHumanAnswerRuntime,
+  uploadTaskAttachmentRuntime
 } from "./operator-surface.js";
 export { buildCoordinatorSurface, buildTaskSurfaceFromDb, renderSurfaceMarkdown } from "./surface.js";
 export { buildAgentActivitySummary, collectNormalizedAgentEvents, normalizeProviderEvent } from "./agent-activity.js";
@@ -99,6 +101,8 @@ export type { DaemonActionResult, DaemonRuntimeInput, DaemonTickResult, ParsedAg
 export type {
   ControlTaskInput,
   ControlTaskResult,
+  AddTaskNoteInput,
+  AddTaskNoteResult,
   CreateManualTaskInput,
   OperatorExecutionSummary,
   OperatorTaskControlAction,
@@ -108,8 +112,11 @@ export type {
   OperatorRecoverySummary,
   OperatorOperationSummary,
   OperatorInspectionSummary,
+  OperatorTaskNoteRef,
   RecordHumanAnswerInput,
-  RecordHumanAnswerResult
+  RecordHumanAnswerResult,
+  UploadTaskAttachmentInput,
+  UploadTaskAttachmentResult
 } from "./operator-surface.js";
 export type {
   CreateAttemptWorkspaceInput,
@@ -166,6 +173,7 @@ export type {
 } from "./pr-mr-provider.js";
 export type {
   AgentSessionSnapshot,
+  AttachmentSnapshot,
   AutonomyGuidanceSnapshot,
   CoordinatorSurfaceJson,
   CurrentStateSnapshot,
@@ -182,6 +190,7 @@ export type {
   SurfaceSnapshot,
   SurfaceToolJson,
   TaskSnapshot,
+  TaskNoteSnapshot,
   ValidationContractSnapshot,
   WorkflowRunSnapshot,
   WorkspaceSnapshot

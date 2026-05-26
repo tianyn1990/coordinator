@@ -11,6 +11,7 @@ import {
   createOperation,
   createAgentSession,
   createArtifact,
+  createTaskAttachment,
   createAttempt,
   createProject,
   createTask,
@@ -20,6 +21,7 @@ import {
   getAgentSession,
   getLock,
   listTaskEvents,
+  listTaskAttachmentsByTask,
   releaseLock,
   releaseLockIfVersion,
   runMigrations,
@@ -50,6 +52,7 @@ describe("core data model", () => {
       "workflow_runs",
       "pull_requests",
       "human_requests",
+      "task_attachments",
       "events",
       "artifacts",
       "operations",
@@ -267,6 +270,54 @@ describe("core data model", () => {
       owner: "workspace-manager",
       path: "checkpoint.md"
     });
+  });
+
+  it("task attachment metadata repository 不保存 raw payload", () => {
+    const databasePath = createMigratedDatabase();
+
+    const result = withDatabase(databasePath, (context) => {
+      const { project, task, attemptId } = createAttemptFixture(context, "attachment");
+      const artifact = createArtifact(context, {
+        id: "artifact-attachment",
+        projectId: project.id,
+        taskId: task.id,
+        attemptId,
+        kind: "task-attachment",
+        owner: "web-operator",
+        path: "attachments/attachment-1/spec.md"
+      });
+      const attachment = createTaskAttachment(context, {
+        id: "attachment-1",
+        projectId: project.id,
+        taskId: task.id,
+        attemptId,
+        artifactId: artifact.id,
+        artifactPath: artifact.path,
+        originalFilename: "需求说明.md",
+        safeFilename: "spec.md",
+        mimeType: "text/markdown",
+        sizeBytes: 42,
+        actor: "web-operator",
+        retentionKind: "task-local"
+      });
+      return {
+        attachment,
+        listed: listTaskAttachmentsByTask(context, task.id)
+      };
+    });
+
+    expect(result.attachment).toMatchObject({
+      id: "attachment-1",
+      artifactPath: "attachments/attachment-1/spec.md",
+      originalFilename: "需求说明.md",
+      safeFilename: "spec.md",
+      mimeType: "text/markdown",
+      sizeBytes: 42,
+      retentionKind: "task-local"
+    });
+    expect(result.listed).toHaveLength(1);
+    expect(JSON.stringify(result.attachment)).not.toContain("base64");
+    expect(JSON.stringify(result.attachment)).not.toContain("raw");
   });
 
   it("active workflow run uniqueness 由数据库约束保障", () => {
