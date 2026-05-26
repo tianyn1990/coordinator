@@ -57,7 +57,7 @@ workflow 是内层代码变更执行协议。
 - OpenSpec 使用时机。
 - inner coding agent 的执行边界。
 
-`allowed actions / denied actions` 是 workflow 内部控制面投影，不等同于 Coordinator Web 的 human todo。Coordinator 只能将明确 operator-facing 的 gate 收敛成 Web Action Card；agent/internal action 应保持在 Workflow Lens / debug detail 中作为观察信息。
+`allowed actions / denied actions` 是 workflow 内部控制面投影，不等同于 Coordinator Web 的 human todo。Coordinator 只能将明确 operator-facing 的 gate 收敛成 Needs-Me Gate Inbox / Focus Drawer gate item；agent/internal action 应保持在 Workflow Lens / debug detail 中作为观察信息。
 
 Coordinator 当前会从现有 protocol projection 派生 operator-only `workflow runtime observation`，用来表达当前 run 是 observing runtime、waiting operator gate、handoff ready 还是 recovery attention。它是 Web/daemon/operator summary 的解释层，不是新的状态机，也不改变 workflow protocol。
 

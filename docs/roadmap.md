@@ -156,20 +156,20 @@ P2 只预留接口和规划，不进入 V1 完成标准：
 
 ### 当前进度
 
-- 当前阶段：`Iteration 14: Agent lifecycle 与 SDK-first Provider Runtime` 的 `Slice 14.3: Agent event normalization and lifecycle observation` 已完成实现、验证、review 和 OpenSpec 归档，正在提交本轮改动。
-- 当前 OpenSpec change：`normalize-agent-provider-events` 已归档为 `openspec/changes/archive/2026-05-25-normalize-agent-provider-events/`；上一轮 `adopt-sdk-first-agent-provider-runtime` 已归档为 `openspec/changes/archive/2026-05-25-adopt-sdk-first-agent-provider-runtime/`；此前 `align-workflow-agent-lifecycle` 已归档为 `openspec/changes/archive/2026-05-25-align-workflow-agent-lifecycle/`。
+- 当前阶段：`Iteration 15: Web Developer Workbench V2` 的 Slice 15.1 已完成并归档；Web V2 shell、Run Matrix、Focus Drawer、Unified Composer 占位和 Debug Detail 已落地，正在提交收尾。
+- 当前 OpenSpec change：`rebuild-web-workbench-v2-shell` 已归档到 `openspec/changes/archive/2026-05-26-rebuild-web-workbench-v2-shell/`，当前无未归档 change。
 - 当前正式规格：本轮已同步 `agent-provider-runtime`、`coordinator-surface`、`daemon-runtime`、`observability` 和 `web-human-review-surface`；上一轮已同步 `operator-task-controls`、`workflow-protocol-adapter` 等相关规格。
-- 当前已落地事实：Web 已将 New Task 从侧栏小表单提升为完整任务下达页面，支持更长文本编辑、acceptance criteria、constraints、autonomy、workflow hint/default 说明和附件占位；Project Admin 已支持查看 project registry 摘要和注册 project，并明确 workspace init/cleanup hook 与 retention policy 仍是 disabled 预留，不执行脚本副作用；Task Cockpit 和 Workbench 已支持 `Run until blocked` operator loop，只循环调用 Core API 的 daemon tick 与 refresh/inspect，不自动执行 workflow action；Task Cockpit 和 Classic Debug 已补齐 create/update PR/MR、inspect review、request merge approval 的 operator actions，approve/reject/merge 仍由 Core gate 校验；Workflow Protocol Adapter 已适配 `@hetao-ai/workflow@0.6.10` 的 `progress` 与 `stageArtifacts` display projection，并把它们持久化到 workflow event payload，供 Web Workflow Lens 展示。
+- 当前已落地事实：旧 Web 已将 New Task 从侧栏小表单提升为完整任务下达页面，支持更长文本编辑、acceptance criteria、constraints、autonomy、workflow hint/default 说明和附件占位；Project Admin 已支持查看 project registry 摘要和注册 project，并明确 workspace init/cleanup hook 与 retention policy 仍是 disabled 预留，不执行脚本副作用；旧 Task Cockpit 和 Workbench 已支持 `Run until blocked` operator loop，只循环调用 Core API 的 daemon tick 与 refresh/inspect，不自动执行 workflow action；旧 Task Cockpit 和 Classic Debug 已补齐 create/update PR/MR、inspect review、request merge approval 的 operator actions，approve/reject/merge 仍由 Core gate 校验；Workflow Protocol Adapter 已适配 `@hetao-ai/workflow@0.6.10` 的 `progress` 与 `stageArtifacts` display projection，并把它们持久化到 workflow event payload，供 Web Workflow Lens 展示。
 - 当前设计修正：`add-web-workflow-action-loop` 已证明 Web -> Core -> workflow protocol action 的受控链路可用，但不应把所有 workflow `allowedActions` 都转成人工待办。Coordinator 后续应围绕 inner coding agent 生命周期观察和恢复：agent 仍在运行时只观察；agent 停止/失败/stalled/handoff 后，Core 再结合 agent evidence、workflow status/events、operation ledger 和 PR/MR/human facts 判断 owner。`materialize-change <change-id>` 等 agent/internal action 不进入 needs-me。
 - 当前 protocol 约束：本期不修改 `/Users/hetao/Documents/github/workflow`，也不要求 `workflow protocol` 新增字段。`agent.state`、`blocker.owner`、`operatorActions`、`agentActions` 只作为后续可选增强方向；Coordinator 侧先用保守 action classification 避免误报人工 gate。
-- 当前 Slice 14.1 已落地：共享层新增 workflow action classification；Core operator-facing workflow action helper 仅允许 `freeze-requirements`、`approve-planning-dossier`、review/merge approval 类 gate；API `POST /workflow-runs/:id/actions` 继续只进 Core helper，并拒绝 `materialize-change`、agent/internal 和 unknown/debug-only action；Web Task Cockpit / Workbench / Action Inbox / needs-me 只展示 operator-facing workflow gate；Workflow Lens debug/detail 仍展示 internal/debug action 和 action input hint；`Run until blocked` 对 internal/debug action 显示 observing，不把开发者拉进手动参数输入。
+- 当前 Slice 14.1 已落地：共享层新增 workflow action classification；Core operator-facing workflow action helper 仅允许 `freeze-requirements`、`approve-planning-dossier`、review/merge approval 类 gate；API `POST /workflow-runs/:id/actions` 继续只进 Core helper，并拒绝 `materialize-change`、agent/internal 和 unknown/debug-only action；旧 Web Task Cockpit / Workbench / Action Inbox / needs-me 只展示 operator-facing workflow gate；Workflow Lens debug/detail 仍展示 internal/debug action 和 action input hint；`Run until blocked` 对 internal/debug action 显示 observing，不把开发者拉进手动参数输入。
 - 当前 Slice 14.2 已落地：`CodexProvider` 和 `ClaudeCodeProvider` 默认走 SDK-first adapter，分别接入 `@openai/codex-sdk@0.133.0` 与 `@anthropic-ai/claude-agent-sdk@0.3.150`；现有 CLI subprocess 保留为 compatibility fallback；provider result 统一记录 implementation mode、permission profile、provider session id、provider version 和 raw event artifact ref；SDK raw events 由 bridge 直接追加到 transcript artifact，不进入 Coordinator Surface、agent tools 或 Core 状态机；Codex SDK import-only exports、`turn.failed` / `error` 和 raw event stdout buffer 风险已通过 review 修复。
-- 当前 Slice 14.3 已落地：Core 新增 provider-agnostic normalized agent event 与 agent activity summary；raw provider events 仍只保留在 transcript/provider event artifact，Core event payload 和 operator summary 只使用白名单摘要、last activity、failure kind 和 artifact ref；Coordinator Surface 只暴露 sanitized activity 摘要和 final response artifact，不暴露 provider session id、permission internals、raw JSONL 或完整 transcript；daemon/watchdog 可用 last activity 做 stalled observation，且可从 session transcript 做只读 normalization fallback，但不让 event stream 驱动 task done、PR readiness、merge、workflow handoff 或 workflow action；Web Task Cockpit / Classic Detail 展示 agent activity 摘要和 final response artifact，Action Inbox 不因 agent activity 生成 needs-me。
+- 当前 Slice 14.3 已落地：Core 新增 provider-agnostic normalized agent event 与 agent activity summary；raw provider events 仍只保留在 transcript/provider event artifact，Core event payload 和 operator summary 只使用白名单摘要、last activity、failure kind 和 artifact ref；Coordinator Surface 只暴露 sanitized activity 摘要和 final response artifact，不暴露 provider session id、permission internals、raw JSONL 或完整 transcript；daemon/watchdog 可用 last activity 做 stalled observation，且可从 session transcript 做只读 normalization fallback，但不让 event stream 驱动 task done、PR readiness、merge、workflow handoff 或 workflow action；旧 Web Task Cockpit / Classic Detail 展示 agent activity 摘要和 final response artifact，Action Inbox 不因 agent activity 生成 needs-me。
 - 当前可靠性补强：`/daemon/tick` 支持 operator-only task scope；Core daemon runtime 在 task scope 下先按 task 过滤 operations、workspaces、workflow runs、human requests 和 expired workspace/pr-merge locks，再应用 candidate limit，避免单任务 run-until-blocked 被其它任务的全局候选窗口 starvation；全局 run-until-blocked 仍是 operator convenience，不成为 Core 状态机。
-- 当前验证结果：`pnpm test`、`pnpm typecheck`、`pnpm --filter @coordinator/core build`、`pnpm --filter @coordinator/web build`、`openspec validate --all --strict` 和 `git diff --check` 均已通过。
-- 当前 review 结论：独立 subagent review 初审发现 Surface JSON 复用完整 `AgentActivitySummary`、独立 `provider-events.jsonl` 未参与 normalization、daemon active session last activity 依赖不存在的生产事件、failureKind 未收敛为固定分类；均已修复并复审无 must-fix。复审确认 daemon/outer Agent 未自动执行 workflow action，provider event 未驱动 task done、PR readiness、merge readiness 或 workflow handoff。
-- 下一阶段：进入 `Slice 14.4: Workflow runtime / inner agent lifecycle alignment`。
-- 下一阶段重点：在不修改 workflow protocol 的前提下继续对齐 inner agent lifecycle，保证现有 protocol 下不会把 agent/internal action 误报为 needs-me，并整理未来 workflow protocol 增强交接建议。
+- 当前验证结果：`pnpm test apps/web/src/workbench-v2-model.test.ts apps/web/src/workflow-actions.test.ts`、`pnpm typecheck`、`pnpm --filter @coordinator/web build`、`openspec validate rebuild-web-workbench-v2-shell --strict`、`openspec validate --all --strict` 和 `git diff --check` 均已通过；Chrome 桌面视口验证确认 Run Matrix / Focus Drawer 无重叠、无横向溢出、Debug Detail 默认折叠。
+- 当前 review 结论：Slice 15.1 独立 subagent review 未发现 Web 直接调用 workflow CLI、读写 `.workflow` private state、daemon/outer Agent 自动执行 workflow action，或把 `materialize-change` 变成人工 gate；review 指出的 needs-me 派生不一致、row 缺少 autonomy/按钮 aria-label、roadmap 进度不一致已修复。上一轮 AgentProvider event normalization review 结论仍然有效。
+- 下一阶段：提交 `rebuild-web-workbench-v2-shell` 后，进入 Slice 15.2。
+- 下一阶段重点：收敛 Web V2 Gate Inbox、runtime observation 和 run-until-blocked UX；继续确保 `materialize-change <change-id>` 等 agent/internal action 不进入 needs-me，daemon/outer Agent 不自动执行 workflow action。
 
 ### Iteration 12 后续切片顺序
 
@@ -346,213 +346,18 @@ delegate-workflow-profile-selection-to-runtime
 - tests 覆盖 outer agent surface 不再暴露 profile 选择参数。
 - tests 覆盖 daemon 仍只 inspect running workflow，不执行 workflow action。
 
-### Iteration 13: Web Developer Workbench
+### Iteration 13: Web Developer Workbench 历史基线
 
-Iteration 13 的目标是把 Web 从“单任务 operator debug 页面”升级为“开发者多工程、多任务协调工作台”。这个阶段的产品目标不是给 `workflow` 做一个漂亮状态页，而是让一个开发者能同时管理多个工程、多个任务，并把常规流程确认、异常筛选和 PR/MR 操作集中在 Web 中完成。
+Iteration 13 已完成第一版 Web operator surface、任务创建、Project Admin、Task Cockpit、Workflow Lens、PR/MR operator actions 和 `Run until blocked` 的基础落地。该阶段的设计以旧的 board/card/cockpit/debug 分层为主，为真实 Web smoke 和后续 workflow action loop 验证提供了必要基础。
 
-本阶段必须继续遵守第 4 节固定动作：每个实现迭代开始前重读根目录 `AGENTS.md`、`docs/AGENTS.md`、`docs/web-developer-workbench.md` 与相关专题文档；创建 OpenSpec change；实现和测试；交给独立 `gpt-5.5 high` subagent review；修复并复审到无必须修复项；归档 change；更新进度和已落地事实；提交。按用户确认，本阶段每完成一个部分后暂停，由用户确认后再进入下一部分。
+从 Web V2 开始，旧 Iteration 13 不再作为新页面结构和视觉方向的实现基线：
 
-#### Slice 13.0: workflow stage/substate handoff
-
-状态：已完成文档草案，作为历史交接与未来 workflow 工程输入保留；Iteration 14 当前版本不修改 workflow 工程，也不要求 workflow protocol 新增字段。
-
-产物：
-
-```text
-docs/workflow-stage-substate-handoff.md
-```
-
-目标：
-
-- 给 `/Users/hetao/Documents/github/workflow` 工程一份独立交接文档，说明为了 Web Workbench / Task Cockpit 展示 workflow 进度，未来可继续稳定 `stage`、`substate`、`gate`、`progress`、`stageArtifacts`、`allowedActions`、`deniedActions` 和 `actionInputs`；这些内容不作为 Iteration 14 当前实现前提。
-- 明确这些字段只用于 coordinator Web operator/debug 展示，不驱动 coordinator 外层状态机、PR readiness、done、merge，也不让 daemon 自动执行 workflow action。
-- 给 workflow 工程建议 OpenSpec change id、schema 示例、兼容性要求和 contract tests。
-
-边界：
-
-- 不修改 `/Users/hetao/Documents/github/workflow` 工程代码。
-- 不扩大 Coordinator Agent Surface。
-- 不新增 agent-facing workflow action tool。
-- 不改变 `docs/workflow-protocol.md` 已确认的 handoff 边界；真正外层推进仍依赖 `lifecycle + handoff + artifacts + recovery + summary`。
-
-验收建议：
-
-- `docs/AGENTS.md` 索引包含该 handoff 文档。
-- 文档能直接交给 workflow 工程 Agent 创建并执行对应 OpenSpec change。
-- 文档明确兼容字段缺失：缺失时 Web 显示 unknown/none 或退回 summary/artifacts，而不是失败。
-
-#### Slice 13.1: Developer Workbench 信息架构与多任务入口
-
-建议 OpenSpec change：
-
-```text
-improve-web-developer-workbench
-```
-
-目标：
-
-- 新增 Web Workbench 入口，作为开发者日常使用的主页面；老的密集 task detail 页面保留为 Classic Debug / Raw Detail。
-- 具体信息架构、页面布局、Action Inbox、task card、视觉方向和数据边界以 `docs/web-developer-workbench.md` 为准；本切片开始前必须重点阅读其中第 1-7、11-13 节。
-- Workbench 支持按 project、task status、operator attention、human request、PR/MR/review/merge 状态理解当前所有任务。
-- 页面默认回答“我现在同时管理哪些工程和任务、哪些在跑、哪些卡住、哪些需要我处理、下一步最安全的动作是什么”。
-- 新增 Action Inbox，集中展示待处理 human request、merge approval、PR/MR operator action、project config blocker 和高风险 recovery attention。
-- 新增任务卡片视图，卡片展示 project、title、task status、current blocker、outer flow 粗进度、workflow profile/stage/substate 简短摘要、PR/MR 状态、关键 artifact refs。
-- 保留全局 refresh / daemon tick 入口，但不把 raw timeline、surface JSON、operation ledger 默认铺满主页面。
-
-上层语义：
-
-- Web Workbench 是开发者的任务调度与确认中心。
-- CLI 继续作为补充工具，适合 smoke、排查和自动化脚本；真实用户主路径应尽量在 Web 完成。
-- Workbench 展示“多个任务的局面”，Task Cockpit 展示“单个任务的细节”。
-
-推荐页面结构：
-
-```text
-Global Command Bar
-Project Rail
-Workbench Board
-Action Inbox
-System Debug Drawer
-```
-
-可能需要的实现：
-
-- 前端路由或轻量 view state：`Workbench`、`Task Cockpit`、`Project Admin`、`Classic Debug`。
-- 基于现有 `GET /projects`、`GET /tasks`、`GET /tasks/:taskId` 先完成第一版多任务聚合；如性能或信息不足，再补只读 operator summary API。
-- 新增 Web 侧派生模型，把 task detail 转成 board/card/inbox 所需的展示结构。
-- 引入轻量 UI 依赖时优先考虑 `lucide-react`；流程图可在 13.2 再引入 `@xyflow/react`，避免 13.1 范围过大。
-
-边界：
-
-- 不改变 Core 状态机。
-- 不新增 daemon 自动动作。
-- 不新增 agent-facing tools。
-- 不把 diagnosis/operator summary 变成新的真相源；它只能从已持久化 task、project、attempt、workspace、workflow run、PR/MR、human request、event、operation 和 artifact refs 派生。
-- 不在前端重建业务状态机；前端只能做展示派生和 action routing。
-
-验收建议：
-
-- Web 能展示所有 project 和近期 tasks，并能按 project/status/needs-me 快速定位任务。
-- Pending human request 与 merge approval 能在 Action Inbox 中出现。
-- 点击任务卡片能进入单任务 Cockpit 或 Classic Debug。
-- Classic Debug 老页面仍可访问，便于排查。
-- 测试或浏览器验证覆盖：空状态、多 project、多状态任务、pending human request、merge approval、operator attention。
-- `pnpm --filter @coordinator/web build`、相关 API/Core tests、`pnpm typecheck` 通过。
-
-#### Slice 13.2: Task Cockpit 与 Workflow Lens
-
-建议 OpenSpec change：
-
-```text
-add-task-cockpit-workflow-lens
-```
-
-目标：
-
-- 新增单任务 Task Cockpit 页面，承接 Workbench 中点击任务后的主要详情体验。
-- 具体 Task Cockpit、Workflow Lens、Outer Flow Map、Debug Drawer、视觉方向和 workflow 展示边界以 `docs/web-developer-workbench.md` 为准；本切片开始前必须重点阅读其中第 1-5、8、11-13 节。
-- 展示外层流程：`Task -> Plan -> Attempt -> Workspace -> Workflow -> PR/MR -> Review -> Merge -> Done`。
-- 将 Workflow 作为 Task Cockpit 的核心观察区域，展示 `profile`、`lifecycle`、`stage`、`substate`、`gate`、`handoff`、`allowedActions`、`deniedActions`、`actionInputs`、`stageArtifacts` 和 latest workflow events。
-- 接入 workflow operator-only status/artifacts/events API，用于展示 workflow 内部进度和 evidence。
-- 将 raw surface、raw timeline、operation ledger、provider/protocol inspect、完整 event payload 等调试信息放入折叠 Debug Drawer。
-- 页面视觉方向采用 `industrial mission control`：深色石墨底、冷青 running、琥珀 waiting、人类确认强调、红色 blocked/failed、绿色 done；Workflow 节点视觉权重大于其他节点。
-
-上层语义：
-
-- Task Cockpit 用来理解单个任务“现在走到了哪里”和“为什么需要我介入”。
-- Workflow Lens 用来观察 workflow 内部执行位置，但不让 coordinator 接管 workflow 内部控制面。
-- Debug Drawer 服务工程排查，不是普通用户的默认阅读路径。
-
-推荐页面结构：
-
-```text
-Task Header
-Outer Flow Map
-Workflow Lens
-Evidence / Actions Panel
-Debug Drawer
-```
-
-可能需要的实现：
-
-- `TaskCockpitView`、`OuterFlowMap`、`WorkflowLens`、`EvidencePanel`、`DebugDrawer` 等前端组件。
-- 可引入 `@xyflow/react` 做交互式流程图；如果引入，应只用于 Web 展示，不把通用 DAG 引入 Core。
-- Web 侧为 workflow status 增加查询和缓存；如果 workflow status 缺失 `progress/stageArtifacts`，使用现有 `summary/handoff/artifacts/events` graceful fallback。
-- 将 `allowedActions/actionInputs` 放在 operator/debug 区域，避免用户误以为 daemon 会自动执行这些 action。
-
-边界：
-
-- `stage/substate/gate` 只做展示，不驱动 coordinator PR readiness、done、merge 或 task status 推断。
-- `allowedActions/actionInputs` 只展示，不触发 daemon 自动 action。
-- 不新增 agent-facing workflow action tool。
-- 不读取 `.workflow` private state；所有 workflow 信息都来自 protocol status/artifacts/events。
-- 不让流程图变成 Core 的通用 DAG engine；它只是 UI projection。
-
-验收建议：
-
-- Task Cockpit 能在不同 task 状态下展示外层流程节点状态。
-- Workflow running 且无 handoff 时，页面明确显示 coordinator 正在只读观察 workflow，下一步等待 handoff 或 operator/debug action。
-- Workflow status 缺少 stage/substate/progress/stageArtifacts 时页面仍可用。
-- PR/MR、human request、merge approval 的主要操作仍经 API/Core runtime 执行。
-- Browser/Playwright 或等价截图验证桌面和窄屏布局无重叠、文本不溢出、核心节点清晰。
-- `pnpm --filter @coordinator/web build`、相关 tests、`pnpm typecheck` 通过。
-
-#### Slice 13.3: Task Creation、Project Admin 与 Run Until Blocked
-
-建议 OpenSpec change：
-
-```text
-complete-web-task-project-operations
-```
-
-目标：
-
-- 重做任务创建体验，让 Web 成为真实任务下达入口，而不是小表单。
-- 具体 New Task、Project Admin、Run Until Blocked、workspace hook 预留、附件上传边界以 `docs/web-developer-workbench.md` 为准；本切片开始前必须重点阅读其中第 1-3、6-13 节。
-- 新增 Project Admin 页面，承接工程注册、provider/workflow/agent 配置、workspace root 与未来 workspace hook 预留。
-- 增加全局和单任务 `Run until blocked`，让用户可以从 Web 触发真实流程并尽量走到最远。
-- 补齐 Web 侧常用 PR/MR operator actions：create/update/inspect-review/request-approval/approve/reject/merge 的入口按当前 Core/API 能力逐步展示。
-- 预留附件/图片上传与任务上下文 artifact 能力，但如当前 artifact/API 模型不足，第一版只做设计和安全占位，不落不完整副作用。
-
-任务创建页面目标：
-
-- 支持选择 project。
-- 支持较大文本编辑区，用于描述需求、背景、验收标准和约束。
-- 支持 autonomy 选择。
-- 支持可选 human explicit workflow selection 或提示词内描述；默认仍委托 workflow runtime 自主选择。
-- 预留图片/文件 drop zone；实现前需先确认 artifact upload contract、路径安全、大小限制和存储位置。
-- 支持 `Create task` 与 `Create and run until blocked` 两种入口。
-
-Project Admin 目标：
-
-- 支持 Web 注册 project，对齐 `docs/project-registry.md`：repo path、default branch 确认、provider kind、workflow launcher、outer/inner agent defaults、workspace root。
-- 展示 project health：git/provider/workflow/agent/pr provider 的已配置/缺失状态。
-- 预留 workspace policy：create worktree preflight、init script hook、cleanup script hook、retention policy。
-- init/cleanup hook 第一版只做配置设计或只读占位；除非另开明确安全执行 contract，不执行任意脚本。
-
-Run Until Blocked 目标：
-
-- 全局模式：循环触发 daemon tick + refresh，推进安全队列直到没有可安全推进项或出现需要人类介入。
-- 单任务模式：聚焦当前 task 循环 tick + refresh，直到该 task 达到 terminal、waiting human、waiting merge approval、workflow running no handoff、operator attention、failed 或其他高风险停止条件。
-- 每轮 tick 后展示 actions summary 和停止原因。
-
-边界：
-
-- `Run until blocked` 只调用 daemon tick、refresh 和只读 inspect，不执行 workflow action。
-- 不绕过 Core policy gate，不直接写 DB。
-- 不让前端自己判断 merge readiness；merge 仍经 Core 重新 inspect 和 approval snapshot 校验。
-- 工程 init/cleanup hook 不在本切片直接执行任意脚本；如果要落地执行，必须另开 change 设计 sandbox、审批、审计、失败恢复和 path 安全。
-- 文件/图片上传不应绕过 artifact path 规则；若落地，需要明确 size/type/path/cleanup contract。
-
-验收建议：
-
-- Web 能完成 project register、manual task create、create-and-run 起步流程。
-- `Run until blocked` 在 workflow running no handoff 时停止，并明确显示 daemon inspect-only 边界。
-- `Run until blocked` 在 pending human request 或 merge approval 时停止并展示对应 action card。
-- Project Admin 能展示已有 project 配置和注册新 project；workspace hook 字段若只是预留，UI 必须标明尚未执行副作用。
-- PR/MR operator actions 在对应 Core gate 满足时可见，不满足时给出不可操作原因。
-- Browser/Playwright 或等价验证覆盖创建任务长文本、工程注册表单、run-until-blocked 停止状态、窄屏布局。
-- `pnpm --filter @coordinator/web build`、`pnpm --filter @coordinator/api build`、相关 tests、`pnpm typecheck`、`openspec validate --all --strict` 通过。
+- 旧 `Task Cockpit` 的主要信息迁移到 `Focus Drawer`。
+- 旧侧栏 `Action Inbox` 收敛为 `Needs-Me Gate Inbox`，只展示真正 operator-facing gate。
+- 旧 task card board 改为 `Run Matrix` 行式结构。
+- 旧 `Classic Debug` 默认能力迁入 `Workflow Lens` / `Debug Detail Drawer`。
+- 旧 `industrial mission control` 深色视觉方向被 `Operational Paper + Instrument Status` 取代。
+- 后续新 Web 实现与验收以 `docs/web-developer-workbench.md` 的 Web V2 方案为准。
 
 ### Iteration 14: Agent lifecycle 与 SDK-first Provider Runtime
 
@@ -663,6 +468,114 @@ Iteration 14 的目标是把 Coordinator 从“轮询 workflow allowed action �
 - 真实 Web flow 到 `materialize-change <change-id>` 时不进入 needs-me，只展示 debug/detail 或 observing。
 - 当前已通过局部 tests 覆盖 shared observation、operator summary、surface 收窄、Web needs-me 和 daemon internal action observation；最终仍需全量 validate/build 与 subagent review。
 - subagent review 必查 docs 总体设计、过度设计、AgentProvider SDK raw event 泄漏、daemon 自动 workflow action 和 workflow protocol 越界。
+
+### Iteration 15: Web Developer Workbench V2
+
+Iteration 15 的目标是把 Web 从 Iteration 13 的旧 board/card/cockpit 结构重构为桌面端 `Run Matrix + Focus Drawer + Unified Composer`。本阶段以 `docs/web-developer-workbench.md` 为唯一产品与视觉基线，不考虑移动端或手机屏幕适配。
+
+本阶段必须继续遵守第 4 节固定动作。每个实现切片开始前必须阅读根目录 `AGENTS.md`、`docs/AGENTS.md`、`docs/web-developer-workbench.md`、`docs/workflow-agent-lifecycle-handoff.md`、`docs/workflow-protocol.md`、`docs/daemon.md`、`docs/coordinator-surface.md`、`docs/observability.md` 与相关专题文档；创建 OpenSpec change；实现和测试；交给独立 subagent review，明确检查是否符合 `docs/` 总体设计心智、是否过度设计、是否污染 Core/Daemon/Workflow protocol/AgentProvider/Web 分层、是否让 daemon 或 outer Agent 自动执行 workflow action、是否把 raw provider events 或 workflow debug 字段变成新状态机。
+
+本阶段拆成 3 个切片，尽量少但保持可验证和可回退。
+
+#### Slice 15.1: Web V2 shell, Run Matrix and Focus Drawer
+
+建议 OpenSpec change：
+
+```text
+rebuild-web-workbench-v2-shell
+```
+
+目标：
+
+- 从头建立新的桌面端 Web V2 单页 shell：Command Bar、Run Matrix、Focus Drawer、Unified Composer 占位、Debug Detail 的基础布局。
+- 用 Run Matrix 替代旧 task card board；每个 task 一行，展示 project/title、outer lifecycle rail、workflow stage rail、stage/substate chip、owner/mode、heartbeat、needs-me pin 和 focus action。
+- 用 Focus Drawer 承接旧 Task Cockpit 的主要信息：task summary、workflow run summary、agent activity summary、operator gate panel、recent evidence、attachments shelf、Workflow Lens 入口。
+- 删除旧 Workbench board、Task Cockpit、Classic Debug、New Task、Project Admin 页面结构；必要 operator/debug 能力只保留在 Web V2 单页的 Focus Drawer / Debug Detail 中。
+- 使用 `Operational Paper + Instrument Status` 视觉方向：浅色、高密度、细线轨道、克制状态色和状态驱动动效。
+
+边界：
+
+- 不改变 Core 状态机。
+- 不新增 daemon 自动动作。
+- 不修改 workflow protocol。
+- 不读取 `.workflow` private state。
+- 不把 `allowedActions.length > 0` 作为 needs-me 触发条件。
+- 不做移动端适配；桌面视口是验收目标。
+
+验收建议：
+
+- Web 默认首页是 Run Matrix，不是单 task debug 页面或 marketing/landing 页面。
+- 多 task 行能同时展示外层 lifecycle rail 和 workflow stage/substate rail。
+- 选中 task 后 Focus Drawer 展示当前 workflow/agent/operator gate 摘要。
+- Debug Detail 默认折叠，raw timeline/surface/operation/provider event 不默认占据主界面。
+- `data-task-id`、主要按钮 `aria-label` 和稳定测试定位已补齐。
+- Browser/Playwright 截图验证桌面视口无重叠、无明显文本溢出、轨道尺寸稳定。
+- `pnpm --filter @coordinator/web build`、`pnpm typecheck` 和相关 tests 通过。
+
+#### Slice 15.2: Gate Inbox, lifecycle observation and run-until-blocked UX
+
+建议 OpenSpec change：
+
+```text
+align-web-v2-gate-inbox-runtime-observation
+```
+
+目标：
+
+- 将旧 Action Inbox 收敛为 `Needs-Me Gate Inbox`：只展示 pending human request、merge approval、PR/MR review/conflict、operator-facing workflow gate、project/provider blocker 和 Core recovery attention。
+- Web V2 全面使用 Core 提供的 workflow action classification 与 runtime observation；`materialize-change <change-id>`、alignment checks、inspect/resume、实现推进类 action 只进入 Workflow Lens / Debug Detail。
+- 调整 Run Matrix row、Focus Drawer 和 `Run until blocked` banner 的 owner/mode 表达，区分 `observing-runtime`、`waiting-operator-gate`、`handoff-ready`、`recovery-attention`、`terminal`、`no-candidate`。
+- task-scoped run banner 只显示当前 task 的结果；global run 结果不污染当前 Focus Drawer。
+- 真正 operator gate 的 action 继续通过 API/Core runtime 提交，Core 校验 stateVersion、classification、allowed/denied/actionInputs 和 operation/idempotency。
+
+边界：
+
+- Web 不直接执行 workflow CLI。
+- Web 不自动执行 workflow action。
+- daemon/outer Agent 不自动确认 human gate。
+- stage/substate 只用于展示，不推导 PR readiness、done 或 merge。
+- raw SDK/provider event 只作为 observation 摘要和 artifact ref，不驱动业务完成。
+
+验收建议：
+
+- tests 覆盖 agent/internal action 不进入 Needs-Me Gate Inbox。
+- tests 覆盖 operator-facing workflow gate 仍可在 Focus Drawer 中确认，并由 Core 受控调用 workflow action。
+- tests 覆盖 `Run until blocked` 在 internal action 或 running inner agent 场景显示 observing，不要求开发者填内部参数。
+- 真实 Web smoke 至少走到 `materialize-change <change-id>`，确认它不进入 needs-me。
+- `pnpm --filter @coordinator/web build`、相关 Core/API tests、`pnpm typecheck` 通过。
+
+#### Slice 15.3: Unified Composer, local attachments and real-flow hardening
+
+建议 OpenSpec change：
+
+```text
+add-web-v2-composer-attachments-real-flow
+```
+
+目标：
+
+- 实现 Unified Composer：未选 task 时创建新 task；选中 task 且存在 pending human request/operator gate 时作为回复/确认入口；选中 task 且无 pending gate 时作为 task note 或 follow-up context。
+- 实现本地附件第一版：Web 上传图片/文件，API 保存到 Coordinator 管控的 task attachment root，DB 记录 metadata，operator summary/task brief 暴露 artifact refs；workspace/agent 场景通过受控路径或 refs 可见。
+- 附件路径遵守 artifact root 和 path containment，不直接写 project repo 根目录，不读写 `.workflow` private state，不把大附件内容塞进 Coordinator Surface prompt。
+- 收敛旧 New Task 页面和旧 task note/answer 入口到 Composer；保留必要 Project Admin 入口，但不在本切片落地 workspace hook 副作用。
+- 做真实 Web flow hardening：新建 task、上传附件或安全占位、run until blocked、观察 workflow stage/substate、确认 operator gate、进入 handoff/PR/MR 或下一停点。
+
+边界：
+
+- 不实现移动端。
+- 不执行 workspace init/cleanup 任意脚本。
+- 不修改 workflow protocol。
+- 不把附件内容变成 Core 状态判断依据。
+- 不扩大 Coordinator Agent Surface；复杂信息仍优先写 artifact，并通过 refs 暴露。
+
+验收建议：
+
+- Composer 在三类上下文下行为正确：新建 task、回复 gate、追加上下文。
+- 附件有 size/type/path/cleanup 或 retention 的最小 contract 与 tests。
+- agent/task summary 只看到附件 refs 和受控路径，不看到大块二进制内容或 raw file payload。
+- 真实 Web smoke 尽量走到最远，并记录是否进入 requirements gate、implementation/internal action、handoff 或 recovery attention。
+- Browser/Playwright 截图验证桌面视口下 Composer、attachments shelf、Focus Drawer 无重叠。
+- `pnpm --filter @coordinator/web build`、`pnpm --filter @coordinator/api build`、相关 tests、`pnpm typecheck`、`openspec validate --all --strict` 通过。
 
 ### 重点关注事项
 

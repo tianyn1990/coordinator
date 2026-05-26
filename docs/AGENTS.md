@@ -120,7 +120,7 @@ Symphony 的核心经验会被吸收为：
 - [observability.md](./observability.md)
   - 事件、日志、artifact、UI 调试视图和审计。
 - [web-developer-workbench.md](./web-developer-workbench.md)
-  - Web 多工程、多任务开发者工作台的产品心智、信息架构、页面布局和交互边界。
+  - Web V2 多工程、多任务开发者工作台的产品心智、Run Matrix / Focus Drawer / Unified Composer 信息架构、视觉方向和交互边界。
 - [research.md](./research.md)
   - 已调研社区方案与文章、可吸收点和拒绝吸收点。
 - [roadmap.md](./roadmap.md)
@@ -146,7 +146,7 @@ Coordinator 管多个 workflow run 如何被观察、恢复、确认和收口。
 workflow / inner coding agent 管单个代码工作单元内部如何执行。
 ```
 
-Coordinator 可以持续只读 inspect、记录 agent/provider/workflow 事件、展示运行进度和恢复建议；但当 inner coding agent 仍在运行时，不应因为 workflow `allowedActions` 或 `actionInputs` 出现就打断开发者。只有在 workflow handoff、human request、merge approval、provider failure、operator attention 或明确 operator gate 出现时，Web 才应把事项放进 needs-me / Action Inbox。
+Coordinator 可以持续只读 inspect、记录 agent/provider/workflow 事件、展示运行进度和恢复建议；但当 inner coding agent 仍在运行时，不应因为 workflow `allowedActions` 或 `actionInputs` 出现就打断开发者。只有在 workflow handoff、human request、merge approval、provider failure、operator attention 或明确 operator gate 出现时，Web 才应把事项放进 needs-me / Gate Inbox。
 
 当前 `workflow protocol` 保持既有契约不变。`agent.state`、`blocker.owner`、`operatorActions`、`agentActions` 等字段只作为未来可选 protocol 增强方向；本期 Coordinator 侧必须用保守分类和现有状态信息避免把 `materialize-change <change-id>` 等内部动作错误升级为人工 gate。
 

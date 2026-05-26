@@ -1,544 +1,541 @@
-# Web Developer Workbench
+# Web Developer Workbench V2
 
-> 状态：Iteration 13 设计总纲  
-> 适用范围：Web 多工程、多任务工作台、Task Cockpit、任务创建、Project Admin、Run Until Blocked。  
-> 目的：为后续 Iteration 13 的多个 OpenSpec change 提供统一产品心智、信息架构、UI 布局、交互边界和验收方向。
+> 状态：Web V2 设计基线
+> 适用范围：桌面端 Web 工作台、多 workflow 管理、Run Matrix、Focus Drawer、Unified Composer、本地附件、Workflow Lens、Needs-Me Gate Inbox。
+> 非适用范围：本方案暂不考虑移动端、手机屏幕或窄屏适配；第一版只面向桌面开发者工作台。
+> 目的：统一后续 Web 重构的产品心智、信息架构、视觉方向、交互边界、数据边界和验收标准。
 
-## 1. 产品定位
+## 1. 核心定位
 
-`coordinator` Web 的核心目标不是展示单个 workflow 的内部状态，而是帮助一个开发者同时管理多个工程、多个任务。
+`coordinator` Web 不是 `workflow` 的遥控器，也不是单个 workflow run 的漂亮 debug 页面。
 
-单独使用 `workflow` 时，开发者通常被固定在一个工作流上下文里，需要自己持续盯着阶段、确认、PR/MR、异常和下一步。`coordinator` 增加外层智能层和 Web 工作台的目的，是把这些跨任务的常规确认、异常筛选、PR/MR 操作和进度观察集中起来，降低开发者在多个任务之间来回切换的成本。
-
-因此 Web 的主入口必须是：
-
-```text
-多工程、多任务开发者工作台
-```
-
-而不是：
+Web 的长期定位是：
 
 ```text
-单任务 debug timeline
+多工程、多任务、多 workflow 的开发者管理台、观察台、恢复台和人工 gate 收件箱。
 ```
 
-CLI 仍然重要，但它是 smoke、排查、脚本化和高级 operator 的补充工具。真实日常使用路径应优先从 Web 完成。
+它应该帮助开发者同时管理多个任务，回答：
 
-## 2. 用户心智
+- 哪些任务仍在运行。
+- 哪些任务已经进入真正需要我的 gate。
+- 哪些任务失败、stalled 或需要恢复。
+- 哪些任务已经 handoff 到 PR/MR、review 或 merge。
+- 哪些任务只是 workflow / inner coding agent 内部推进，不需要我介入。
+- 我可以从哪里继续给任务补充上下文、图片或文件。
 
-用户打开 Web 时，最想知道的是：
+Web 不应该把 workflow 内部所有 `allowedActions` 转成人工按钮。`materialize-change <change-id>`、alignment checks、inspect/resume、实现推进类 action 默认属于 workflow runtime / inner coding agent 的内部推进信息，只能进入 Workflow Lens / Debug Detail，不进入 `Needs me`。
 
-- 我现在管理了哪些工程。
-- 每个工程有哪些任务正在执行。
-- 哪些任务正在顺利推进。
-- 哪些任务需要我确认。
-- 哪些任务卡在 workflow、PR/MR、review、merge 或 project config。
-- 哪些异常需要我处理。
-- 我能安全地让系统继续跑到哪里。
-- 我应该在哪个任务上投入注意力。
+## 2. 设计原则
 
-用户进入单个任务时，才需要知道：
+### 2.1 观察优先
 
-- 这个任务外层流程走到哪里。
-- workflow 内部 stage / substate / gate 是什么。
-- 当前有哪些 evidence artifact。
-- 是否有 human request、PR/MR、merge approval。
-- 如果异常，底层 timeline、surface、operation ledger 和 protocol inspect 是什么。
+默认界面先展示事实和状态，不急着要求开发者操作。
 
-## 3. 页面结构
+Coordinator 可以持续 inspect/reconcile，展示 heartbeat、stage、substate、agent activity、handoff 和 recovery observation；但当 inner coding agent 仍在运行时，Web 不因为看到 workflow `allowedActions/actionInputs` 就中断用户。
 
-Iteration 13 应形成四类页面或视图：
+### 2.2 人工 gate 收敛
+
+只有真正 operator-facing 的事项进入 `Needs me`：
+
+- requirements freeze。
+- planning dossier approval。
+- review approval。
+- human request。
+- PR/MR review 或 conflict。
+- merge approval。
+- Core recovery decision 明确要求 operator attention。
+- project/provider 配置阻塞。
+
+### 2.3 内部动作降噪
+
+agent/internal action 默认不在主界面制造待办。
+
+典型内部动作包括：
+
+- `materialize-change <change-id>`。
+- `run-alignment-checks`。
+- repair/current-change。
+- workflow runtime inspect/resume。
+- 需要 inner coding agent 基于内部上下文选择参数的推进动作。
+
+这些动作可以在 Workflow Lens 的 debug/detail 区展示名称、参数 hint、当前 stage/substate 和 latest event，但不要求 Web operator 填写参数。
+
+### 2.4 单入口输入
+
+开发者输入不应被拆成很多严格区域。
+
+Web 应提供统一的 `Unified Composer`：
+
+- 未选中 task 时，用于创建新 task。
+- 选中 task 且存在 pending human request/operator gate 时，用于回复或确认上下文。
+- 选中 task 但无 pending gate 时，用于追加 task note、补充上下文或上传附件。
+- 支持文本、图片和文件。
+
+### 2.5 图形和结构优先
+
+主界面尽量用轨道、节点、pin、chip、heartbeat、流动线和断点表达状态。文字只用于必要标签、原因摘要和可点击操作，不放解释性填空内容。
+
+每个展示元素都必须回答一个实际问题：
 
 ```text
-Workbench
-Task Cockpit
-Project Admin
-Classic Debug
+它是谁？
+它在哪个阶段？
+它是否还在跑？
+它是否需要我？
+它的下一步 owner 是谁？
+我能否安全继续？
 ```
 
-### 3.1 Workbench
+### 2.6 桌面优先
 
-Workbench 是默认首页和主工作区。
+本期不做移动端或手机屏幕适配。
 
-职责：
+实现时只需要保证常见桌面宽度下无重叠、无溢出、状态可读。窄屏可以保持基础可用或提示需要更宽视口，但不作为验收重点。
 
-- 多 project 概览。
-- 多 task 概览。
-- Action Inbox。
-- 快速创建任务入口。
-- 全局 safe queue 推进入口。
-- 进入 Task Cockpit / Project Admin / Classic Debug。
+## 3. 总体信息架构
 
-布局建议：
+新 Web 主入口由四个核心区域组成：
 
 ```text
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│ Global Command Bar                                                           │
-│ Coordinator  Search tasks/projects...        [New Task] [Run safe queue]     │
-├───────────────┬──────────────────────────────────────────────┬───────────────┤
-│ Project Rail  │ Workbench Board                              │ Action Inbox  │
-│               │                                              │               │
-│ All     18    │ ┌──────────────────────────────────────────┐ │ Needs me  3   │
-│ coordinator 7 │ │ Mission Strip                             │ │               │
-│ workflow    5 │ │ running 8 / blocked 3 / review 2 / done 5 │ │ ┌───────────┐ │
-│ fe-app      6 │ └──────────────────────────────────────────┘ │ │ │Approve MR │ │
-│               │                                              │ │ │Task #42   │ │
-│ + Register    │ ┌──────────────┐ ┌──────────────┐            │ │ └───────────┘ │
-│ Project       │ │ Needs Human  │ │ Running      │            │ │ ┌───────────┐ │
-│               │ │ task cards   │ │ task cards   │            │ │ │Clarify req│ │
-│               │ └──────────────┘ └──────────────┘            │ │ │Task #51   │ │
-│               │ ┌──────────────┐ ┌──────────────┐            │ │ └───────────┘ │
-│               │ │ Workflow     │ │ PR / Review  │            │ │               │
-│               │ │ active       │ │ waiting      │            │ │               │
-│               │ └──────────────┘ └──────────────┘            │ │               │
-├───────────────┴──────────────────────────────────────────────┴───────────────┤
-│ Collapsed System Drawer: daemon ticks / failures / raw event stream           │
+│ Command Bar                                                                  │
+│ Project/Profile/Search                 Queue  Needs me  New task             │
+├───────────────────────────────────────────────────────────────┬──────────────┤
+│ Run Matrix                                                     │ Focus Drawer │
+│                                                               │              │
+│ task row: title | outer rail | workflow rail | owner | pin    │ task focus   │
+│ task row: title | outer rail | workflow rail | owner | pin    │ gates        │
+│ task row: title | outer rail | workflow rail | owner | pin    │ lens         │
+│                                                               │ artifacts    │
+├───────────────────────────────────────────────────────────────┴──────────────┤
+│ Unified Composer                                                             │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 3.2 Task Cockpit
+### 3.1 Command Bar
 
-Task Cockpit 是单任务主要详情页。
+Command Bar 是轻量操作入口，不做大面积导航。
 
-职责：
+必须包含：
 
-- 展示外层执行链路。
-- 展示 workflow 内部 stage/substate/gate。
-- 展示 evidence artifacts。
-- 展示当前 action cards。
-- 承接 PR/MR、human request、merge approval。
-- 将底层 debug 信息折叠到 drawer。
+- project filter。
+- profile / provider filter。
+- task search。
+- queue 状态。
+- `Needs me` 数量。
+- `New task`。
+- refresh / run queue 入口。
 
-布局建议：
+不应包含：
+
+- 解释性欢迎文案。
+- marketing hero。
+- 大型统计卡片。
+- 和当前操作无关的空白填充。
+
+### 3.2 Run Matrix
+
+Run Matrix 是默认主视图，也是多 workflow 管理的核心。
+
+每个 task 一行，不使用大面积卡片堆叠。行内信息应压缩成可扫描结构：
 
 ```text
-┌────────────────────────────────────────────────────────────────────────────┐
-│ Task Header                                                                 │
-│ title / project / status / blocker     [Run until blocked] [Pause] [Debug] │
-├────────────────────────────────────────────────────────────────────────────┤
-│ Outer Flow                                                                  │
-│ Task ─ Plan ─ Attempt ─ Workspace ─ Workflow ─ PR ─ Review ─ Merge ─ Done   │
-├──────────────────────────────────────────────┬─────────────────────────────┤
-│ Workflow Lens                                │ Evidence / Actions          │
-│ requirements ✓                               │ Pending human request       │
-│ design/spec ✓                                │ PR approval                 │
-│ implementation ●                             │ Merge button                │
-│   substate: test-align                       │ Key artifacts               │
-│ review ○                                     │                             │
-│ handoff ○                                    │                             │
-├──────────────────────────────────────────────┴─────────────────────────────┤
-│ Debug Drawer: timeline / surface / operation ledger / workflow events       │
-└────────────────────────────────────────────────────────────────────────────┘
+project / title
+outer lifecycle rail
+workflow stage rail
+stage / substate chip
+agent / workflow owner
+heartbeat / updated at
+needs-me pin
+open/focus action
 ```
 
-### 3.3 Project Admin
-
-Project Admin 管工程级配置。
-
-职责：
-
-- 注册工程。
-- 查看和修复 provider/workflow/agent 配置。
-- 配置 workspace root。
-- 展示 project health。
-- 预留 workspace init / cleanup hook。
-
-布局建议：
+外层 lifecycle rail 表达 Coordinator 管理链路：
 
 ```text
-Project Admin
-├─ Registry
-│  ├─ repo path
-│  ├─ default branch
-│  ├─ provider kind
-│  ├─ workflow launcher
-│  └─ agent defaults
-├─ Workspace Policy
-│  ├─ workspace root
-│  ├─ create worktree preflight
-│  ├─ init script hook  预留
-│  ├─ cleanup script hook  预留
-│  └─ retention policy  预留
-└─ Provider Health
-   ├─ git
-   ├─ PR/MR provider
-   ├─ workflow
-   └─ agent provider
+Task -> Plan -> Workspace -> Workflow -> PR -> Review -> Merge
 ```
 
-### 3.4 Classic Debug
-
-Classic Debug 保留老页面能力。
-
-职责：
-
-- raw surface。
-- raw timeline。
-- operation ledger。
-- recovery timeline。
-- provider/protocol inspect。
-- full artifact refs。
-
-普通用户不应默认进入 Classic Debug，但排查时必须可达。
-
-## 4. 信息分层
-
-Web 信息必须分三层：
-
-### 4.1 Decision Layer
-
-默认展示，服务决策：
-
-- 当前状态。
-- 当前 blocker。
-- next owner。
-- needs me。
-- safe action。
-- run-until-blocked 停止原因。
-
-### 4.2 Evidence Layer
-
-按需展示，服务理解：
-
-- execution plan。
-- workflow summary。
-- stage artifacts。
-- PR/MR URL。
-- validation run。
-- human question/answer artifact。
-- review summary。
-
-### 4.3 Debug Layer
-
-默认折叠，服务排查：
-
-- surface JSON。
-- raw timeline。
-- operation ledger。
-- recovery decision。
-- provider/protocol inspect。
-- full event payload summary。
-
-不要把 Debug Layer 默认铺在主页面上。
-
-## 5. Task Card 信息模型
-
-Workbench 的 task card 应展示：
+workflow stage rail 表达 workflow 内部位置：
 
 ```text
-project
-title
-task status
-current blocker
-next owner
-outer flow coarse progress
-workflow profile / stage / substate
-workflow gate state
-PR/MR status
-human request / merge approval indicator
-latest safe action
-key artifact refs
-updated at
+requirements -> planning -> implementation -> review -> handoff
 ```
 
-示例：
+stage/substate 必须展示，因为当前 protocol 已能提供这些状态。默认展示方式是短 chip，例如：
 
 ```text
-┌──────────────────────────────────────────────┐
-│ fe-app                         running       │
-│ 修复空提交评分异常                            │
-│                                              │
-│ Coordinator: workspace ready                 │
-│ Workflow: implementation / test-align        │
-│ PR: none                                     │
-│                                              │
-│ ▰▰▰▰▱▱  Workflow active                      │
-│                                              │
-│ next: waiting workflow handoff               │
-│ artifacts: execution-plan.md, summary.md     │
-└──────────────────────────────────────────────┘
+implementation / materialize-change
+requirements / freeze-requirements
+review / collect-evidence
 ```
 
-如果 workflow stage/substate 尚未由 workflow 工程稳定输出，则 card 必须 graceful fallback：
+如果 protocol 缺失 stage/substate，必须 graceful fallback：
 
 ```text
-Workflow: running / stage unknown
+workflow active / stage unknown
 ```
 
-## 6. Action Inbox
+### 3.3 Focus Drawer
 
-Action Inbox 聚合需要人介入的事项。
+Focus Drawer 是选中 task 后的右侧详情区域。它替代旧的单任务主页面心智，让开发者在多任务列表上下文中查看细节。
 
-优先级建议：
+Drawer 内包含：
 
-1. merge approval。
-2. human request。
-3. PR/MR review or conflict。
-4. project config blocker。
-5. operator attention / recovery required。
-6. failed or unknown task。
+- task title / project / profile。
+- 当前 owner/mode。
+- workflow run summary。
+- agent activity summary。
+- operator gate panel。
+- recent evidence。
+- local attachments。
+- Workflow Lens / Debug Detail 入口。
 
-Inbox card 应显示：
+Focus Drawer 不默认铺开 raw timeline、完整 transcript、operation ledger 或复杂 JSON。这些内容只通过 Debug Detail 展开。
+
+### 3.4 Unified Composer
+
+Unified Composer 是开发者和 Coordinator 交互的主入口。
+
+输入模型：
 
 ```text
-action kind
+text
+attachments
+selected task context
+intent derived by current selection and pending gate
+```
+
+行为规则：
+
+| 当前上下文 | Composer 默认语义 |
+| --- | --- |
+| 无选中 task | 创建新 task |
+| 选中 task + pending human request | 回复 human request |
+| 选中 task + operator gate | 提交 gate 所需的人类确认或补充说明 |
+| 选中 task + 无 pending gate | 追加 task note / follow-up context |
+| 选中 task + failed/stalled | 补充恢复说明或触发 operator recovery intent |
+
+Composer 只调用 API/Core runtime，不直接写 DB，不绕过 Core policy gate。
+
+## 4. Needs-Me Gate Inbox
+
+`Needs me` 是人工 gate 收件箱，不是 workflow action queue。
+
+进入 `Needs me` 的条件必须来自 Core 派生或持久化事实：
+
+- pending human request。
+- pending merge approval。
+- PR/MR review required 或 conflict。
+- operator-facing workflow gate。
+- project/provider config blocker。
+- recovery attention。
+- failed / unknown high-risk state。
+
+不得进入 `Needs me` 的条件：
+
+- 仅有 agent/internal `allowedActions`。
+- 仅有 `actionInputs` 参数 hint。
+- inner coding agent 仍在运行。
+- raw provider event 出现某个 token 或自然语言片段。
+- stage/substate 表达某个内部阶段，但没有 handoff 或 operator gate。
+
+`Needs me` item 的最小展示：
+
+```text
+kind
 task title
 project
 reason
 primary action
-secondary action
-link to cockpit/debug
+secondary inspect/debug action
 ```
 
-Inbox action 必须调用 API/Core runtime，不直接改 DB。
+## 5. Workflow Lens
 
-## 7. Task Creation 设计
+Workflow Lens 是解释 workflow 内部状态的调试/观察层，不是默认操作面板。
 
-任务创建应是重点页面，不应是窄表单。
+它可以展示：
 
-目标：
+- profile。
+- lifecycle。
+- stage。
+- substate。
+- gate。
+- progress。
+- stage artifacts。
+- allowed / denied actions。
+- action input hints。
+- handoff。
+- latest workflow events。
 
-- 支持大量文本输入。
-- 支持结构化描述需求、背景、验收标准、约束。
-- 支持 project/context 选择。
-- 支持 autonomy 选择。
-- 支持 human explicit workflow selection 的入口，但默认委托 workflow runtime 自动选择。
-- 预留图片/文件上传。
+它必须遵守：
 
-布局建议：
+- `stage/substate/gate` 只做展示，不驱动 PR readiness、done、merge 或外层 task 状态迁移。
+- `allowedActions/actionInputs` 只作为 operator/debug hint，不自动进入 Needs-Me Gate Inbox。
+- handoff 才是 Coordinator 消费 workflow 结果的边界。
+- 所有 workflow 信息必须来自 workflow protocol status/artifacts/events，不读取 `.workflow` private state。
+
+## 6. Action Classification
+
+当前不修改 `/Users/hetao/Documents/github/workflow`，也不要求 workflow protocol 新增字段。
+
+Coordinator 侧使用保守分类：
+
+| 分类 | 示例 | Web 处理 |
+| --- | --- | --- |
+| operator-facing | `freeze-requirements`、`approve-planning-dossier`、`approve-review`、merge/approval gate | 进入 Needs-Me Gate Inbox 和 Focus Drawer gate panel |
+| agent/internal | `materialize-change`、`run-alignment-checks`、repair/current-change、inspect/resume、实现推进类 action | 只进 Workflow Lens / Debug Detail |
+| debug-only | protocol inspect、raw action hint、临时诊断动作 | 只进 Debug Detail |
+| unknown | 未分类 action | 保守按 debug-only 处理，不进入 needs-me |
+
+未来如果 workflow protocol 增加 `operatorActions`、`agentActions`、`blocker.owner`、`agent.state`，Web 可以在独立 change 中适配；当前版本不得依赖这些未来字段，也不得因字段缺失退回“所有 allowedActions 都是人工待办”。
+
+## 7. Run Until Blocked
+
+`Run until blocked` 的语义是：
 
 ```text
-┌──────────────────────────────────────────────────────────────┐
-│ New Task                                                     │
-├───────────────────────┬──────────────────────────────────────┤
-│ Project / Context     │ Task Brief Editor                    │
-│ Project select        │ Title                                │
-│ Branch / base info    │ Markdown editor                      │
-│ Autonomy              │ Acceptance criteria                  │
-│ Optional workflow     │ Constraints                          │
-│ Attachments           │ Images / files drop zone             │
-│                       │                                      │
-│                       │ [Create task] [Create and run]       │
-└───────────────────────┴──────────────────────────────────────┘
+尽量推进 task / queue 到真正停点。
 ```
 
-附件/图片上传不能在没有 artifact upload contract 时临时落地。若实现，需要先设计：
+它不是：
+
+```text
+看到 workflow allowedActions 就停下来让开发者点按钮。
+```
+
+允许行为：
+
+- 调用 daemon tick。
+- refresh task / summary。
+- 只读 inspect workflow / agent / PR/MR 状态。
+- 展示每轮推进摘要。
+- 在 Core 判断的停点解释原因。
+
+禁止行为：
+
+- Web 自动执行 workflow action。
+- daemon/outer Agent 自动确认 human gate。
+- 根据 stage/substate 推导 PR ready。
+- 根据 raw provider event 推导 done/merge/handoff。
+- 前端直接写 DB。
+
+停止原因必须区分：
+
+| 停止原因 | 展示语义 |
+| --- | --- |
+| `observing-runtime` | workflow / inner agent 仍在推进，当前不需要 operator |
+| `waiting-operator-gate` | 需要 developer 明确确认 |
+| `handoff-ready` | 进入 PR/MR、review 或 merge flow |
+| `recovery-attention` | Core 判断需要 operator 处理恢复 |
+| `terminal` | task 已完成、取消或失败收口 |
+| `no-candidate` | 当前没有可安全推进的任务 |
+| `max-ticks` | 达到本次 Web 触发的安全上限 |
+
+task-scoped run 的 banner 只能使用当前 task 的结果。global run 可以展示全局 queue 结果，但不得用历史 task 的失败污染当前 focus task 的状态。
+
+## 8. 本地附件
+
+本期需要支持开发者向 task 补充图片和文件，但不修改 workflow protocol。
+
+短期模型：
+
+```text
+Web upload
+-> API 保存到 Coordinator 管控的 task attachment root
+-> DB 记录 attachment metadata
+-> task brief / operator summary 暴露 artifact refs
+-> workspace 创建或 agent 启动时以受控路径 materialize
+-> outer / inner agent 通过受控路径和 refs 读取
+```
+
+建议路径语义：
+
+```text
+task artifacts:
+  attachments/<attachment-id>/<safe-name>
+
+workspace visible path:
+  _task/coordinator/attachments/<attachment-id>/<safe-name>
+```
+
+必须设计并验证：
 
 - size limit。
-- type allowlist。
-- artifact root。
-- path safety。
-- cleanup。
-- how agent sees or does not see attachment refs。
-
-## 8. Workflow Lens
-
-Workflow Lens 展示 workflow 内部进度，但不改变 coordinator 边界。
-
-展示字段：
-
-```text
-profile
-lifecycle
-stage
-substate
-gate.state
-gate.reason
-progress.label
-progress.summary
-allowedActions
-deniedActions
-actionInputs
-stageArtifacts
-handoff
-latest events
-```
-
-边界：
-
-- `stage/substate/gate` 只做展示。
-- `allowedActions/actionInputs` 只做 operator/debug 展示。
-- `handoff` 才是 coordinator 消费 workflow 结果的边界。
-- daemon 不根据 workflow debug 字段自动执行 workflow action。
-- outer Agent 不根据 workflow debug 字段选择 workflow action。
-
-Workflow Action Panel 只能展示真正 operator-facing 的 gate。不要再使用：
-
-```text
-allowedActions.length > 0 => Web Action Card
-```
-
-应改为：
-
-```text
-operator-facing gate => Web Action Card / Action Inbox
-agent/internal action => Workflow Lens debug/detail
-unknown action => 保守展示为 debug/detail，不进入 needs me
-```
-
-在当前 `workflow protocol` 不变的前提下，Coordinator 侧先使用保守分类：`freeze-requirements`、`approve-planning-dossier` 等明确人工确认可以进入 Panel；`materialize-change <change-id>`、对齐检查、实现推进、inspect/resume 类 action 默认不进入 needs-me，也不要求 Web operator 填内部参数。
-
-Task Cockpit / Workbench 应优先使用 Core 提供的 operator-only `workflow runtime observation` 摘要来表达 owner 和 mode：
-
-```text
-observing-runtime => workflow / inner agent 仍在运行或只暴露 internal/debug action
-waiting-operator-gate => 只展示 operator-facing action card
-handoff-ready => 进入 PR/MR/review/merge 或 human handoff flow
-recovery-attention => 由 Core recovery decision 决定是否进入 operator attention
-```
-
-该 observation 是展示层派生，不是新状态机；Web 不应反向把它写回 DB，也不应因 observation 自动调用 workflow action endpoint。
-
-## 9. Run Until Blocked
-
-`Run until blocked` 是 Web 真实流程体验的关键。
-
-它做：
-
-- 循环调用 daemon tick。
-- 刷新 Web detail/summary。
-- 记录每轮 actions summary。
-- 在停止条件命中时停止并解释原因。
-
-它不做：
-
-- 不执行 workflow action。
-- 不绕过 Core policy gate。
-- 不自动 approve merge。
-- 不从前端推断 PR readiness。
-- 不直接写 DB。
-
-停止条件：
-
-```text
-terminal task
-pending human request
-pending merge approval
-workflow running without handoff and no operator-facing gate
-inner agent completed/failed/stalled and owner needs operator decision
-operator attention required
-project config blocker
-PR/MR waiting review
-merge conflict
-failed / unknown high-risk state
-no candidate actions
-max tick count reached
-```
-
-页面必须把停止原因说清楚。例如：
-
-```text
-仍在观察：workflow / inner agent 正在运行，或当前只有 agent/internal action，尚未产生 handoff；当前不需要 operator 操作。
-已停止：需要 operator gate / human request / merge approval / recovery attention。
-```
-
-Run Until Blocked 的 task-scoped banner 应明确使用当前 task 的 observation；global run 只能展示全局 queue 结果，不能用历史 task 的失败覆盖当前打开 task 的 detail。`observing-runtime` 是一个安全停止解释，不代表失败，也不代表开发者需要输入 workflow 内部参数。
-
-## 10. Project Admin 与 Workspace Hook 预留
-
-Project Admin 必须对齐 `docs/project-registry.md`。
-
-第一版可落地：
-
-- repo path。
-- name。
-- provider override。
-- confirmed default branch。
-- workflow launcher。
-- outer/inner agent defaults。
-- workspace root。
-
-未来预留：
-
-- workspace init script hook。
-- workspace cleanup script hook。
-- retention policy。
-- provider health repair。
-
-Hook 执行是高风险能力。除非另开设计并确认：
-
-- sandbox。
-- approval。
+- MIME / extension allowlist。
 - path containment。
-- secret handling。
-- audit event。
-- retry/recovery。
-- failure cleanup。
+- filename normalization。
+- duplicate handling。
+- cleanup / retention。
+- metadata event。
+- agent-visible path 是否存在。
 
-否则 Iteration 13 只做 UI 占位或配置草案，不执行脚本。
+禁止：
 
-## 11. 视觉方向
+- 直接写入 project repo 根目录。
+- 读写 `.workflow` private state。
+- 让附件路径绕过 artifact root。
+- 把大附件内容塞进 Coordinator Surface prompt。
+- 让 raw image/file 自动进入 Core 状态判断。
 
-采用：
+## 9. 视觉方向
+
+主风格采用：
 
 ```text
-industrial mission control
+Operational Paper + Instrument Status
 ```
 
-原则：
+含义：
 
-- 简洁但有工业控制台气质。
-- 深色石墨背景。
-- 冷青表示 running。
-- 琥珀表示 waiting / needs human。
-- 红色表示 blocked / failed。
-- 绿色只用于 done。
-- 适度线框、轨道、节点、状态灯。
-- Workflow 节点在 Task Cockpit 中视觉权重大于其他节点。
-- Debug 信息克制折叠。
-- 不使用通用 SaaS 卡片堆叠感。
-- 不使用一眼 AI 感的紫色渐变。
-- 不为了酷炫牺牲可读性。
+- Operational Paper：浅色、纸面感、细线网格、高密度、低噪音、长期使用不疲劳。
+- Instrument Status：只吸收运行状态动效语言，例如 flowing rail、heartbeat、amber pin、failure breakpoint。
 
-可用依赖：
+视觉约束：
 
-- `lucide-react`：状态和操作 icon。
-- `@xyflow/react`：Task Cockpit 外层流程图，若引入，只作为 UI projection。
-- 暂不引入重型 UI framework。
+- 不做深色监控大屏作为默认主界面。
+- 不做 marketing hero。
+- 不做大面积装饰插图。
+- 不用紫色渐变、orb、bokeh、纯装饰背景。
+- 不用层层嵌套 card。
+- 不用手机优先布局。
+- 不把空区域用说明文案填满。
 
-## 12. 数据与 API 原则
+状态色建议：
 
-前端可以聚合和派生展示模型，但不能成为真相源。
+| 状态 | 色彩语义 |
+| --- | --- |
+| running | muted blue / cyan 细线流动 |
+| needs me | amber pin |
+| failed / blocked | red breakpoint |
+| done | green short line / check marker |
+| internal/debug | gray chip |
+| stale/unknown | neutral dashed marker |
 
-允许：
+动效约束：
 
-- 从 `/projects`、`/tasks`、`/tasks/:taskId` 聚合 board/card/inbox。
-- 调用 workflow status/artifacts/events operator-only API 展示 Workflow Lens。
-- 调用 Core API 执行 human answer、merge approval、merge、task control、daemon tick。
-- 后续补只读 summary API，以减少 N+1 和 payload 噪音。
+- 动效只表达真实状态。
+- running 才有流动线。
+- active agent 才有 heartbeat。
+- operator gate 才有 amber pin。
+- failed/stalled 才有红色断点。
+- 尊重 `prefers-reduced-motion`。
+- 无状态变化时保持静态。
 
-不允许：
+## 10. 组件拆分建议
 
-- 前端直接写 SQLite。
-- 前端重建 Core 状态机。
-- 前端自行判断 merge readiness。
-- 前端根据 stage/substate 推导 PR ready。
-- 前端根据 allowedActions 自动执行 workflow action。
-- 前端根据 allowedActions 自动生成 needs-me Action Card。
+前端实现可以围绕以下组件拆分：
 
-## 13. 迭代引用要求
+```text
+WorkbenchShell
+CommandBar
+RunMatrix
+RunMatrixRow
+OuterLifecycleRail
+WorkflowStageRail
+StatusPin
+FocusDrawer
+GatePanel
+AgentActivityStrip
+WorkflowLens
+AttachmentShelf
+UnifiedComposer
+DebugDetailDrawer
+```
 
-Iteration 13 的每个 OpenSpec change 开始前，除 `AGENTS.md`、`docs/AGENTS.md` 和相关专题文档外，还必须阅读本文档。
+组件职责必须保持展示层边界：
 
-对应关系：
+- 可以聚合 API 返回的数据。
+- 可以做 UI projection。
+- 可以根据 Core 提供的 classification/observation 展示 gate。
+- 不重建 Core 状态机。
+- 不自行判断 merge readiness。
+- 不自行执行 workflow action。
+- 不把 raw event/transcript 默认展开。
 
-- Slice 13.1 重点阅读：第 1-7、11-13 节。
-- Slice 13.2 重点阅读：第 1-5、8、11-13 节。
-- Slice 13.3 重点阅读：第 1-3、6-13 节。
+## 11. API 与数据原则
 
-如果实现中发现本文档与已有 `docs/` 边界冲突，应先暂停并与用户确认。
+第一版尽量复用已有 API：
+
+- `GET /projects`
+- `GET /tasks`
+- `GET /tasks/:taskId`
+- `GET /tasks/:taskId/summary`
+- `POST /tasks`
+- `POST /daemon/tick`
+- human request answer API
+- PR/MR operator APIs
+- workflow operator-only status/artifacts/events APIs
+
+如出现 N+1 或 payload 噪音，可以新增只读 summary endpoint，但必须满足：
+
+- 从持久化事实派生。
+- 不触发外部副作用。
+- 不成为新真相源。
+- 不把 raw provider JSONL、完整 transcript、lock token、operation 大对象暴露给普通 Web projection。
+
+## 12. 旧页面清理
+
+旧的 `Task Cockpit`、侧栏 `Action Inbox`、`Classic Debug`、独立 `New Task` 页面和独立 `Project Admin` 页面不再作为新 Web 的产品基线。Web V2 应从新的单页工作台开始实现，而不是在旧页面上继续迁移式打补丁。
+
+迁移规则：
+
+- 旧 `Task Cockpit` 的核心信息迁入 `Focus Drawer`。
+- 旧 `Action Inbox` 收敛为 `Needs-Me Gate Inbox`，只展示真正 operator gate。
+- 旧 `Classic Debug` 页面删除；必要 debug 能力迁入 `Workflow Lens` / `Debug Detail Drawer`，默认折叠。
+- 旧 task card board 改为 `Run Matrix` 行式结构。
+- 旧 workflow action panel 不再由 `allowedActions.length > 0` 触发。
+- 旧 `New Task` 和 `Project Admin` 页面删除；后续由 `Unified Composer` 和更轻量的 project controls 承接需要保留的入口。
+
+历史文档中如果提到 `Task Cockpit` 或 `Action Inbox`，应理解为旧实现或历史切片名称；新的实现与验收以本文档为准。
+
+## 13. 验收标准
+
+### 13.1 产品验收
+
+- 首页是 Run Matrix，而不是单 task debug 页或 landing page。
+- 一屏能同时扫描多个 task 的 running / needs-me / failed / handoff 状态。
+- workflow stage/substate 在行内可见，但不占据主视觉。
+- `materialize-change <change-id>` 不进入 Needs-Me Gate Inbox。
+- 真正 operator gate 能在 Focus Drawer 中明确确认。
+- Unified Composer 可用于创建 task、回复 gate、追加上下文和上传附件。
+- Debug 信息默认折叠。
+- 页面没有解释性填空区域。
+
+### 13.2 边界验收
+
+- Web 不直接写 SQLite。
+- Web 不执行 workflow CLI。
+- Web 不读取 `.workflow` private state。
+- Web 不根据 `allowedActions/actionInputs` 自动生成人工待办。
+- Web 不根据 stage/substate 推导 PR ready、done 或 merge。
+- daemon/outer Agent 不自动确认 human gate。
+- PR/MR/review/merge 继续走既有 Core gate。
+
+### 13.3 技术验收
+
+- 桌面视口下文本不溢出、状态不重叠、轨道尺寸稳定。
+- 运行状态动效不导致布局抖动。
+- 重要按钮有 `aria-label` 和可测试定位。
+- Run Matrix row 有稳定 `data-task-id`。
+- 支持 `prefers-reduced-motion`。
+- `pnpm --filter @coordinator/web build`、`pnpm typecheck` 和相关 tests 通过。
+- 真实 Web smoke 至少覆盖：创建 task、run until blocked、workflow stage/substate 展示、internal action 不进 needs-me、operator gate 可确认、附件可上传或安全占位。
 
 ## 14. 非目标
 
-Iteration 13 不做：
+本方案暂不做：
 
+- 移动端或手机屏幕适配。
 - 通用 DAG engine。
-- 新的 Core 状态机。
+- 新 Core 状态机。
 - 自动 workflow action executor。
 - 自动 merge approval。
-- 任意脚本 hook 执行。
-- 完整文件上传系统，除非另行设计 artifact upload contract。
+- 任意 workspace hook 执行。
 - 远程 worker fleet 管理。
 - 多租户权限系统。
+- 完整 workflow protocol ownership 字段改造。
 
-这些能力可以预留入口，但不能在没有设计和确认的情况下落地副作用。
+这些能力可以在未来独立设计，但不得混入 Web V2 第一轮实现。

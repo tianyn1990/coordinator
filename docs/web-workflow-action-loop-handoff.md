@@ -5,7 +5,7 @@
 > 当前仓库：`/Users/hetao/Documents/github/coordinator`  
 > 目标读者：继续实现 Web 驱动真实流程、Workflow action 确认闭环的 agent / 开发者
 
-> 更新说明：本文记录 `add-web-workflow-action-loop` 前后的历史判断。2026-05-25 后，`docs/workflow-agent-lifecycle-handoff.md` 对本文中“所有 allowedActions 都按人类确认处理”的策略做了修正：Coordinator 不应成为 workflow 遥控器；Web 只展示真正 operator-facing gate，`materialize-change <change-id>` 等 agent/internal action 只进入 Workflow Lens debug/detail。本期不修改 workflow protocol。
+> 更新说明：本文记录 `add-web-workflow-action-loop` 前后的历史判断。2026-05-25 后，`docs/workflow-agent-lifecycle-handoff.md` 对本文中“所有 allowedActions 都按人类确认处理”的策略做了修正：Coordinator 不应成为 workflow 遥控器；Web 只展示真正 operator-facing gate，`materialize-change <change-id>` 等 agent/internal action 只进入 Workflow Lens debug/detail。本期不修改 workflow protocol。2026-05-26 后，新 Web UI 以 `docs/web-developer-workbench.md` 的 Web V2 方案为准；本文中 `Task Cockpit`、`Action Panel` 等术语仅表示历史实现或旧切片语境。
 
 ## 1. 当前目标
 

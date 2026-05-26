@@ -21,7 +21,7 @@
 - `coordinator` 不映射 workflow 私有 stage/substate 来判断业务完成。
 - `coordinator` 只通过 `workflow protocol` 消费 workflow 声明的 handoff、status、artifact、events。
 - workflow `allowedActions`、`deniedActions` 和 `actionInputs` 不是 Coordinator 的自动执行计划，也不是 Web needs-me 的充分条件。
-- Coordinator 只能把明确 operator-facing 的 gate 收敛成 Web Action Card；`materialize-change <change-id>`、对齐检查、实现推进、inspect/resume 等 agent/internal action 默认只进入 debug/display。
+- Coordinator 只能把明确 operator-facing 的 gate 收敛成 Needs-Me Gate Inbox / Focus Drawer gate item；`materialize-change <change-id>`、对齐检查、实现推进、inspect/resume 等 agent/internal action 默认只进入 debug/display。
 - Coordinator 可以派生 operator-only workflow runtime observation 来解释 owner/mode；该摘要不得成为 task/PR/merge 完成判断，也不得扩大 Coordinator Agent Surface。
 - 当前版本不要求修改 `workflow protocol`；`operatorActions`、`agentActions`、`blocker.owner`、`agent.state` 等只作为未来可选协议增强。
 

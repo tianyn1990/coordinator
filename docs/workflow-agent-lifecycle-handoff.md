@@ -131,7 +131,7 @@ flowchart TD
   E --> F["调用 workflow protocol status / events / handoff"]
   F --> G{"Coordinator Core 综合评估"}
   G -->|agent 可继续| H["自动 resume / continue inner agent<br/>或展示非强制 Continue agent"]
-  G -->|真正 human gate| I["Web Action Card"]
+  G -->|真正 human gate| I["Web gate item"]
   G -->|handoff ready| J["进入 PR/MR / review / merge gate"]
   G -->|失败或不一致| K["诊断 / recovery / 人工处理"]
 ```
@@ -196,7 +196,7 @@ Inner coding agent 是单个 workflow run 内部的执行者。
 
 ### 5.4 Web Workbench
 
-Web 的核心产品定位仍然是多工程、多任务工作台。
+Web 的核心产品定位仍然是多工程、多任务工作台。新的 Web V2 方案以 `docs/web-developer-workbench.md` 为准：默认主视图是 Run Matrix，单任务详情进入 Focus Drawer，开发者输入统一收敛到 Unified Composer；本期不考虑移动端或手机屏幕适配。
 
 Web 应该默认展示：
 
@@ -206,7 +206,7 @@ Web 应该默认展示：
 - 哪些任务失败或需要恢复。
 - 当前 workflow stage/substate/progress 作为 explainability。
 
-Web 不应该默认把 workflow 内部所有 action 都变成 developer 的待办。
+Web 不应该默认把 workflow 内部所有 action 都变成 developer 的待办。`Needs me` 是人工 gate 收件箱，不是 workflow action queue；agent/internal action 只进入 Workflow Lens / Debug Detail。
 
 ## 6. 推荐 protocol 增强方向（未来）
 
@@ -254,7 +254,7 @@ Web 不应该默认把 workflow 内部所有 action 都变成 developer 的待�
 
 | 字段 | 语义 | Coordinator 处理 |
 | --- | --- | --- |
-| `operatorActions` | 真正需要开发者确认的 action | Web Action Card |
+| `operatorActions` | 真正需要开发者确认的 action | Needs-Me Gate Inbox / Focus Drawer gate item |
 | `agentActions` | inner agent 可继续处理的 workflow action | 不进入 human inbox，可由 workflow / inner agent 推进 |
 | `blocker.owner=operator` | 人工 gate | needs me |
 | `blocker.owner=agent` | agent 还能继续或需要恢复 | resume / continue agent |
@@ -271,13 +271,13 @@ Web 不应该默认把 workflow 内部所有 action 都变成 developer 的待�
 不要再用：
 
 ```text
-allowedActions.length > 0 => Web Action Card
+allowedActions.length > 0 => Web gate item
 ```
 
 建议改为：
 
 ```text
-operator-facing action => Web Action Card
+operator-facing action => Needs-Me Gate Inbox / Focus Drawer gate item
 agent/internal action => Workflow Lens debug/detail 展示，不进入 needs me
 ```
 
