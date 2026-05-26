@@ -39,7 +39,9 @@ function createRepoFixture(): string {
   return repoPath;
 }
 
-function createFakeGitRunner(options: { existingBranch?: string; dirty?: boolean; currentBranch?: string } = {}) {
+function createFakeGitRunner(
+  options: { existingBranch?: string; dirty?: boolean; dirtyStatus?: string; currentBranch?: string } = {}
+) {
   const calls: string[][] = [];
   const runner: WorkspaceGitRunner = (args) => {
     calls.push(args);
@@ -62,7 +64,7 @@ function createFakeGitRunner(options: { existingBranch?: string; dirty?: boolean
       return `${options.currentBranch ?? "coordinator/task-1/attempt-1"}\n`;
     }
     if (args[0] === "status" && args[1] === "--porcelain") {
-      return options.dirty ? " M file.ts\n" : "";
+      return options.dirtyStatus ?? (options.dirty ? " M file.ts\n" : "");
     }
     return "";
   };
@@ -459,6 +461,10 @@ describe("workspace manager", () => {
         dirty: resumeWorkspacePreflight(context, {
           workspaceId: created.workspace.id,
           gitRunner: createFakeGitRunner({ currentBranch: "coordinator/task-1/attempt-1", dirty: true }).runner
+        }),
+        workflowPrivate: resumeWorkspacePreflight(context, {
+          workspaceId: created.workspace.id,
+          gitRunner: createFakeGitRunner({ currentBranch: "coordinator/task-1/attempt-1", dirtyStatus: "?? .workflow/\n" }).runner
         })
       };
     });
@@ -467,6 +473,7 @@ describe("workspace manager", () => {
     expect(result.branch.checks.find((check) => check.name === "branch")?.summary).toContain("branch mismatch");
     expect(result.dirty.status).toBe("blocked");
     expect(result.dirty.checks.find((check) => check.name === "git-status")?.summary).toContain("dirty");
+    expect(result.workflowPrivate.status).toBe("ok");
   });
 
   it("resume preflight path containment 失败后不继续执行 git", () => {
@@ -627,6 +634,39 @@ describe("workspace manager", () => {
     expect(result.dirty.kind).toBe("dirty_unknown");
     expect(result.manifest.kind).toBe("manifest_mismatch");
     expect(result.malformedManifest.kind).toBe("manifest_mismatch");
+  });
+
+  it("recovery inspect 忽略 workflow runtime 私有状态目录", () => {
+    const databasePath = createMigratedDatabase();
+    const repoPath = createRepoFixture();
+    const workspaceRoot = mkdtempSync(join(tmpdir(), "coordinator-workspaces-"));
+
+    const result = withDatabase(databasePath, (context) => {
+      const project = createProject(context, {
+        id: "project-workflow-private-status",
+        name: "coordinator",
+        repoPath,
+        defaultBranch: "main",
+        workspaceRoot
+      });
+      const task = createTask(context, { id: "task-workflow-private-status", projectId: project.id, title: "workspace" });
+      const attempt = createAttempt(context, { id: "attempt-workflow-private-status", projectId: project.id, taskId: task.id });
+      const created = createAttemptWorkspace(context, {
+        attemptId: attempt.id,
+        owner: "worker-1",
+        gitRunner: createFakeGitRunner({ currentBranch: "coordinator/task-workflow-private-status/attempt-workflow-private-status" }).runner
+      });
+
+      return inspectWorkspaceRecovery(context, {
+        workspaceId: created.workspace.id,
+        gitRunner: createFakeGitRunner({
+          currentBranch: "coordinator/task-workflow-private-status/attempt-workflow-private-status",
+          dirtyStatus: "?? .workflow/\n"
+        }).runner
+      });
+    });
+
+    expect(result.kind).toBe("safe");
   });
 
   it("stale workspace lock token 更新 workspace 会被 fencing 拒绝", () => {

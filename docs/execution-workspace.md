@@ -128,6 +128,8 @@ merge conflict：
 
 如果 workspace 已经 dirty，但变化是预期的，resume preflight 可以继续；如果 dirty 来源不明，应进入 handoff 或 operator review。
 
+`repo/.workflow/` 是 workflow runtime 私有状态目录。Workspace recovery / resume preflight 可以在 git status 中按路径忽略该目录，避免 workflow 正常运行产生的私有状态被误判为未知脏改动；但 Coordinator 仍不得读取、解析或修改 `.workflow` 内部文件内容。
+
 ## 7. Workspace 状态
 
 建议状态：

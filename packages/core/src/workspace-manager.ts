@@ -421,7 +421,7 @@ export function resumeWorkspacePreflight(
   });
   pushCheck(checks, "git-status", () => {
     const status = gitRunner(["status", "--porcelain"], { cwd: repoPath }).trim();
-    if (status.length > 0) {
+    if (hasNonWorkflowPrivateGitStatus(status)) {
       throw new WorkspaceManagerError("workspace dirty，需要 operator review 或 handoff");
     }
     return "git status clean。";
@@ -521,7 +521,7 @@ export function inspectWorkspaceRecovery(
     return fail("branch_mismatch", "workspace branch mismatch");
   }
   const status = classifyGit(() => gitRunner(["status", "--porcelain"], { cwd: repoPath }).trim());
-  if (status.length > 0) {
+  if (hasNonWorkflowPrivateGitStatus(status)) {
     return fail("dirty_unknown", "workspace dirty with unknown source");
   }
 
@@ -883,6 +883,21 @@ function requireNonEmpty(value: string, fieldName: string): string {
 
 function runGit(args: string[], options: { cwd: string }): string {
   return execFileSync("git", args, { cwd: options.cwd, encoding: "utf8" });
+}
+
+function hasNonWorkflowPrivateGitStatus(status: string): boolean {
+  // `.workflow/` 是 workflow runtime 的私有状态目录；Coordinator 只忽略路径本身，不读取其中内容。
+  return status
+    .split(/\r?\n/)
+    .map((line) => line.trimEnd())
+    .filter((line) => line.length > 0)
+    .some((line) => !isWorkflowPrivateStatusLine(line));
+}
+
+function isWorkflowPrivateStatusLine(line: string): boolean {
+  const path = line.length > 3 ? line.slice(3).trim() : line.trim();
+  const normalizedPath = path.includes(" -> ") ? path.split(" -> ").pop()?.trim() ?? path : path;
+  return normalizedPath === ".workflow" || normalizedPath.startsWith(".workflow/");
 }
 
 type OwnershipManifest = {
