@@ -652,6 +652,35 @@ textarea {
   gap: 8px;
 }
 
+.gate-evidence {
+  display: grid;
+  gap: 5px;
+  border-left: 3px solid var(--amber);
+  background: #f8f4e8;
+  padding: 7px 8px;
+}
+
+.gate-evidence.ready {
+  border-left-color: var(--green);
+  background: #eef6ef;
+}
+
+.gate-evidence p {
+  max-height: 140px;
+  overflow: auto;
+  margin: 0;
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
+.gate-evidence span {
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
 .gate-card.attention {
   border-color: rgba(177, 59, 43, 0.45);
   background: var(--red-soft);

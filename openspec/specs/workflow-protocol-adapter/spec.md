@@ -128,7 +128,7 @@
 
 ### Requirement: Operator workflow action 必须由 Core 基于 latest status 校验
 
-系统 SHALL 提供 operator-facing workflow action helper，用于把 Web/operator intent 转换为受控 `workflow protocol action` 调用。helper MUST 在执行副作用前重新 inspect workflow run latest status，并校验 expected workflow run state version、action classification、allowed action、denied action 与 action input hint；校验失败时不得调用 `workflow protocol action`。系统 MUST 将 `materialize-change`、`run-alignment-checks`、repair/current-change、inspect/resume、实现推进类和未知 action 视为非 operator-facing，除非后续规格显式允许。
+系统 SHALL 提供 operator-facing workflow action helper，用于把 Web/operator intent 转换为受控 `workflow protocol action` 调用。helper MUST 在执行副作用前重新 inspect workflow run latest status，并校验 expected workflow run state version、action classification、allowed action、denied action、action input hint 与 SDK-backed gate evidence；校验失败时不得调用 `workflow protocol action`。系统 MUST 将 `materialize-change`、`run-alignment-checks`、repair/current-change、inspect/resume、实现推进类和未知 action 视为非 operator-facing，除非后续规格显式允许。
 
 #### Scenario: operator-facing 无参 action 被执行
 
@@ -136,6 +136,7 @@
 - **AND** latest workflow status 返回 lifecycle active、handoff unavailable、allowedActions 包含 `freeze-requirements`
 - **AND** action classification 为 operator-facing
 - **AND** actionInputHints 中该 action 没有 required arg
+- **AND** SDK-backed gate evidence 为 ready 且 canSubmit 为 true
 - **THEN** Core 调用既有 workflow action adapter 执行 `workflow protocol action`
 - **AND** 系统记录 `workflow.action` event 与 operation 审计
 
@@ -179,6 +180,14 @@
 - **WHEN** operator 提交 workflow run id、expected state version 与未分类 action
 - **AND** latest workflow status 返回 allowedActions 包含该 action
 - **THEN** Core 拒绝请求并说明该 action 当前仅可作为 debug/detail 展示
+- **AND** 不调用 `workflow protocol action`
+
+#### Scenario: gate evidence 缺失时拒绝 operator action
+
+- **WHEN** operator 提交 workflow run id、expected state version 与 action `freeze-requirements`
+- **AND** latest workflow status 返回 allowedActions 包含 `freeze-requirements`
+- **AND** SDK-backed gate evidence 为 missing 或 canSubmit 为 false
+- **THEN** Core 拒绝请求并说明缺少 coding agent 可见确认依据
 - **AND** 不调用 `workflow protocol action`
 
 #### Scenario: operator workflow action 不进入自动推进路径

@@ -21,6 +21,7 @@
 - 查询 workflow artifact。
 - 查询 workflow event。
 - 根据 protocol 消费 workflow handoff。
+- 将 protocol projection 作为 operator gate evidence 的结构化状态事实。
 
 `coordinator` 不可以：
 
@@ -29,6 +30,7 @@
 - 直接推断 workflow stage 是否完成。
 - 绕过 workflow action。
 - 根据文件存在与否猜测 current change。
+- 把 workflow stage artifact 路径或 `allowedActions` 当作 coding agent 给人的确认正文。
 
 ## 3. Protocol 设计原则
 
@@ -56,6 +58,8 @@ protocol 命令必须输出稳定 JSON。
 workflow 内部的 stage/gate/surface 仍由 workflow runtime 管。
 
 coordinator 只消费结果。
+
+coding agent 的可见输出不属于 workflow protocol 的职责。Coordinator 若需要给 Web 展示人工确认依据，应通过 Codex / Claude SDK 管理或观察 agent session，并把 SDK 可见 final response / assistant message 与 workflow protocol status 合成 operator-only gate evidence。
 
 ## 4. 建议命令
 
@@ -207,6 +211,8 @@ Coordinator 外层状态迁移只依赖：
 `actionInputs` 是 workflow 对 action 参数的窄提示。coordinator 只在 operator/debug status 中展示 sanitized action input hints，例如 action id、`requiredArgs` 和 `usage`。这些 hint 不进入 Coordinator Agent Surface，不扩大 `available_tools`，也不让 coordinator 根据 workflow debug 字段自动猜测参数或推进外层状态机。
 
 同理，`allowedActions` 只说明 workflow 当前内部控制面允许哪些 action。它不是 Coordinator 的自动执行计划，也不是 daemon 的 action queue。running workflow 没有 handoff 时，Coordinator 的稳定动作是 inspect 或等待 handoff；daemon 不得根据 `allowedActions` 或 `actionInputs` 自动调用 `workflow protocol action`。
+
+即使 `allowedActions` 包含 operator-facing action，Coordinator 也不得让 Web 盲确认。operator-facing action 进入 Web gate 前，Core 必须能提供 coding agent 可见输出或明确标记 missing evidence；缺少 evidence 时，action 只能作为需要关注的 gate 状态展示，不应提交 `workflow protocol action`。
 
 当前 Coordinator 版本保持本协议不变，不要求 `/Users/hetao/Documents/github/workflow` 增加新字段。Coordinator 侧会保守地区分 operator-facing gate 与 agent/internal action：`freeze-requirements`、`approve-planning-dossier` 这类明确人工确认可进入 Needs-Me Gate Inbox / Focus Drawer gate item；`materialize-change <change-id>`、对齐检查、实现推进等 action 默认只作为 debug/detail 展示，不进入 needs-me，也不要求 Web operator 手动填写内部参数。
 

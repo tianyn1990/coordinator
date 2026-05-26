@@ -238,6 +238,50 @@ export type WorkflowLensSummary = {
   inspectOnlyReason: string;
 };
 
+export type WorkflowGateEvidence = {
+  workflowRunId: string;
+  taskId: string;
+  attemptId: string;
+  workflowRunStateVersion: number;
+  evidenceStatus: "ready" | "partial" | "missing";
+  canSubmit: boolean;
+  primaryAction?: string;
+  actionIds: string[];
+  primaryMessage?: {
+    source: string;
+    agentSessionId: string;
+    providerKind: string;
+    status: string;
+    text: string;
+    artifactPath?: string;
+  };
+  recentMessages: Array<{
+    agentSessionId: string;
+    providerKind: string;
+    status: string;
+    text: string;
+    artifactPath?: string;
+  }>;
+  protocolFacts: {
+    profile?: string;
+    lifecycle?: string;
+    stage?: string;
+    substate?: string;
+    progressLabel?: string;
+    progressSummary?: string;
+    handoffKind?: string;
+    handoffAvailable: boolean;
+    allowedActions: string[];
+    operatorActions: string[];
+    agentInternalActions: string[];
+    debugOnlyActions: string[];
+    deniedActions: string[];
+    stageArtifacts: Array<{ kind?: string; path: string; label?: string; requiredForHandoff?: boolean }>;
+  };
+  supportingArtifacts: string[];
+  warnings: string[];
+};
+
 export type RunMatrixRow = {
   dataTaskId: string;
   ariaLabel: string;

@@ -47,6 +47,8 @@ Coordinator 可以持续 inspect/reconcile，展示 heartbeat、stage、substate
 - Core recovery decision 明确要求 operator attention。
 - project/provider 配置阻塞。
 
+operator-facing workflow gate 进入 `Needs me` 后，Web 仍必须展示 Core 提供的 gate evidence。确认按钮不能只依赖 `allowedActions` 或 action classification 启用；如果 Core 判定缺少 coding agent 可见输出，gate card 只能作为 missing-evidence 状态展示，不能让 operator 盲点确认。
+
 ### 2.3 内部动作降噪
 
 agent/internal action 默认不在主界面制造待办。
@@ -188,6 +190,7 @@ Drawer 内包含：
 - workflow run summary。
 - agent activity summary。
 - operator gate panel。
+- workflow gate evidence：coding agent 可见说明、protocol facts、supporting artifact refs 和 missing-evidence warning。
 - recent evidence。
 - local attachments。
 - Workflow Lens / Debug Detail 入口。
@@ -241,6 +244,8 @@ Composer 只调用 API/Core runtime，不直接写 DB，不绕过 Core policy ga
 - raw provider event 出现某个 token 或自然语言片段。
 - stage/substate 表达某个内部阶段，但没有 handoff 或 operator gate。
 
+缺少 gate evidence 的 workflow gate 可以显示为需要关注，但 Web 必须明确说明“缺少 coding agent 可见确认依据”，并禁用 action submit。
+
 `Needs me` item 的最小展示：
 
 ```text
@@ -292,6 +297,30 @@ Coordinator 侧使用保守分类：
 
 未来如果 workflow protocol 增加 `operatorActions`、`agentActions`、`blocker.owner`、`agent.state`，Web 可以在独立 change 中适配；当前版本不得依赖这些未来字段，也不得因字段缺失退回“所有 allowedActions 都是人工待办”。
 
+## 6.1 Workflow Gate Evidence
+
+Workflow Action Panel 的确认依据由 Coordinator Core 合成，来源分层如下：
+
+| 来源 | 用途 | 是否可作为确认正文 |
+| --- | --- | --- |
+| SDK inner agent final response / visible assistant message | 说明 coding agent 希望人确认什么 | 是 |
+| normalized agent activity | 最近活动摘要、定位证据 | 只做辅助 |
+| provider raw events / transcript JSONL | debug artifact | 否 |
+| workflow protocol stage/substate/progress/allowedActions | 结构化状态事实 | 否，只做 protocol facts |
+| workflow stageArtifacts path | 引用和线索 | 否，不读取正文 |
+
+Web 行为：
+
+- evidence `ready` 且 `canSubmit=true`：展示 primary message、protocol facts、artifact refs，启用确认按钮。
+- evidence `partial` 或 `missing`：展示 warning，禁用确认按钮。
+- evidence API 查询失败：保持不可提交，不回退为盲确认。
+
+Core 行为：
+
+- 提交 workflow action 时重新 inspect latest status，并重新校验 evidence。
+- 没有 inner agent 可见输出时拒绝 operator-facing action。
+- 不因 evidence ready 让 daemon 自动确认 gate。
+
 ## 7. Run Until Blocked
 
 `Run until blocked` 的语义是：
@@ -313,6 +342,7 @@ Coordinator 侧使用保守分类：
 - 只读 inspect workflow / agent / PR/MR 状态。
 - 展示每轮推进摘要。
 - 在 Core 判断的停点解释原因。
+- 在 operator gate 出现但 evidence missing 时停止并解释缺少确认依据。
 
 禁止行为：
 

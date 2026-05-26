@@ -8,10 +8,12 @@ import {
   ProjectRegistryInputError,
   PullRequestProviderError,
   WorkspaceManagerError,
+  WorkflowGateEvidenceError,
   WorkflowProtocolError,
   addTaskNoteRuntime,
   approveMergeRuntime,
   buildTaskSurfaceFromDb,
+  buildWorkflowGateEvidence,
   controlTaskRuntime,
   createManualTask,
   createAttemptWorkspace,
@@ -524,7 +526,7 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
           })
         );
       } catch (error) {
-        if (error instanceof WorkflowProtocolError || error instanceof ActiveResourceConflictError) {
+        if (error instanceof WorkflowProtocolError || error instanceof WorkflowGateEvidenceError || error instanceof ActiveResourceConflictError) {
           return reply.code(400).send({ error: error.message });
         }
         throw error;
@@ -587,7 +589,7 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
           })
         );
       } catch (error) {
-        if (error instanceof WorkflowProtocolError || error instanceof ActiveResourceConflictError) {
+        if (error instanceof WorkflowProtocolError || error instanceof WorkflowGateEvidenceError || error instanceof ActiveResourceConflictError) {
           return reply.code(400).send({ error: error.message });
         }
         throw error;
@@ -632,13 +634,31 @@ export function buildServer(options: BuildServerOptions = {}): FastifyInstance {
           })
         );
       } catch (error) {
-        if (error instanceof WorkflowProtocolError || error instanceof ActiveResourceConflictError) {
+        if (error instanceof WorkflowProtocolError || error instanceof WorkflowGateEvidenceError || error instanceof ActiveResourceConflictError) {
           return reply.code(400).send({ error: error.message });
         }
         throw error;
       }
     }
   );
+
+  server.get<{ Params: { workflowRunId: string } }>("/workflow-runs/:workflowRunId/gate-evidence", async (request, reply) => {
+    const databasePath = process.env.COORDINATOR_DB_PATH;
+    if (!databasePath) {
+      return reply.code(503).send({ error: "COORDINATOR_DB_PATH 未配置" });
+    }
+
+    try {
+      return withDatabase(databasePath, (context) =>
+        buildWorkflowGateEvidence(context, { workflowRunId: request.params.workflowRunId })
+      );
+    } catch (error) {
+      if (error instanceof WorkflowGateEvidenceError) {
+        return reply.code(400).send({ error: error.message });
+      }
+      throw error;
+    }
+  });
 
   server.get<{ Params: { workflowRunId: string } }>("/workflow-runs/:workflowRunId/artifacts", async (request, reply) => {
     const databasePath = process.env.COORDINATOR_DB_PATH;

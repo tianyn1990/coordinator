@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { buildWorkflowGateInboxItem, groupWorkflowActions, summarizeWorkflowGate, workflowActionButtonLabel } from "./workflow-actions.js";
+import {
+  buildWorkflowGateEvidenceRefreshKey,
+  buildWorkflowGateInboxItem,
+  groupWorkflowActions,
+  summarizeWorkflowGate,
+  workflowActionButtonLabel,
+  workflowGateEvidenceCanSubmit,
+  workflowGateEvidenceStatusLabel
+} from "./workflow-actions.js";
 
 describe("web workflow action helpers", () => {
   it("只把 operator-facing action 放入可操作分组", () => {
@@ -137,5 +145,100 @@ describe("web workflow action helpers", () => {
         actionIds: ["materialize-change"]
       })
     ).toBeUndefined();
+  });
+
+  it("workflow gate evidence ready 才允许提交", () => {
+    expect(
+      workflowGateEvidenceCanSubmit(
+        {
+          workflowRunId: "run-1",
+          taskId: "task-1",
+          attemptId: "attempt-1",
+          workflowRunStateVersion: 1,
+          evidenceStatus: "ready",
+          canSubmit: true,
+          primaryAction: "freeze-requirements",
+          actionIds: ["freeze-requirements"],
+          recentMessages: [],
+          protocolFacts: {
+            handoffAvailable: false,
+            allowedActions: ["freeze-requirements"],
+            operatorActions: ["freeze-requirements"],
+            agentInternalActions: [],
+            debugOnlyActions: [],
+            deniedActions: [],
+            stageArtifacts: []
+          },
+          supportingArtifacts: [],
+          warnings: []
+        },
+        "freeze-requirements"
+      )
+    ).toBe(true);
+
+    expect(
+      workflowGateEvidenceCanSubmit(
+        {
+          workflowRunId: "run-1",
+          taskId: "task-1",
+          attemptId: "attempt-1",
+          workflowRunStateVersion: 1,
+          evidenceStatus: "missing",
+          canSubmit: false,
+          primaryAction: "freeze-requirements",
+          actionIds: ["freeze-requirements"],
+          recentMessages: [],
+          protocolFacts: {
+            handoffAvailable: false,
+            allowedActions: ["freeze-requirements"],
+            operatorActions: ["freeze-requirements"],
+            agentInternalActions: [],
+            debugOnlyActions: [],
+            deniedActions: [],
+            stageArtifacts: []
+          },
+          supportingArtifacts: [],
+          warnings: ["missing evidence"]
+        },
+        "freeze-requirements"
+      )
+    ).toBe(false);
+    expect(workflowGateEvidenceStatusLabel(undefined)).toBe("Loading gate evidence");
+  });
+
+  it("gate evidence refresh key 会随 inner session 状态和 final response 变化", () => {
+    const baseDetail = {
+      agentSessions: [
+        {
+          id: "outer-1",
+          role: "outer",
+          providerKind: "codex",
+          status: "running"
+        },
+        {
+          id: "inner-1",
+          role: "inner",
+          providerKind: "codex",
+          status: "running",
+          activity: { eventCount: 1, state: "running", artifactRefs: {}, lastActivityAt: "2026-05-26T10:00:00Z" }
+        }
+      ]
+    };
+    const completedDetail = {
+      ...baseDetail,
+      agentSessions: [
+        baseDetail.agentSessions[0],
+        {
+          ...baseDetail.agentSessions[1],
+          status: "completed",
+          finalResponsePath: "/tmp/final-response.md",
+          activity: { eventCount: 2, state: "completed", artifactRefs: {}, lastActivityAt: "2026-05-26T10:01:00Z" }
+        }
+      ]
+    };
+
+    expect(buildWorkflowGateEvidenceRefreshKey(baseDetail as never)).not.toBe(
+      buildWorkflowGateEvidenceRefreshKey(completedDetail as never)
+    );
   });
 });

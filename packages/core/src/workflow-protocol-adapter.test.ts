@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   createAttempt,
+  createAgentSession,
   createProject,
   createTask,
   createWorkspace,
@@ -12,6 +13,7 @@ import {
   getActiveWorkflowRunByAttempt,
   listTaskEvents,
   runMigrations,
+  type DbContext,
   withDatabase
 } from "@coordinator/db";
 import {
@@ -169,6 +171,22 @@ function createProtocolRunner() {
     throw new Error(`unexpected command: ${command}`);
   };
   return { runner, calls };
+}
+
+function createInnerGateEvidence(context: DbContext, fixture: { projectId: string; taskId: string; attemptId: string }, text = "需求范围已整理，请确认冻结需求。"): string {
+  const finalResponsePath = join(mkdtempSync(join(tmpdir(), "coordinator-inner-agent-")), "final-response.md");
+  writeFileSync(finalResponsePath, text, "utf8");
+  createAgentSession(context, {
+    id: `inner-session-${fixture.attemptId}`,
+    projectId: fixture.projectId,
+    taskId: fixture.taskId,
+    attemptId: fixture.attemptId,
+    providerKind: "codex",
+    role: "inner",
+    status: "completed",
+    finalResponsePath
+  });
+  return finalResponsePath;
 }
 
 describe("workflow protocol adapter", () => {
@@ -715,6 +733,7 @@ describe("workflow protocol adapter", () => {
         profileId: "feature",
         runner: operatorRunner
       });
+      createInnerGateEvidence(context, fixture);
       return invokeWorkflowActionFromOperator(context, {
         workflowRunId: started.workflowRun.id,
         action: "freeze-requirements",
@@ -761,6 +780,7 @@ describe("workflow protocol adapter", () => {
         profileId: "feature",
         runner: planningApprovalRunner
       });
+      createInnerGateEvidence(context, fixture, "技术方案已准备，请确认 planning dossier。");
       return invokeWorkflowActionFromOperator(context, {
         workflowRunId: started.workflowRun.id,
         action: "approve-planning-dossier",
@@ -778,6 +798,46 @@ describe("workflow protocol adapter", () => {
       "inner-run-1",
       "approve-planning-dossier"
     ]);
+  });
+
+  it("operator workflow action 缺少 inner agent evidence 时拒绝盲确认", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createAttemptWithReadyWorkspace(databasePath);
+    const protocol = createProtocolRunner();
+    const operatorRunner: WorkflowProtocolRunner = (args, options) => {
+      if (args[1] === "status") {
+        protocol.calls.push({ args, cwd: options.cwd, launcher: options.launcher, timeoutMs: options.timeoutMs });
+        return JSON.stringify({
+          runId: "inner-run-1",
+          profile: "feature",
+          lifecycle: "active",
+          stage: "requirements",
+          allowedActions: ["freeze-requirements"],
+          handoff: { available: false, artifacts: [], deniedActions: [] },
+          summary: "waiting for requirements approval"
+        });
+      }
+      return protocol.runner(args, options);
+    };
+
+    expect(() =>
+      withDatabase(databasePath, (context) => {
+        const started = startWorkflowRun(context, {
+          attemptId: fixture.attemptId,
+          profileId: "feature",
+          runner: operatorRunner
+        });
+        return invokeWorkflowActionFromOperator(context, {
+          workflowRunId: started.workflowRun.id,
+          action: "freeze-requirements",
+          expectedStateVersion: started.workflowRun.stateVersion,
+          actor: "web-operator",
+          runner: operatorRunner
+        });
+      })
+    ).toThrow(/缺少 coding agent 可见确认依据/);
+
+    expect(protocol.calls.some((call) => call.args[1] === "action")).toBe(false);
   });
 
   it("operator workflow action 不在 latest allowedActions 时不执行 protocol action", () => {

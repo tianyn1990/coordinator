@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { classifyWorkflowAction } from "@coordinator/shared";
+import { assertWorkflowGateEvidenceCanSubmit, buildWorkflowGateEvidence } from "./workflow-gate-evidence.js";
 import {
   ActiveResourceConflictError,
   acquireLock,
@@ -499,6 +500,26 @@ export function invokeWorkflowActionFromOperator(
   const project = requireProjectRecord(context, workflowRun.projectId);
   const status = inspectStatusForRun(context, project, requireWorkflowLauncher(project), workflowRun, runner);
   assertOperatorWorkflowActionAllowed(status, action, actionArg);
+  const evidence = buildWorkflowGateEvidence(context, {
+    workflowRunId: workflowRun.id,
+    action,
+    statusOverride: {
+      profile: status.profile,
+      lifecycle: status.lifecycle,
+      stage: status.debug.stage,
+      substate: status.debug.substate,
+      progressLabel: status.progress?.label,
+      progressSummary: status.progress?.summary ?? status.summary,
+      handoffAvailable: status.handoff.available,
+      handoffKind: status.handoff.kind,
+      allowedActions: status.debug.allowedActions,
+      deniedActions: [...(status.debug.deniedActions ?? []), ...status.handoff.deniedActions],
+      actionInputHints: status.actionInputHints,
+      stageArtifacts: status.stageArtifacts,
+      summary: status.summary
+    }
+  });
+  assertWorkflowGateEvidenceCanSubmit(evidence, action);
   return invokeWorkflowAction(context, {
     workflowRunId: input.workflowRunId,
     action,

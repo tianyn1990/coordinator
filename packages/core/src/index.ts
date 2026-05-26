@@ -36,6 +36,11 @@ export {
   toSurfaceWorkflowRuntimeObservation
 } from "./workflow-runtime-observation.js";
 export {
+  WorkflowGateEvidenceError,
+  assertWorkflowGateEvidenceCanSubmit,
+  buildWorkflowGateEvidence
+} from "./workflow-gate-evidence.js";
+export {
   WorkspaceManagerError,
   WorkspacePathError,
   assertArtifactRelativePath,
@@ -196,6 +201,13 @@ export type {
   WorkspaceSnapshot
 } from "./surface.js";
 export type { SurfaceWorkflowRuntimeObservation } from "./workflow-runtime-observation.js";
+export type {
+  BuildWorkflowGateEvidenceInput,
+  WorkflowGateEvidence,
+  WorkflowGateEvidenceMessage,
+  WorkflowGateEvidenceProtocolFacts,
+  WorkflowGateEvidenceStatus
+} from "./workflow-gate-evidence.js";
 
 export type GitProviderKind = "github" | "gitlab";
 

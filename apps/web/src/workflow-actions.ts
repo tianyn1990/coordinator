@@ -1,4 +1,5 @@
 import { classifyWorkflowAction, type WorkflowRuntimeObservation } from "@coordinator/shared";
+import type { TaskDetail, WorkflowGateEvidence } from "./workbench-v2-model.js";
 
 export type WorkflowActionGroups = {
   operatorFacing: string[];
@@ -113,6 +114,45 @@ export function buildWorkflowGateInboxItem(source: WorkflowGateInboxSource): Wor
     label: gate.label,
     summary: gate.summary
   };
+}
+
+export function workflowGateEvidenceCanSubmit(
+  evidence: WorkflowGateEvidence | undefined,
+  actionId: string
+): boolean {
+  return Boolean(evidence?.canSubmit && evidence.primaryAction === actionId && evidence.evidenceStatus === "ready");
+}
+
+export function workflowGateEvidenceStatusLabel(evidence: WorkflowGateEvidence | undefined): string {
+  if (!evidence) {
+    return "Loading gate evidence";
+  }
+  if (evidence.evidenceStatus === "ready") {
+    return "Evidence ready";
+  }
+  if (evidence.evidenceStatus === "partial") {
+    return "Evidence needs review";
+  }
+  return "Missing gate evidence";
+}
+
+export function buildWorkflowGateEvidenceRefreshKey(detail: TaskDetail | undefined): string {
+  if (!detail) {
+    return "no-detail";
+  }
+  return detail.agentSessions
+    .filter((session) => session.role === "inner")
+    .map((session) =>
+      [
+        session.id,
+        session.status,
+        session.finalResponsePath ?? "",
+        session.activity?.lastActivityAt ?? "",
+        session.activity?.latestEvent?.timestamp ?? "",
+        session.activity?.eventCount ?? 0
+      ].join(":")
+    )
+    .join("|");
 }
 
 function workflowActionInboxLabel(actionId: string): string {

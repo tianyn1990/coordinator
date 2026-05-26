@@ -215,6 +215,12 @@ streamEvents
 - SDK raw events 只写入 transcript artifact；Core event payload 只保留 implementation mode、permission profile、provider session id、provider version 和 artifact ref 等窄摘要。
 - 外层 agent 本轮不能直接执行 repo 写入、不能绕过 Coordinator Surface，也不能替代后续 agent tools executor。
 
+SDK 能力核对结果：
+
+- `@openai/codex-sdk@0.133.0` 提供 `Codex.startThread()` / `resumeThread()`、`Thread.run()`、`Thread.runStreamed()`，stream event 中包含 thread/turn lifecycle、item started/updated/completed、`agent_message`、tool/command/file change 等结构化 item，以及 final response。
+- `@anthropic-ai/claude-agent-sdk@0.3.150` 提供 `query()` async generator，返回 assistant/result/system/partial 等 SDK message，并支持 `includePartialMessages`。
+- 因此 Coordinator 可以通过 SDK 保存 raw transcript artifact、normalized activity 和 operator-visible final response / assistant message 摘要；但这些输出仍是 evidence，不是 Core 状态机真源。
+
 后续 SDK adapter 必须继续保持这些边界：
 
 - outer provider 默认最小权限，cwd 固定 sessionRoot。
@@ -222,6 +228,7 @@ streamEvents
 - provider raw JSONL、SDK private session 文件、权限内部细节和完整 stdout 不进入 Core 状态机。
 - provider event 应分层保存：raw event 写 artifact，normalized event 写 timeline 摘要，Core 只使用极少数 lifecycle signal。
 - provider SDK 和底层 CLI 版本需要记录或 pin；版本不兼容时进入 provider unavailable / operator attention，而不是静默降级为危险权限。
+- workflow gate evidence 只消费 SDK 可见输出的受控摘要和 artifact refs；不得展示 hidden reasoning、完整 raw JSONL 或 provider private state。
 
 ## 10. Outer 和 Inner Agent
 
@@ -237,6 +244,7 @@ streamEvents
 - 在 repo workspace 中使用 `workflow`。
 - 处理具体代码工作。
 - 会修改 repo 的 inner agent 命令 cwd 必须位于 workspace repo 内。
+- 停止或请求人工确认时，其 SDK visible output 应作为 workflow gate evidence 的主要来源；workflow protocol 只补充 stage/substate/action/handoff 等状态事实。
 
 两层可以使用不同 provider：
 

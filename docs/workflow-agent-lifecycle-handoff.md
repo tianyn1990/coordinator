@@ -9,6 +9,8 @@
 
 > 当前落地：Slice 14.4 在 Coordinator 侧增加了 operator-only `workflow runtime observation` 派生摘要，用现有 protocol projection、handoff、action classification 与 agent activity 表达 `observing-runtime`、`waiting-operator-gate`、`handoff-ready`、`recovery-attention` 等模式。该摘要只服务 Web/operator 展示、Run Until Blocked explanation 和 daemon observation，不修改 workflow protocol，也不是新的外层状态机。
 
+> Gate evidence 收敛：Coordinator 的人工 gate 不能只展示 workflow action。开发者确认前必须看到 coding agent 通过 SDK 返回的可见输出或其受控摘要。`workflow protocol` 只提供 stage/substate/action/handoff 等结构化状态事实，不负责提供 coding agent 对话内容。
+
 ## 1. 背景
 
 当前 `coordinator` 已经完成一轮 Web workflow action 闭环：
@@ -65,6 +67,8 @@ Coordinator 应该是多个 workflow run 的管理者、观察者、恢复者和
 - Coding agent 输出是 evidence，不是状态机真源。
 - Workflow protocol status / handoff 是 workflow run 的结构化真源。
 - Coordinator Core 是外层任务状态机和策略校验真源。
+- SDK-observed coding agent 可见输出是 human gate evidence 的首要来源。
+- Workflow protocol projection 是 gate evidence 的 protocol facts 补充，不是确认正文来源。
 
 ## 3. 现有实现的偏差
 
@@ -136,6 +140,20 @@ flowchart TD
   G -->|失败或不一致| K["诊断 / recovery / 人工处理"]
 ```
 
+operator gate 还需要一层 evidence 判断：
+
+```mermaid
+flowchart TD
+  A["inner coding agent SDK session 停止或请求输入"] --> B["保存 final response / visible messages / transcript refs"]
+  B --> C["Coordinator inspect workflow protocol status"]
+  C --> D["Core 合成 workflow gate evidence"]
+  D --> E{"evidence 是否足够确认?"}
+  E -->|ready| F["Web Needs-Me gate card 展示 evidence + confirm"]
+  E -->|missing/partial| G["Web 展示缺少确认依据，不启用 confirm"]
+```
+
+该 evidence 不是新的 workflow protocol 字段，也不是新的状态机。它是 Core 从已持久化 agent session、artifact refs、normalized activity 与 workflow projection 派生的 operator-only view。
+
 这意味着 `run until blocked` 的语义应该调整为：
 
 ```text
@@ -156,6 +174,7 @@ Core 可以：
 - 记录 operation ledger 和 event timeline。
 - 基于结构化 protocol envelope 决定外层任务状态。
 - 在 operator 明确确认后调用 workflow protocol action。
+- 在 operator-facing workflow gate 前合成 gate evidence，并拒绝缺少 coding agent 可见依据的盲确认。
 
 Core 不应该：
 
@@ -164,6 +183,8 @@ Core 不应该：
 - 解析自然语言输出后直接越过 workflow gate。
 - 把所有 `allowedActions` 自动暴露给开发者或 outer Agent。
 - 让 daemon / outer Agent 静默执行 workflow 内部 human gate。
+- 把 workflow stage artifact 文件路径当作确认内容来源。
+- 把 provider raw JSONL、hidden reasoning、完整 transcript 或工具调用正文直接展示为 gate evidence。
 
 ### 5.2 Daemon / Worker
 
@@ -193,6 +214,27 @@ Inner coding agent 是单个 workflow run 内部的执行者。
 - 知道 `materialize-change <change-id>` 这类内部推进参数。
 - 写代码、跑测试、产出 artifacts。
 - 在 workflow 需要 human gate 时停止并形成结构化状态。
+- 在停止或请求人工确认时，通过 SDK 可见 final response / assistant message 向人说明需要确认的内容；Coordinator 只观察和保存该输出。
+
+### 5.3.1 SDK 输出与 Gate Evidence
+
+本期 Coordinator 侧的判断是：
+
+```text
+SDK 输出：agent 可见消息、final response、session lifecycle、raw transcript ref
+workflow protocol：stage/substate、allowedActions、handoff、summary、artifact refs
+Coordinator Core：把两者合成为 operator gate evidence
+Web：展示 evidence 后再让人确认
+```
+
+Codex SDK 当前提供 `runStreamed()`，可以观察 structured events、`agent_message` item 和 final response；Claude Agent SDK 当前提供 `query()` async generator，可以观察 assistant/result/partial message。两者足以支撑 Coordinator 保存 raw transcript artifact、normalized activity 和 operator-visible final response 摘要。
+
+约束：
+
+- hidden chain-of-thought 不进入 evidence。
+- raw provider events 只进入 debug artifact 或 normalized activity。
+- gate evidence 默认只把 `role = inner` 的 agent session 可见输出作为 ready evidence。
+- 若只有 workflow protocol action 而没有 inner agent 可见输出，Web 应显示 missing evidence，并阻止盲确认。
 
 ### 5.4 Web Workbench
 
@@ -205,6 +247,7 @@ Web 应该默认展示：
 - 哪些任务进入 PR/MR/review/merge。
 - 哪些任务失败或需要恢复。
 - 当前 workflow stage/substate/progress 作为 explainability。
+- operator-facing gate 的 coding agent evidence、protocol facts 和 supporting artifact refs。
 
 Web 不应该默认把 workflow 内部所有 action 都变成 developer 的待办。`Needs me` 是人工 gate 收件箱，不是 workflow action queue；agent/internal action 只进入 Workflow Lens / Debug Detail。
 

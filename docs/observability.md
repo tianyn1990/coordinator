@@ -95,6 +95,19 @@ decision signals
 
 当前 Slice 14.2 的最小落地是：SDK adapter 将 raw provider events 作为 JSONL 写入 agent session transcript artifact，并在 Core event payload 中只记录 implementation mode、permission profile、provider session id、provider version 和 artifact ref。normalized agent events、last activity 信号和 Web 活动摘要留到 Slice 14.3 实现。
 
+后续 gate evidence 使用同一分层：
+
+```text
+raw provider events
+  -> debug artifact，不默认展示
+normalized agent events
+  -> 活动摘要和 recent messages 辅助信息
+operator-visible final response / assistant message
+  -> workflow gate evidence 主内容
+```
+
+hidden reasoning、完整 raw JSONL、完整 transcript、permission internals 和 provider private state 不得进入 gate evidence 主内容。
+
 ### 3.3 Workflow Event
 
 记录 inner workflow：
@@ -112,6 +125,8 @@ Workflow Event 可以来自 `workflow protocol events`，但 coordinator 只依�
 workflow protocol 返回的 handoff、allowedActions、deniedActions、recovery 必须被记录或引用，不应只保留模糊摘要。
 
 Coordinator 可以从已持久化 workflow projection 派生 operator-only `workflow runtime observation`，用于解释当前 owner/mode，例如 observing-runtime、waiting-operator-gate、handoff-ready 或 recovery-attention。该 observation 是只读摘要，不触发实时 inspect，不写回 workflow private state，也不得成为 task completed、PR readiness、merge 或 Coordinator Agent tool visibility 的依据。
+
+workflow operator gate 的 evidence 由 Core 合成：agent session 可见输出提供确认正文，workflow projection 提供 protocol facts。缺少 agent 可见输出时，observability 应显示 missing evidence，而不是把 `allowedActions` 本身当作确认内容。
 
 ### 3.4 Git / PR Event
 
@@ -220,7 +235,38 @@ artifacts
 next_step
 ```
 
-## 4.3 Extra Artifact Debug Event
+## 4.3 Workflow Gate Evidence Summary
+
+Coordinator 可以提供 operator-only workflow gate evidence summary，用于回答“我现在确认的到底是什么”。
+
+该 summary 只能从已持久化事实派生：
+
+- 当前 workflow run record。
+- latest workflow status/action event payload 中的 protocol projection。
+- 当前 attempt/task 相关的 inner agent session。
+- agent final response artifact ref 与受限 excerpt。
+- normalized agent activity 摘要。
+
+该 summary 不触发 provider、workflow protocol、git 或外部平台 inspect，不读取 `.workflow` private state，也不读取 provider private session 文件。
+
+允许展示：
+
+- evidence status：`ready`、`partial`、`missing`。
+- primary message excerpt。
+- recent visible message 摘要。
+- protocol facts：stage、substate、progress、operator action、handoff。
+- supporting artifact refs。
+- warnings。
+
+禁止展示：
+
+- hidden chain-of-thought。
+- raw provider JSONL / 完整 transcript。
+- secret、lock token、permission object。
+- 完整 workflow status JSON。
+- `.workflow` private state 文件内容。
+
+## 4.4 Extra Artifact Debug Event
 
 daemon artifact bridge 允许 outer agent 通过 `coordinator-artifact` block 写入当前 surface 的 `artifact_root`。当当前 requested tool 并不需要 artifact，但 agent 仍输出 artifact block 时，daemon 应记录额外 debug event，帮助 operator 区分“工具必需产物”和“额外产物噪音”。
 

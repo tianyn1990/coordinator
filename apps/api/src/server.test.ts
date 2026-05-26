@@ -5,7 +5,9 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
+  appendEvent,
   createAttempt,
+  createAgentSession,
   createHumanRequest,
   createOperation,
   createProject,
@@ -888,6 +890,18 @@ exit 1
         status: "running",
         externalId: "inner-run-1"
       });
+      const finalResponsePath = join(mkdtempSync(join(tmpdir(), "coordinator-api-inner-evidence-")), "final-response.md");
+      writeFileSync(finalResponsePath, "需求已整理，请确认 freeze requirements。", "utf8");
+      createAgentSession(context, {
+        id: "inner-session-api-workflow-action",
+        projectId: project.id,
+        taskId: task.id,
+        attemptId: attempt.id,
+        providerKind: "codex",
+        role: "inner",
+        status: "completed",
+        finalResponsePath
+      });
     });
 
     const previous = process.env.COORDINATOR_DB_PATH;
@@ -910,6 +924,74 @@ exit 1
       });
       const events = withDatabase(databasePath, (context) => listTaskEvents(context, "task-api-workflow-action"));
       expect(events.map((event) => event.type)).toContain("workflow.action");
+    } finally {
+      if (previous === undefined) {
+        delete process.env.COORDINATOR_DB_PATH;
+      } else {
+        process.env.COORDINATOR_DB_PATH = previous;
+      }
+    }
+  });
+
+  it("workflow gate evidence API 返回 inner agent 可见确认依据", async () => {
+    const databasePath = join(mkdtempSync(join(tmpdir(), "coordinator-api-gate-evidence-")), "api.sqlite");
+    runMigrations(databasePath);
+    withDatabase(databasePath, (context) => {
+      const project = createProject(context, { id: "project-api-gate-evidence", name: "gate evidence" });
+      const task = createTask(context, { id: "task-api-gate-evidence", projectId: project.id, title: "gate evidence" });
+      const attempt = createAttempt(context, { id: "attempt-api-gate-evidence", projectId: project.id, taskId: task.id });
+      createWorkflowRun(context, {
+        id: "workflow-api-gate-evidence",
+        projectId: project.id,
+        taskId: task.id,
+        attemptId: attempt.id,
+        profileId: "feature",
+        status: "running",
+        externalId: "inner-run-1"
+      });
+      appendEvent(context, {
+        type: "workflow.status_inspected",
+        summary: "workflow waits for operator",
+        projectId: project.id,
+        taskId: task.id,
+        attemptId: attempt.id,
+        workflowRunId: "workflow-api-gate-evidence",
+        payload: {
+          lifecycle: "active",
+          debug: { stage: "requirements", allowedActions: ["freeze-requirements"] },
+          handoff: { available: false, artifacts: [], deniedActions: [] }
+        }
+      });
+      const finalResponsePath = join(mkdtempSync(join(tmpdir(), "coordinator-api-gate-evidence-agent-")), "final-response.md");
+      writeFileSync(finalResponsePath, "报名页缓存需求已整理，请确认。", "utf8");
+      createAgentSession(context, {
+        id: "inner-session-api-gate-evidence",
+        projectId: project.id,
+        taskId: task.id,
+        attemptId: attempt.id,
+        providerKind: "codex",
+        role: "inner",
+        status: "completed",
+        finalResponsePath
+      });
+    });
+
+    const previous = process.env.COORDINATOR_DB_PATH;
+    process.env.COORDINATOR_DB_PATH = databasePath;
+    try {
+      const server = buildServer();
+      const response = await server.inject({
+        method: "GET",
+        url: "/workflow-runs/workflow-api-gate-evidence/gate-evidence"
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({
+        evidenceStatus: "ready",
+        canSubmit: true,
+        primaryAction: "freeze-requirements",
+        primaryMessage: { agentSessionId: "inner-session-api-gate-evidence" }
+      });
     } finally {
       if (previous === undefined) {
         delete process.env.COORDINATOR_DB_PATH;

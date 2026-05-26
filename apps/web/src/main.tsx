@@ -1,6 +1,11 @@
 import { StrictMode, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { workflowActionButtonLabel } from "./workflow-actions.js";
+import {
+  buildWorkflowGateEvidenceRefreshKey,
+  workflowActionButtonLabel,
+  workflowGateEvidenceCanSubmit,
+  workflowGateEvidenceStatusLabel
+} from "./workflow-actions.js";
 import {
   WEB_V2_DEBUG_DETAIL_DEFAULT_OPEN,
   buildRunMatrixRow,
@@ -20,6 +25,7 @@ import {
   type TaskDetail,
   type TaskListItem,
   type UnifiedComposerProjection,
+  type WorkflowGateEvidence,
   type WorkflowLensSummary
 } from "./workbench-v2-model.js";
 import "./styles.css";
@@ -51,6 +57,12 @@ type RunUntilBlockedState = {
   maxTicks: number;
   logs: Array<{ index: number; status: string; actions: DaemonTickAction[] }>;
   stop?: RunUntilBlockedStopReason;
+};
+
+type GateEvidenceState = {
+  loading: boolean;
+  evidence?: WorkflowGateEvidence;
+  error?: string;
 };
 
 type WorkflowActionSubmitInput = {
@@ -91,10 +103,15 @@ function WorkbenchShell() {
   const [flash, setFlash] = useState<Flash | undefined>();
   const [runState, setRunState] = useState<RunUntilBlockedState | undefined>();
   const [composerResetToken, setComposerResetToken] = useState(0);
+  const [gateEvidenceByRunId, setGateEvidenceByRunId] = useState<Record<string, GateEvidenceState>>({});
 
   const model = useMemo(
     () => buildWorkbenchV2Model({ tasks, details, projectId: selectedProjectId, query }),
     [tasks, details, selectedProjectId, query]
+  );
+  const focusedInnerAgentEvidenceKey = useMemo(
+    () => buildWorkflowGateEvidenceRefreshKey(focusedDetail),
+    [focusedDetail]
   );
 
   const focusedRow = useMemo(() => {
@@ -130,6 +147,25 @@ function WorkbenchShell() {
   useEffect(() => {
     void refresh();
   }, []);
+
+  useEffect(() => {
+    const run = focusedDetail?.workflowRuns[0];
+    const hasWorkflowGate = focusedRow?.workflow.gate.hasOperatorGate;
+    if (!run || !hasWorkflowGate) {
+      return;
+    }
+    setGateEvidenceByRunId((current) => ({ ...current, [run.id]: { loading: true, evidence: current[run.id]?.evidence } }));
+    request<WorkflowGateEvidence>(`/workflow-runs/${run.id}/gate-evidence`)
+      .then((evidence) => {
+        setGateEvidenceByRunId((current) => ({ ...current, [run.id]: { loading: false, evidence } }));
+      })
+      .catch((error) => {
+        setGateEvidenceByRunId((current) => ({
+          ...current,
+          [run.id]: { loading: false, error: error instanceof Error ? error.message : String(error) }
+        }));
+      });
+  }, [focusedDetail?.workflowRuns[0]?.id, focusedDetail?.workflowRuns[0]?.stateVersion, focusedInnerAgentEvidenceKey, focusedRow?.workflow.gate.hasOperatorGate]);
 
   async function focusTask(taskId: string, options?: { openDebug?: boolean }) {
     setFocusedTaskId(taskId);
@@ -398,6 +434,7 @@ function WorkbenchShell() {
           row={focusedRow}
           detail={focusedDetail}
           inbox={model.inbox.filter((item) => item.taskId === focusedTaskId)}
+          gateEvidenceByRunId={gateEvidenceByRunId}
           debugOpen={debugOpen}
           onDebugOpenChange={setDebugOpen}
           onWorkflowAction={submitWorkflowAction}
@@ -593,6 +630,7 @@ function FocusDrawer({
   row,
   detail,
   inbox,
+  gateEvidenceByRunId,
   debugOpen,
   onDebugOpenChange,
   onWorkflowAction,
@@ -604,6 +642,7 @@ function FocusDrawer({
   row?: RunMatrixRow;
   detail?: TaskDetail;
   inbox: GateItem[];
+  gateEvidenceByRunId: Record<string, GateEvidenceState>;
   debugOpen: boolean;
   onDebugOpenChange: (open: boolean) => void;
   onWorkflowAction: (input: WorkflowActionSubmitInput) => Promise<void>;
@@ -640,6 +679,7 @@ function FocusDrawer({
         detail={detail}
         row={row}
         inbox={inbox}
+        gateEvidenceByRunId={gateEvidenceByRunId}
         onWorkflowAction={onWorkflowAction}
         onDecideMerge={onDecideMerge}
         onMerge={onMerge}
@@ -673,6 +713,7 @@ function GatePanel({
   detail,
   row,
   inbox,
+  gateEvidenceByRunId,
   onWorkflowAction,
   onDecideMerge,
   onMerge
@@ -680,6 +721,7 @@ function GatePanel({
   detail: TaskDetail;
   row: RunMatrixRow;
   inbox: GateItem[];
+  gateEvidenceByRunId: Record<string, GateEvidenceState>;
   onWorkflowAction: (input: WorkflowActionSubmitInput) => Promise<void>;
   onDecideMerge: (pr: PullRequest, request: HumanRequest, decision: "approve" | "reject") => void;
   onMerge: (pr: PullRequest) => void;
@@ -724,7 +766,15 @@ function GatePanel({
           );
         }
         if (item.kind === "workflow") {
-          return <WorkflowActionGate key={item.id} detail={detail} workflow={row.workflow} onWorkflowAction={onWorkflowAction} />;
+          return (
+            <WorkflowActionGate
+              key={item.id}
+              detail={detail}
+              workflow={row.workflow}
+              gateEvidenceByRunId={gateEvidenceByRunId}
+              onWorkflowAction={onWorkflowAction}
+            />
+          );
         }
         if (item.kind === "pr") {
           return (
@@ -752,10 +802,12 @@ function StaticGateCard({ item }: { item: GateItem }) {
 function WorkflowActionGate({
   detail,
   workflow,
+  gateEvidenceByRunId,
   onWorkflowAction
 }: {
   detail: TaskDetail;
   workflow: WorkflowLensSummary;
+  gateEvidenceByRunId: Record<string, GateEvidenceState>;
   onWorkflowAction: (input: WorkflowActionSubmitInput) => Promise<void>;
 }) {
   const run = detail.workflowRuns[0];
@@ -763,12 +815,26 @@ function WorkflowActionGate({
   if (!run || run.status !== "running" || run.handoffKind || workflow.observation.mode !== "waiting-operator-gate" || actions.length === 0) return null;
 
   const hintByAction = new Map(workflow.projection.actionHints.map((hint) => [hint.actionId, hint]));
+  const evidenceState = gateEvidenceByRunId[run.id];
+  const evidence = evidenceState?.evidence;
+  const evidenceUnavailable = Boolean(evidenceState?.loading || evidenceState?.error || !evidence);
   return (
     <>
       {actions.map((actionId) => {
         const hint = hintByAction.get(actionId);
         const requiredArgs = hint?.requiredArgs ?? [];
         const unsupported = requiredArgs.length > 1;
+        const canSubmitEvidence = workflowGateEvidenceCanSubmit(evidence, actionId);
+        const protocolFactSummary = evidence
+          ? [
+              evidence.protocolFacts.stage,
+              evidence.protocolFacts.substate,
+              evidence.protocolFacts.progressLabel,
+              evidence.protocolFacts.handoffKind
+            ]
+              .filter(Boolean)
+              .join(" / ")
+          : "";
         return (
           <form
             key={actionId}
@@ -786,9 +852,21 @@ function WorkflowActionGate({
           >
             <strong>{actionId}</strong>
             <small>{workflow.projection.progressSummary ?? workflow.inspectOnlyReason}</small>
+            <div className={`gate-evidence ${canSubmitEvidence ? "ready" : "missing"}`}>
+              <span>{workflowGateEvidenceStatusLabel(evidence)}</span>
+              {evidenceState?.error ? <small>{evidenceState.error}</small> : null}
+              {evidence?.primaryMessage ? <p>{evidence.primaryMessage.text}</p> : null}
+              {protocolFactSummary ? <small>{protocolFactSummary}</small> : null}
+              {evidence?.warnings.map((warning) => (
+                <small key={warning}>{warning}</small>
+              ))}
+              {evidence?.supportingArtifacts.length ? (
+                <small>refs: {evidence.supportingArtifacts.slice(0, 3).join(", ")}</small>
+              ) : null}
+            </div>
             {requiredArgs.length === 1 ? <input name="workflowArg" placeholder={requiredArgs[0]} required /> : null}
             {unsupported ? <small>unsupported args in Web V2 shell</small> : null}
-            <button type="submit" disabled={unsupported}>
+            <button type="submit" disabled={unsupported || evidenceUnavailable || !canSubmitEvidence}>
               {workflowActionButtonLabel(actionId)}
             </button>
           </form>
