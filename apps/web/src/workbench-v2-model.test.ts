@@ -4,6 +4,7 @@ import {
   buildGateItems,
   buildRunMatrixRow,
   buildWorkbenchV2Model,
+  deriveRunUntilBlockedStopReason,
   type EventRecord,
   type TaskDetail,
   type TaskListItem
@@ -70,6 +71,7 @@ describe("workbench v2 display model", () => {
 
   it("Core recovery attention 与 high-risk state 进入同一个 needs-me 派生路径", () => {
     const failedTask = { ...baseTask, id: "task-failed", status: "failed" };
+    const failedWithoutDetail = buildRunMatrixRow(failedTask);
     const detail = buildDetail({
       task: failedTask,
       diagnosis: {
@@ -81,6 +83,17 @@ describe("workbench v2 display model", () => {
         providerProtocolInspections: []
       }
     });
+
+    expect(failedWithoutDetail.needsMe).toBe(true);
+    expect(buildGateItems(failedWithoutDetail)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "attention",
+          tone: "danger",
+          label: "High risk"
+        })
+      ])
+    );
 
     const model = buildWorkbenchV2Model({
       tasks: [failedTask],
@@ -130,6 +143,26 @@ describe("workbench v2 display model", () => {
         expect.objectContaining({
           kind: "pr",
           label: "PR / MR review"
+        })
+      ])
+    );
+
+    const conflictDetail = buildDetail({
+      latestPullRequest: {
+        id: "pr-conflict",
+        providerKind: "github",
+        status: "conflict",
+        reviewStatus: "approved",
+        stateVersion: 1
+      }
+    });
+
+    expect(buildRunMatrixRow(baseTask, conflictDetail).needsMe).toBe(true);
+    expect(buildGateItems(buildRunMatrixRow(baseTask, conflictDetail))).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "pr",
+          summary: "conflict / approved"
         })
       ])
     );
@@ -196,6 +229,141 @@ describe("workbench v2 display model", () => {
 
   it("Debug Detail 默认折叠，由 Focus Drawer 内入口按需展开", () => {
     expect(WEB_V2_DEBUG_DETAIL_DEFAULT_OPEN).toBe(false);
+  });
+});
+
+describe("run until blocked stop reason", () => {
+  it("把 active internal workflow runtime 展示为 observing-runtime", () => {
+    const detail = buildDetail({
+      events: [
+        workflowEvent({
+          status: {
+            lifecycle: "active",
+            status: "running",
+            stage: "implementation",
+            substate: "materialize-change",
+            allowedActions: ["materialize-change"]
+          }
+        })
+      ]
+    });
+
+    const stop = deriveRunUntilBlockedStopReason({
+      detail,
+      tick: { status: "ok", actions: [{ kind: "workflow", status: "observed" }] },
+      tickIndex: 1,
+      maxTicks: 8,
+      scope: "task",
+      taskId: detail.task.id
+    });
+
+    expect(stop).toMatchObject({
+      stop: true,
+      kind: "observing-runtime",
+      scope: "task",
+      taskId: "task-1"
+    });
+  });
+
+  it("把 operator-facing workflow gate 展示为 waiting-operator-gate", () => {
+    const detail = buildDetail({
+      events: [
+        workflowEvent({
+          status: {
+            lifecycle: "active",
+            status: "running",
+            stage: "requirements",
+            substate: "freeze",
+            allowedActions: ["freeze-requirements"]
+          }
+        })
+      ]
+    });
+
+    const stop = deriveRunUntilBlockedStopReason({
+      detail,
+      tick: { status: "ok", actions: [{ kind: "workflow", status: "blocked" }] },
+      tickIndex: 1,
+      maxTicks: 8,
+      scope: "task",
+      taskId: detail.task.id
+    });
+
+    expect(stop.kind).toBe("waiting-operator-gate");
+    expect(stop.summary).toBe("freeze-requirements");
+  });
+
+  it("把 workflow handoff 展示为 handoff-ready，不用 stage/substate 推导完成态", () => {
+    const detail = buildDetail({
+      workflowRuns: [{ id: "workflow-1", profileId: "feature", status: "completed", handoffKind: "change-handoff", stateVersion: 4 }],
+      events: [
+        workflowEvent({
+          status: {
+            lifecycle: "completed",
+            status: "completed",
+            handoff: { available: true, kind: "change-handoff" }
+          }
+        })
+      ]
+    });
+
+    const stop = deriveRunUntilBlockedStopReason({
+      detail,
+      tick: { status: "ok", actions: [{ kind: "workflow", status: "handoff" }] },
+      tickIndex: 1,
+      maxTicks: 8,
+      scope: "task",
+      taskId: detail.task.id
+    });
+
+    expect(stop.kind).toBe("handoff-ready");
+  });
+
+  it("把 Core recovery attention 展示为 recovery-attention", () => {
+    const detail = buildDetail({
+      diagnosis: {
+        currentBlocker: "provider auth missing",
+        operatorAttention: { required: true, reasons: ["auth missing"] },
+        retryBudget: { scheduledCount: 0, exhausted: true },
+        operationLedger: [],
+        recoveryTimeline: [],
+        providerProtocolInspections: []
+      }
+    });
+
+    const stop = deriveRunUntilBlockedStopReason({
+      detail,
+      tick: { status: "ok", actions: [] },
+      tickIndex: 1,
+      maxTicks: 8,
+      scope: "task",
+      taskId: detail.task.id
+    });
+
+    expect(stop).toMatchObject({
+      kind: "recovery-attention",
+      summary: "auth missing"
+    });
+  });
+
+  it("global run 只展示 queue 层 no-candidate 与 max-ticks", () => {
+    expect(
+      deriveRunUntilBlockedStopReason({
+        tick: { status: "ok", actions: [] },
+        tickIndex: 1,
+        maxTicks: 8,
+        scope: "global"
+      }).kind
+    ).toBe("no-candidate");
+
+    expect(
+      deriveRunUntilBlockedStopReason({
+        tick: { status: "ok", actions: [{ kind: "task", status: "continued" }] },
+        tickIndex: 8,
+        maxTicks: 8,
+        scope: "global"
+      }).kind
+    ).toBe("max-ticks");
   });
 });
 

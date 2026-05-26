@@ -225,6 +225,7 @@ export type RunMatrixRow = {
   prSummary: string;
   agentSummary: string;
   artifactRefs: string[];
+  gateItems: GateItem[];
   needsMe: boolean;
   attentionRequired: boolean;
 };
@@ -256,6 +257,40 @@ export type WorkbenchV2Model = {
   };
 };
 
+export type RunUntilBlockedScope = "global" | "task";
+
+export type RunUntilBlockedStopKind =
+  | "continue"
+  | "observing-runtime"
+  | "waiting-operator-gate"
+  | "handoff-ready"
+  | "recovery-attention"
+  | "terminal"
+  | "no-candidate"
+  | "max-ticks"
+  | "failed"
+  | "unavailable";
+
+export type RunUntilBlockedTickSummary = {
+  status: string;
+  actions: Array<{
+    kind?: string;
+    taskId?: string;
+    workflowRunId?: string;
+    status?: string;
+    summary?: string;
+  }>;
+};
+
+export type RunUntilBlockedStopReason = {
+  stop: boolean;
+  kind: RunUntilBlockedStopKind;
+  label: string;
+  summary: string;
+  scope: RunUntilBlockedScope;
+  taskId?: string;
+};
+
 export function buildWorkbenchV2Model(input: {
   tasks: TaskListItem[];
   details: Record<string, TaskDetail>;
@@ -273,11 +308,11 @@ export function buildWorkbenchV2Model(input: {
 
   return {
     rows,
-    inbox: rows.flatMap(buildGateItems),
+    inbox: rows.flatMap((row) => row.gateItems),
     metrics: {
       total: rows.length,
       running: rows.filter((row) => row.pin === "running").length,
-      needsMe: rows.filter((row) => row.pin === "needs-me").length,
+      needsMe: rows.filter((row) => row.gateItems.length > 0).length,
       attention: rows.filter((row) => row.attentionRequired).length,
       done: rows.filter((row) => row.pin === "done").length
     }
@@ -286,10 +321,10 @@ export function buildWorkbenchV2Model(input: {
 
 export function buildRunMatrixRow(task: TaskListItem, detail?: TaskDetail): RunMatrixRow {
   const workflow = buildWorkflowLensSummary(task, detail);
-  const pendingHuman = detail?.humanRequests.find((request) => request.status === "pending" && request.kind !== "merge_approval");
-  const pendingMerge = detail?.humanRequests.find((request) => request.status === "pending" && request.kind === "merge_approval");
   const attentionRequired = Boolean(detail?.diagnosis.operatorAttention.required || isHighRiskStatus(task.status));
-  const needsMe = Boolean(pendingHuman || pendingMerge || workflow.gate.hasOperatorGate || attentionRequired || prNeedsOperator(detail?.latestPullRequest));
+  const blocker = detail?.currentBlocker ?? task.status;
+  const gateItems = buildNeedsMeGateProjection({ task, detail, workflow, blocker, attentionRequired });
+  const needsMe = gateItems.length > 0;
   const pin = needsMe ? "needs-me" : attentionRequired ? "attention" : isTerminalTaskStatus(task.status) ? "done" : isRunningTask(task.status, detail) ? "running" : "idle";
   return {
     dataTaskId: task.id,
@@ -298,14 +333,15 @@ export function buildRunMatrixRow(task: TaskListItem, detail?: TaskDetail): RunM
     detail,
     statusTone: taskTone(task.status, needsMe, attentionRequired, pin),
     pin,
-    blocker: detail?.currentBlocker ?? task.status,
-    nextOwner: nextOwner(task, detail, workflow, Boolean(pendingHuman), Boolean(pendingMerge), attentionRequired),
+    blocker,
+    nextOwner: nextOwner(task, workflow, gateItems),
     workflow,
     outerRail: buildOuterRail(task, detail),
     workflowRail: buildWorkflowRail(workflow),
     prSummary: prSummary(detail),
     agentSummary: agentSummary(detail),
     artifactRefs: collectArtifactRefs(detail, workflow).slice(0, 5),
+    gateItems,
     needsMe,
     attentionRequired
   };
@@ -371,59 +407,124 @@ export function buildWorkflowRail(workflow: WorkflowLensSummary): RailNode[] {
 }
 
 export function buildGateItems(row: RunMatrixRow): GateItem[] {
+  return row.gateItems;
+}
+
+export function deriveRunUntilBlockedStopReason(input: {
+  detail?: TaskDetail;
+  tick: RunUntilBlockedTickSummary;
+  tickIndex: number;
+  maxTicks: number;
+  scope: RunUntilBlockedScope;
+  taskId?: string;
+}): RunUntilBlockedStopReason {
+  const stop = (kind: RunUntilBlockedStopKind, label: string, summary: string, shouldStop = true): RunUntilBlockedStopReason => ({
+    stop: shouldStop,
+    kind,
+    label,
+    summary,
+    scope: input.scope,
+    taskId: input.taskId
+  });
+
+  if (input.scope === "global") {
+    if (input.tick.status === "failed") return stop("failed", "Global tick failed", "global daemon tick failed");
+    if (input.tick.actions.length === 0) return stop("no-candidate", "No candidate", "global queue has no safe action");
+    if (input.tickIndex >= input.maxTicks) return stop("max-ticks", "Max ticks", `stopped after ${input.maxTicks} ticks`);
+    return stop("continue", "Continue", "advancing global queue", false);
+  }
+
+  if (!input.detail) return stop("unavailable", "Task detail unavailable", "task detail unavailable");
+  if (input.tick.status === "failed") return stop("failed", "Task tick failed", "daemon tick failed for current task");
+
+  const row = buildRunMatrixRow(input.detail.task, input.detail);
+  const attentionItem = row.gateItems.find((item) => item.kind === "attention");
+  const workflowGate = row.gateItems.find((item) => item.kind === "workflow");
+  const operatorGate = row.gateItems.find((item) => item.kind === "human" || item.kind === "merge" || item.kind === "pr");
+
+  if (row.workflow.observation.mode === "recovery-attention" || attentionItem) {
+    return stop("recovery-attention", "Recovery attention", attentionItem?.summary ?? row.workflow.observation.reason);
+  }
+  if (workflowGate || row.workflow.observation.mode === "waiting-operator-gate") {
+    return stop("waiting-operator-gate", "Workflow gate", workflowGate?.summary ?? row.workflow.observation.reason);
+  }
+  if (operatorGate) {
+    return stop("waiting-operator-gate", operatorGate.label, operatorGate.summary);
+  }
+  if (row.workflow.observation.mode === "handoff-ready" || input.detail.workflowRuns[0]?.handoffKind) {
+    return stop("handoff-ready", "Handoff ready", row.workflow.observation.reason);
+  }
+  if (isTerminalTaskStatus(input.detail.task.status)) {
+    return stop("terminal", "Terminal", `terminal: ${input.detail.task.status}`);
+  }
+  if (row.workflow.observation.mode === "observing-runtime" || (input.detail.workflowRuns[0]?.status === "running" && !input.detail.workflowRuns[0]?.handoffKind)) {
+    // Web 只说明“正在观察 inner runtime”，不把 agent/internal action 变成 operator 待办。
+    return stop("observing-runtime", "Observing runtime", "waiting for workflow runtime, inner agent, or handoff");
+  }
+  if (input.tickIndex >= input.maxTicks) return stop("max-ticks", "Max ticks", `stopped after ${input.maxTicks} ticks`);
+  return stop("continue", "Continue", "advancing current task", false);
+}
+
+function buildNeedsMeGateProjection(input: {
+  task: TaskListItem;
+  detail?: TaskDetail;
+  workflow: WorkflowLensSummary;
+  blocker: string;
+  attentionRequired: boolean;
+}): GateItem[] {
   const items: GateItem[] = [];
-  const detail = row.detail;
+  const detail = input.detail;
   if (!detail) {
-    if (row.attentionRequired) {
-      items.push(buildAttentionGateItem(row, undefined));
+    if (input.attentionRequired) {
+      items.push(buildAttentionGateItem(input, undefined));
     }
     return items;
   }
 
-  const pendingHuman = detail.humanRequests.find((request) => request.status === "pending" && request.kind !== "merge_approval");
-  const pendingMerge = detail.humanRequests.find((request) => request.status === "pending" && request.kind === "merge_approval");
-  if (pendingHuman) {
+  const pendingHuman = detail.humanRequests.filter((request) => request.status === "pending" && request.kind !== "merge_approval");
+  const pendingMerge = detail.humanRequests.filter((request) => request.status === "pending" && request.kind === "merge_approval");
+  for (const request of pendingHuman) {
     items.push({
-      id: `human-${pendingHuman.id}`,
-      taskId: row.task.id,
-      projectName: row.task.projectName,
-      title: row.task.title,
+      id: `human-${request.id}`,
+      taskId: input.task.id,
+      projectName: input.task.projectName,
+      title: input.task.title,
       kind: "human",
       tone: "waiting",
       label: "Human request",
-      summary: pendingHuman.questionArtifactPath ?? pendingHuman.blockedKey
+      summary: request.questionArtifactPath ?? request.blockedKey
     });
   }
-  if (pendingMerge) {
+  for (const request of pendingMerge) {
     items.push({
-      id: `merge-${pendingMerge.id}`,
-      taskId: row.task.id,
-      projectName: row.task.projectName,
-      title: row.task.title,
+      id: `merge-${request.id}`,
+      taskId: input.task.id,
+      projectName: input.task.projectName,
+      title: input.task.title,
       kind: "merge",
-      tone: pendingMerge.approvalValid === false ? "danger" : "waiting",
+      tone: request.approvalValid === false ? "danger" : "waiting",
       label: "Merge approval",
-      summary: pendingMerge.approvalValid === false ? "snapshot invalid" : "waiting decision"
+      summary: request.approvalValid === false ? "snapshot invalid" : "waiting decision"
     });
   }
   const workflowGate = buildWorkflowGateInboxItem({
-    taskId: row.task.id,
-    projectName: row.task.projectName,
-    title: row.task.title,
-    actionIds: row.workflow.projection.allowedActions,
-    observation: row.workflow.observation
+    taskId: input.task.id,
+    projectName: input.task.projectName,
+    title: input.task.title,
+    actionIds: input.workflow.projection.allowedActions,
+    observation: input.workflow.observation
   });
-  // needs-me 只消费 Core/shared 的 workflow observation 与 classification，避免前端把 internal action 误升成人工 gate。
+  // 单一 projection 只消费 Core/shared classification，避免不同组件把 internal action 误升成人工 gate。
   if (workflowGate) items.push(workflowGate);
-  if (row.attentionRequired) {
-    items.push(buildAttentionGateItem(row, detail));
+  if (input.attentionRequired) {
+    items.push(buildAttentionGateItem(input, detail));
   }
   if (detail.latestPullRequest && prNeedsOperator(detail.latestPullRequest)) {
     items.push({
       id: `pr-${detail.latestPullRequest.id}`,
-      taskId: row.task.id,
-      projectName: row.task.projectName,
-      title: row.task.title,
+      taskId: input.task.id,
+      projectName: input.task.projectName,
+      title: input.task.title,
       kind: "pr",
       tone: "waiting",
       label: "PR / MR review",
@@ -528,18 +629,18 @@ function isRunningTask(status: string, detail?: TaskDetail): boolean {
 
 function nextOwner(
   task: TaskListItem,
-  detail: TaskDetail | undefined,
   workflow: WorkflowLensSummary,
-  needsHuman: boolean,
-  needsMerge: boolean,
-  attentionRequired: boolean
+  gateItems: GateItem[]
 ): string {
-  if (needsMerge) return "human approval";
-  if (needsHuman) return "human answer";
-  if (workflow.gate.hasOperatorGate) return "operator gate";
-  if (attentionRequired) return "operator recovery";
+  const firstGate = gateItems[0];
+  if (firstGate?.kind === "merge") return "human approval";
+  if (firstGate?.kind === "human") return "human answer";
+  if (firstGate?.kind === "workflow") return "operator gate";
+  if (firstGate?.kind === "attention") return "operator recovery";
+  if (firstGate?.kind === "pr") return "PR/MR review";
+  if (workflow.observation.mode === "handoff-ready") return "coordinator handoff";
+  if (workflow.observation.mode === "recovery-attention") return "operator recovery";
   if (workflow.observation.mode === "observing-runtime") return "workflow runtime";
-  if (detail?.latestPullRequest && prNeedsOperator(detail.latestPullRequest)) return "PR/MR review";
   if (isTerminalTaskStatus(task.status)) return "none";
   return task.status;
 }
@@ -562,16 +663,19 @@ function prNeedsOperator(pr: PullRequest | undefined): boolean {
   );
 }
 
-function buildAttentionGateItem(row: RunMatrixRow, detail: TaskDetail | undefined): GateItem {
+function buildAttentionGateItem(
+  source: { task: TaskListItem; blocker: string },
+  detail: TaskDetail | undefined
+): GateItem {
   return {
-    id: `attention-${row.task.id}`,
-    taskId: row.task.id,
-    projectName: row.task.projectName,
-    title: row.task.title,
+    id: `attention-${source.task.id}`,
+    taskId: source.task.id,
+    projectName: source.task.projectName,
+    title: source.task.title,
     kind: "attention",
-    tone: isHighRiskStatus(row.task.status) ? "danger" : "attention",
-    label: isHighRiskStatus(row.task.status) ? "High risk" : "Operator attention",
-    summary: detail?.diagnosis.operatorAttention.reasons[0] ?? row.blocker
+    tone: isHighRiskStatus(source.task.status) ? "danger" : "attention",
+    label: isHighRiskStatus(source.task.status) ? "High risk" : "Operator attention",
+    summary: detail?.diagnosis.operatorAttention.reasons[0] ?? source.blocker
   };
 }
 

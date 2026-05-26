@@ -6,6 +6,7 @@ import {
   buildRunMatrixRow,
   buildWorkbenchV2Model,
   collectArtifactRefs,
+  deriveRunUntilBlockedStopReason,
   isTerminalTaskStatus,
   type GateItem,
   type HumanRequest,
@@ -13,6 +14,7 @@ import {
   type PullRequest,
   type RailNode,
   type RunMatrixRow,
+  type RunUntilBlockedStopReason,
   type TaskDetail,
   type TaskListItem,
   type WorkflowLensSummary
@@ -45,7 +47,7 @@ type RunUntilBlockedState = {
   tickCount: number;
   maxTicks: number;
   logs: Array<{ index: number; status: string; actions: DaemonTickAction[] }>;
-  stopReason?: string;
+  stop?: RunUntilBlockedStopReason;
 };
 
 type WorkflowActionSubmitInput = {
@@ -169,7 +171,14 @@ function WorkbenchShell() {
         });
         logs = [...logs, { index, status: tick.status, actions: tick.actions }];
         currentDetail = await refresh(taskId ?? currentDetail?.task.id);
-        const stop = describeStopReason(currentDetail, tick, index, taskId ? "task" : "global");
+        const stop = deriveRunUntilBlockedStopReason({
+          detail: currentDetail,
+          tick,
+          tickIndex: index,
+          maxTicks: RUN_UNTIL_BLOCKED_MAX_TICKS,
+          scope: taskId ? "task" : "global",
+          taskId
+        });
         if (stop.stop) {
           setRunState({
             running: false,
@@ -178,13 +187,20 @@ function WorkbenchShell() {
             tickCount: index,
             maxTicks: RUN_UNTIL_BLOCKED_MAX_TICKS,
             logs,
-            stopReason: stop.reason
+            stop
           });
-          setFlash({ tone: "ok", message: stop.reason });
+          setFlash({ tone: "ok", message: stop.summary });
           return;
         }
       }
-      const reason = `stopped: max ticks ${RUN_UNTIL_BLOCKED_MAX_TICKS}`;
+      const stop: RunUntilBlockedStopReason = {
+        stop: true,
+        kind: "max-ticks",
+        label: "Max ticks",
+        summary: `stopped after ${RUN_UNTIL_BLOCKED_MAX_TICKS} ticks`,
+        scope: taskId ? "task" : "global",
+        taskId
+      };
       setRunState({
         running: false,
         scope: taskId ? "task" : "global",
@@ -192,11 +208,19 @@ function WorkbenchShell() {
         tickCount: logs.length,
         maxTicks: RUN_UNTIL_BLOCKED_MAX_TICKS,
         logs,
-        stopReason: reason
+        stop
       });
-      setFlash({ tone: "ok", message: reason });
+      setFlash({ tone: "ok", message: stop.summary });
     } catch (error) {
-      const reason = `stopped: ${error instanceof Error ? error.message : String(error)}`;
+      const summary = `stopped: ${error instanceof Error ? error.message : String(error)}`;
+      const stop: RunUntilBlockedStopReason = {
+        stop: true,
+        kind: "failed",
+        label: "Run failed",
+        summary,
+        scope: taskId ? "task" : "global",
+        taskId
+      };
       setRunState({
         running: false,
         scope: taskId ? "task" : "global",
@@ -204,9 +228,9 @@ function WorkbenchShell() {
         tickCount: logs.length,
         maxTicks: RUN_UNTIL_BLOCKED_MAX_TICKS,
         logs,
-        stopReason: reason
+        stop
       });
-      setFlash({ tone: "error", message: reason });
+      setFlash({ tone: "error", message: summary });
     }
   }
 
@@ -606,8 +630,8 @@ function GatePanel({
   onDecideMerge: (pr: PullRequest, request: HumanRequest, decision: "approve" | "reject") => void;
   onMerge: (pr: PullRequest) => void;
 }) {
-  const pendingHuman = detail.humanRequests.filter((request) => request.status === "pending" && request.kind !== "merge_approval");
-  const pendingMerge = detail.humanRequests.find((request) => request.status === "pending" && request.kind === "merge_approval");
+  const humanRequestByGateId = new Map(detail.humanRequests.map((request) => [`human-${request.id}`, request]));
+  const mergeRequestByGateId = new Map(detail.humanRequests.map((request) => [`merge-${request.id}`, request]));
   const pr = detail.latestPullRequest;
 
   return (
@@ -617,40 +641,65 @@ function GatePanel({
         <strong>{inbox.length}</strong>
       </div>
       {inbox.length === 0 ? <p className="muted">No operator gate.</p> : null}
-      {pendingHuman.map((request) => (
-        <form key={request.id} className="gate-card" onSubmit={(event) => onAnswer(event, request)}>
-          <strong>Human request</strong>
-          <small>{request.questionArtifactPath ?? request.blockedKey}</small>
-          <textarea name="answer" rows={3} placeholder="answer" required />
-          <input name="answeredBy" defaultValue="web-operator" />
-          <button type="submit">Send answer</button>
-        </form>
-      ))}
-      {pendingMerge && pr ? (
-        <article className="gate-card">
-          <strong>Merge approval</strong>
-          <small>{pendingMerge.approvalValid === false ? "snapshot invalid" : pr.title ?? pr.id}</small>
-          <div className="button-row">
-            <button type="button" onClick={() => onDecideMerge(pr, pendingMerge, "approve")}>
-              Approve
-            </button>
-            <button type="button" onClick={() => onDecideMerge(pr, pendingMerge, "reject")}>
-              Reject
-            </button>
-            <button type="button" onClick={() => onMerge(pr)}>
-              Merge
-            </button>
-          </div>
-        </article>
-      ) : null}
-      <WorkflowActionGate detail={detail} workflow={row.workflow} onWorkflowAction={onWorkflowAction} />
-      {detail.diagnosis.operatorAttention.required ? (
-        <article className="gate-card attention">
-          <strong>Operator attention</strong>
-          <small>{detail.diagnosis.operatorAttention.reasons[0] ?? detail.currentBlocker}</small>
-        </article>
-      ) : null}
+      {inbox.map((item) => {
+        // GatePanel 只按统一 projection 渲染，避免 count、pin 与 drawer card 各自分散判断。
+        if (item.kind === "human") {
+          const request = humanRequestByGateId.get(item.id);
+          if (!request) return <StaticGateCard key={item.id} item={item} />;
+          return (
+            <form key={item.id} className="gate-card" onSubmit={(event) => onAnswer(event, request)}>
+              <strong>{item.label}</strong>
+              <small>{item.summary}</small>
+              <textarea name="answer" rows={3} placeholder="answer" required />
+              <input name="answeredBy" defaultValue="web-operator" />
+              <button type="submit">Send answer</button>
+            </form>
+          );
+        }
+        if (item.kind === "merge") {
+          const request = mergeRequestByGateId.get(item.id);
+          if (!request || !pr) return <StaticGateCard key={item.id} item={item} />;
+          return (
+            <article key={item.id} className="gate-card">
+              <strong>{item.label}</strong>
+              <small>{request.approvalValid === false ? item.summary : pr.title ?? pr.id}</small>
+              <div className="button-row">
+                <button type="button" onClick={() => onDecideMerge(pr, request, "approve")}>
+                  Approve
+                </button>
+                <button type="button" onClick={() => onDecideMerge(pr, request, "reject")}>
+                  Reject
+                </button>
+                <button type="button" onClick={() => onMerge(pr)}>
+                  Merge
+                </button>
+              </div>
+            </article>
+          );
+        }
+        if (item.kind === "workflow") {
+          return <WorkflowActionGate key={item.id} detail={detail} workflow={row.workflow} onWorkflowAction={onWorkflowAction} />;
+        }
+        if (item.kind === "pr") {
+          return (
+            <article key={item.id} className="gate-card">
+              <strong>{item.label}</strong>
+              <small>{pr?.reviewSummary ?? item.summary}</small>
+            </article>
+          );
+        }
+        return <StaticGateCard key={item.id} item={item} />;
+      })}
     </section>
+  );
+}
+
+function StaticGateCard({ item }: { item: GateItem }) {
+  return (
+    <article className={`gate-card ${item.kind === "attention" ? "attention" : ""}`}>
+      <strong>{item.label}</strong>
+      <small>{item.summary}</small>
+    </article>
   );
 }
 
@@ -725,6 +774,7 @@ function WorkflowLens({ workflow }: { workflow: WorkflowLensSummary }) {
           {workflow.projection.actionHints.map((hint) => (
             <span key={hint.actionId}>
               {hint.actionId}: {hint.requiredArgs.join(", ") || "no args"}
+              {hint.usage ? ` / ${hint.usage}` : ""}
             </span>
           ))}
         </div>
@@ -829,16 +879,21 @@ function UnifiedComposerPlaceholder({ selectedTask }: { selectedTask?: TaskListI
 }
 
 function RunUntilBlockedBanner({ state }: { state: RunUntilBlockedState }) {
+  const stopKind = state.running ? "running" : state.stop?.kind ?? "stopped";
+  const stopLabel = state.running ? "Advancing queue" : state.stop?.label ?? "Stopped";
   return (
-    <section className="run-banner" aria-label="Run until blocked result">
+    <section className={`run-banner stop-${stopKind}`} aria-label="Run until blocked result">
       <div>
-        <strong>{state.running ? "running" : "stopped"}</strong>
+        <strong>{stopKind}</strong>
         <span>
           {state.scope}
           {state.taskId ? ` / ${state.taskId}` : ""} / {state.tickCount}/{state.maxTicks}
         </span>
       </div>
-      <p>{state.stopReason ?? "advancing queue"}</p>
+      <p>
+        <b>{stopLabel}</b>
+        <span>{state.stop?.summary ?? "advancing queue"}</span>
+      </p>
       <div className="run-log">
         {state.logs.slice(-4).map((entry) => (
           <span key={entry.index}>
@@ -884,33 +939,6 @@ async function hydrateTaskDetails(tasks: TaskListItem[]): Promise<Record<string,
     })
   );
   return Object.fromEntries(entries.filter((entry): entry is readonly [string, TaskDetail] => Boolean(entry)));
-}
-
-function describeStopReason(
-  detail: TaskDetail | undefined,
-  tick: DaemonTickResult,
-  tickIndex: number,
-  scope: "global" | "task"
-): { stop: boolean; reason: string } {
-  if (scope === "global") {
-    if (tick.status === "failed") return { stop: true, reason: "global daemon tick failed" };
-    if (tick.actions.length === 0) return { stop: true, reason: "global queue has no safe action" };
-    if (tickIndex >= RUN_UNTIL_BLOCKED_MAX_TICKS) return { stop: true, reason: "max ticks reached" };
-    return { stop: false, reason: "continue" };
-  }
-  if (!detail) return { stop: true, reason: "task detail unavailable" };
-  const row = buildRunMatrixRow(detail.task, detail);
-  if (isTerminalTaskStatus(detail.task.status)) return { stop: true, reason: `terminal: ${detail.task.status}` };
-  if (detail.diagnosis.operatorAttention.required) return { stop: true, reason: `operator attention: ${detail.diagnosis.operatorAttention.reasons[0] ?? detail.currentBlocker}` };
-  if (detail.humanRequests.some((request) => request.status === "pending")) return { stop: true, reason: "pending human or merge request" };
-  if (row.workflow.gate.hasOperatorGate) return { stop: true, reason: `operator workflow gate: ${row.workflow.gate.operatorActions.join(", ")}` };
-  if (detail.workflowRuns[0]?.status === "running" && !detail.workflowRuns[0]?.handoffKind) {
-    // workflow runtime 活跃时 Web 只观察，不把 internal action 解释成需要开发者手动决策。
-    return { stop: true, reason: "observing workflow runtime; waiting for inner agent or handoff" };
-  }
-  if (tick.status === "failed") return { stop: true, reason: "daemon tick failed" };
-  if (tickIndex >= RUN_UNTIL_BLOCKED_MAX_TICKS) return { stop: true, reason: "max ticks reached" };
-  return { stop: false, reason: "continue" };
 }
 
 function formatRelativeTime(value: string | undefined): string {
