@@ -319,6 +319,7 @@ Core 行为：
 
 - 提交 workflow action 时重新 inspect latest status，并重新校验 evidence。
 - 没有 inner agent 可见输出时拒绝 operator-facing action。
+- 只承认通过 lifecycle event 绑定当前 workflow run、且 event id 晚于最近 `workflow.action` 的 inner final response；空 provider fallback 文案和其他 run 的输出都保持不可提交。
 - 不因 evidence ready 让 daemon 自动确认 gate。
 
 ## 7. Run Until Blocked

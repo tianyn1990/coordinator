@@ -17,6 +17,7 @@ import {
   getAgentSession,
   getProject,
   getTask,
+  getWorkflowRun,
   releaseLock,
   updateAgentSession,
   updateOperation,
@@ -25,15 +26,19 @@ import {
   type DbContext,
   type LockRecord,
   type ProjectRecord,
-  type TaskRecord
+  type TaskRecord,
+  type WorkflowRunRecord,
+  type WorkspaceRecord
 } from "@coordinator/db";
 import { buildAgentActivitySummary, type AgentActivitySummary } from "./agent-activity.js";
 import { buildTaskSurfaceFromDb, type SurfaceEnvelope } from "./surface.js";
 
 const DEFAULT_AGENT_TIMEOUT_MS = 10 * 60 * 1000;
 const requireFromRuntime = createRequire(import.meta.url);
-const CODEX_PERMISSION_PROFILE = "codex:read-only:approval-never";
-const CLAUDE_PERMISSION_PROFILE = "claude-code:dontAsk:tools-none";
+const CODEX_OUTER_PERMISSION_PROFILE = "codex:read-only:approval-never";
+const CODEX_INNER_PERMISSION_PROFILE = "codex:workspace-write:approval-never";
+const CLAUDE_OUTER_PERMISSION_PROFILE = "claude-code:dontAsk:tools-none";
+const CLAUDE_INNER_PERMISSION_PROFILE = "claude-code:acceptEdits:claude-code-tools";
 
 export type AgentProviderImplementationMode = "sdk" | "cli-fallback" | "cli";
 
@@ -49,6 +54,8 @@ export type AgentProviderRunInput = {
     role: "outer" | "inner";
     taskId?: string;
     attemptId?: string;
+    workspaceId?: string;
+    workflowRunId?: string;
     surfaceId?: string;
   };
 };
@@ -96,6 +103,18 @@ export type AgentProvider = {
 
 export type RunCoordinatorAgentSessionInput = {
   taskId: string;
+  providerId?: string;
+  requestId?: string;
+  provider?: AgentProvider;
+  owner?: string;
+  ttlMs?: number;
+  timeoutMs?: number;
+  now?: Date;
+};
+
+export type RunInnerCodingAgentSessionInput = {
+  taskId: string;
+  workflowRunId: string;
   providerId?: string;
   requestId?: string;
   provider?: AgentProvider;
@@ -186,20 +205,21 @@ export class CodexProvider implements AgentProvider {
 
   run(input: AgentProviderRunInput): AgentProviderRunResult {
     const prompt = readFileSync(input.promptPath, "utf8");
+    const permissionProfile = codexPermissionProfile(input.metadata.role);
     if (this.implementation !== "cli-only") {
       try {
         return withProviderEvidence(
           this.sdkRunner({
             ...input,
             prompt,
-            permissionProfile: CODEX_PERMISSION_PROFILE,
+            permissionProfile,
             sdkPackageName: "@openai/codex-sdk",
             sdkImportPath: resolvePackageImport("@openai/codex-sdk"),
             providerVersion: resolvePackageVersion("@openai/codex-sdk")
           }),
           {
             implementationMode: "sdk",
-            permissionProfile: CODEX_PERMISSION_PROFILE,
+            permissionProfile,
             rawEventArtifactPath: input.transcriptPath,
             providerVersion: resolvePackageVersion("@openai/codex-sdk")
           }
@@ -218,6 +238,7 @@ export class CodexProvider implements AgentProvider {
     prompt: string,
     implementationMode: AgentProviderImplementationMode
   ): AgentProviderRunResult {
+    const permissionProfile = codexPermissionProfile(input.metadata.role);
     const args = [
       // 当前 Codex CLI 将 approval policy 作为顶层参数解析，必须放在 exec 子命令之前。
       "--ask-for-approval",
@@ -226,7 +247,7 @@ export class CodexProvider implements AgentProvider {
       "--cd",
       input.cwd,
       "--sandbox",
-      "read-only",
+      input.metadata.role === "inner" ? "workspace-write" : "read-only",
       "--skip-git-repo-check",
       "--output-last-message",
       input.outputPath,
@@ -241,7 +262,7 @@ export class CodexProvider implements AgentProvider {
       },
       {
         implementationMode,
-        permissionProfile: CODEX_PERMISSION_PROFILE,
+        permissionProfile,
         rawEventArtifactPath: input.transcriptPath
       }
     );
@@ -266,20 +287,21 @@ export class ClaudeCodeProvider implements AgentProvider {
 
   run(input: AgentProviderRunInput): AgentProviderRunResult {
     const prompt = readFileSync(input.promptPath, "utf8");
+    const permissionProfile = claudePermissionProfile(input.metadata.role);
     if (this.implementation !== "cli-only") {
       try {
         return withProviderEvidence(
           this.sdkRunner({
             ...input,
             prompt,
-            permissionProfile: CLAUDE_PERMISSION_PROFILE,
+            permissionProfile,
             sdkPackageName: "@anthropic-ai/claude-agent-sdk",
             sdkImportPath: resolvePackageImport("@anthropic-ai/claude-agent-sdk"),
             providerVersion: resolvePackageVersion("@anthropic-ai/claude-agent-sdk")
           }),
           {
             implementationMode: "sdk",
-            permissionProfile: CLAUDE_PERMISSION_PROFILE,
+            permissionProfile,
             rawEventArtifactPath: input.transcriptPath,
             providerVersion: resolvePackageVersion("@anthropic-ai/claude-agent-sdk")
           }
@@ -298,7 +320,10 @@ export class ClaudeCodeProvider implements AgentProvider {
     prompt: string,
     implementationMode: AgentProviderImplementationMode
   ): AgentProviderRunResult {
-    const args = ["--bare", "--print", "--permission-mode", "dontAsk", "--tools", "", "--output-format", "text"];
+    const permissionProfile = claudePermissionProfile(input.metadata.role);
+    const args = input.metadata.role === "inner"
+      ? ["--bare", "--print", "--permission-mode", "acceptEdits", "--output-format", "text"]
+      : ["--bare", "--print", "--permission-mode", "dontAsk", "--tools", "", "--output-format", "text"];
     const stdout = this.cliRunner("claude", args, { cwd: input.cwd, input: prompt, timeoutMs: input.timeoutMs });
     return withProviderEvidence(
       {
@@ -307,7 +332,7 @@ export class ClaudeCodeProvider implements AgentProvider {
       },
       {
         implementationMode,
-        permissionProfile: CLAUDE_PERMISSION_PROFILE,
+        permissionProfile,
         rawEventArtifactPath: input.transcriptPath
       }
     );
@@ -358,6 +383,14 @@ function withProviderEvidence(
   };
 }
 
+function codexPermissionProfile(role: AgentProviderRunInput["metadata"]["role"]): string {
+  return role === "inner" ? CODEX_INNER_PERMISSION_PROFILE : CODEX_OUTER_PERMISSION_PROFILE;
+}
+
+function claudePermissionProfile(role: AgentProviderRunInput["metadata"]["role"]): string {
+  return role === "inner" ? CLAUDE_INNER_PERMISSION_PROFILE : CLAUDE_OUTER_PERMISSION_PROFILE;
+}
+
 export function runCodexSdkBridge(input: AgentProviderSdkRunInput): AgentProviderRunResult {
   const stdout = runNodeSdkBridge(CODEX_SDK_BRIDGE_SCRIPT, {
     provider: "codex",
@@ -365,6 +398,7 @@ export function runCodexSdkBridge(input: AgentProviderSdkRunInput): AgentProvide
     prompt: input.prompt,
     transcriptPath: input.transcriptPath,
     permissionProfile: input.permissionProfile,
+    role: input.metadata.role,
     sdkImportPath: input.sdkImportPath,
     providerVersion: input.providerVersion
   }, input);
@@ -383,6 +417,7 @@ function runClaudeSdkBridge(input: AgentProviderSdkRunInput): AgentProviderRunRe
     prompt: input.prompt,
     transcriptPath: input.transcriptPath,
     permissionProfile: input.permissionProfile,
+    role: input.metadata.role,
     sdkImportPath: input.sdkImportPath,
     providerVersion: input.providerVersion
   }, input);
@@ -707,6 +742,311 @@ export function runCoordinatorAgentSession(
   }
 }
 
+export function runInnerCodingAgentSession(
+  context: DbContext,
+  input: RunInnerCodingAgentSessionInput
+): AgentSessionRuntimeResult {
+  // inner agent 会修改 workspace repo，因此使用 workspace lock；outer agent 仍只拿 task-agent lock。
+  const workflowRun = requireWorkflowRunRecord(context, input.workflowRunId);
+  if (workflowRun.taskId !== input.taskId) {
+    throw new AgentProviderRuntimeError(`workflow run ${workflowRun.id} does not belong to task ${input.taskId}`);
+  }
+  const task = requireTaskRecord(context, workflowRun.taskId);
+  const project = requireProjectRecord(context, workflowRun.projectId);
+  const workspace = requireReadyWorkspaceForWorkflow(context, workflowRun);
+  const providerId = input.providerId ?? project.innerAgentDefaultProvider;
+  if (!input.provider && !providerId) {
+    throw new ProviderUnavailableError(`project ${project.id} 未配置 inner agent provider`);
+  }
+  const provider = input.provider ?? createAgentProvider(providerId!);
+  const now = input.now ?? new Date();
+  const timeoutMs = input.timeoutMs ?? DEFAULT_AGENT_TIMEOUT_MS;
+  const ttlMs = Math.max(input.ttlMs ?? 0, timeoutMs + 60_000);
+  const owner = input.owner ?? "inner-agent-runtime";
+  const activeSession = getActiveAgentSessionByTask(context, task.id, "inner");
+  if (activeSession) {
+    throw new ActiveResourceConflictError(`task ${task.id} 已有 active inner agent session: ${activeSession.id}`);
+  }
+
+  const sessionId = randomUUID();
+  const sessionRoot = resolveInnerSessionRoot(workspace, sessionId);
+  const artifacts = buildSessionArtifactPaths(sessionRoot);
+  const innerContext = buildInnerAgentContext(project, task, workspace, workflowRun);
+  const surfaceId = `inner-context:${workflowRun.id}:v${workflowRun.stateVersion}`;
+  const requestId = normalizeRequestId(input.requestId) ?? `workflow-${workflowRun.id}:v${workflowRun.stateVersion}`;
+  const operationKey = `agent:session:${task.id}:inner:${provider.id}:${requestId}`;
+  let workspaceLock: LockRecord | undefined;
+  let session: AgentSessionRecord | undefined;
+  let operationId: string | undefined;
+  let sideEffectWindowStarted = false;
+  try {
+    const operation = createOperation(context, {
+      idempotencyKey: operationKey,
+      kind: "agent:session",
+      projectId: project.id,
+      taskId: task.id,
+      attemptId: workflowRun.attemptId
+    });
+    operationId = operation.id;
+    assertAgentOperationCanRun(operation.status);
+    workspaceLock = acquireLock(context, {
+      resourceKind: "workspace",
+      resourceId: workspace.id,
+      owner,
+      ttlMs,
+      now
+    });
+
+    mkdirSync(sessionRoot, { recursive: true });
+    writeInnerContextArtifacts(innerContext, artifacts);
+    writeInnerPromptArtifact(innerContext, provider, artifacts.promptPath);
+    writeFileSync(artifacts.transcriptPath, "", "utf8");
+
+    session = withTransaction(context, () => {
+      updateOperation(context, {
+        operationId: operation.id,
+        status: "running",
+        now,
+        lastObservedState: {
+          phase: "inner-session-artifacts-written",
+          providerId: provider.id,
+          workflowRunId: workflowRun.id,
+          workspaceId: workspace.id,
+          surfaceId
+        }
+      });
+      const created = createAgentSession(context, {
+        id: sessionId,
+        projectId: project.id,
+        taskId: task.id,
+        attemptId: workflowRun.attemptId,
+        providerKind: provider.id,
+        role: "inner",
+        status: "starting",
+        transcriptPath: artifacts.transcriptPath,
+        promptPath: artifacts.promptPath,
+        surfaceJsonPath: artifacts.surfaceJsonPath,
+        surfaceMarkdownPath: artifacts.surfaceMarkdownPath
+      });
+      appendEvent(context, {
+        type: "agent.session_started",
+        summary: `inner coding agent session started: ${created.id}`,
+        projectId: project.id,
+        taskId: task.id,
+        attemptId: workflowRun.attemptId,
+        workspaceId: workspace.id,
+        workflowRunId: workflowRun.id,
+        agentSessionId: created.id,
+        operationId: operation.id,
+        lockToken: workspaceLock!.lockToken,
+        artifactRefs: [artifacts.promptPath, artifacts.surfaceJsonPath, artifacts.surfaceMarkdownPath, artifacts.transcriptPath],
+        payload: {
+          providerId: provider.id,
+          providerKind: provider.kind,
+          capabilities: provider.capabilities,
+          role: "inner",
+          surfaceId,
+          cwd: workspace.repoPath,
+          workflowRunId: workflowRun.id,
+          externalRunId: workflowRun.externalId
+        }
+      });
+      return updateAgentSession(context, {
+        agentSessionId: created.id,
+        expectedStateVersion: created.stateVersion,
+        status: "running",
+        lock: {
+          resourceKind: "workspace",
+          resourceId: workspace.id,
+          lockToken: workspaceLock!.lockToken,
+          now
+        }
+      });
+    });
+
+    sideEffectWindowStarted = true;
+    const providerResult = provider.run({
+      sessionId,
+      cwd: workspace.repoPath!,
+      promptPath: artifacts.promptPath,
+      outputPath: artifacts.finalResponsePath,
+      transcriptPath: artifacts.transcriptPath,
+      timeoutMs,
+      metadata: {
+        providerId: provider.id,
+        role: "inner",
+        taskId: task.id,
+        attemptId: workflowRun.attemptId,
+        workspaceId: workspace.id,
+        workflowRunId: workflowRun.id,
+        surfaceId
+      }
+    });
+    const finalResponse = normalizeFinalResponse(providerResult.finalResponse);
+    writeFileSync(artifacts.finalResponsePath, finalResponse, "utf8");
+    appendTranscript(artifacts.transcriptPath, provider, sessionId, providerResult);
+    const completionNow = new Date();
+    const agentActivity = buildAgentActivitySummary({
+      state: "completed",
+      providerId: provider.id,
+      providerSessionId: providerResult.providerSessionId,
+      providerVersion: providerResult.providerVersion,
+      implementationMode: providerResult.implementationMode,
+      permissionProfile: providerResult.permissionProfile,
+      transcriptPath: artifacts.transcriptPath,
+      rawEventArtifactPath: providerResult.rawEventArtifactPath,
+      finalResponsePath: artifacts.finalResponsePath,
+      fallbackTimestamp: completionNow.toISOString()
+    });
+
+    const completedSession = withTransaction(context, () => {
+      const updated = updateAgentSession(context, {
+        agentSessionId: session!.id,
+        expectedStateVersion: session!.stateVersion,
+        status: "completed",
+        finalResponsePath: artifacts.finalResponsePath,
+        transcriptPath: artifacts.transcriptPath,
+        lock: {
+          resourceKind: "workspace",
+          resourceId: workspace.id,
+          lockToken: workspaceLock!.lockToken,
+          now: completionNow
+        }
+      });
+      registerSessionArtifacts(context, project.id, task.id, workflowRun.attemptId, artifacts);
+      appendEvent(context, {
+        type: "agent.session_completed",
+        summary: `inner coding agent session completed: ${updated.id}`,
+        projectId: project.id,
+        taskId: task.id,
+        attemptId: workflowRun.attemptId,
+        workspaceId: workspace.id,
+        workflowRunId: workflowRun.id,
+        agentSessionId: updated.id,
+        operationId: operation.id,
+        lockToken: workspaceLock!.lockToken,
+        artifactRefs: Object.values(artifacts),
+        payload: {
+          providerId: provider.id,
+          role: "inner",
+          surfaceId,
+          finalResponsePreview: finalResponse.slice(0, 500),
+          implementationMode: providerResult.implementationMode,
+          providerSessionId: providerResult.providerSessionId,
+          providerVersion: providerResult.providerVersion,
+          permissionProfile: providerResult.permissionProfile,
+          rawEventArtifactPath: providerResult.rawEventArtifactPath,
+          agentActivity
+        }
+      });
+      updateOperation(context, {
+        operationId: operation.id,
+        status: "succeeded",
+        now: completionNow,
+        lastObservedState: {
+          phase: "inner-agent-session-completed",
+          agentSessionId: updated.id,
+          providerId: provider.id,
+          workflowRunId: workflowRun.id,
+          workspaceId: workspace.id
+        }
+      });
+      return updated;
+    });
+
+    return {
+      session: completedSession,
+      operationId: operation.id,
+      surfaceId,
+      artifacts,
+      finalResponse
+    };
+  } catch (error) {
+    const failureNow = new Date();
+    const failureKind = classifyAgentProviderFailure(error);
+    if (operationId) {
+      updateOperation(context, {
+        operationId,
+        status: sideEffectWindowStarted ? "unknown" : "failed",
+        now: failureNow,
+        failureCode: failureKind,
+        lastObservedState: { phase: "inner-agent-session-failed", workflowRunId: workflowRun.id, failureKind }
+      });
+    }
+    if (session) {
+      const latest = getAgentSession(context, session.id) ?? session;
+      const failedStatus = sideEffectWindowStarted ? "unknown" : "failed";
+      try {
+        if (!existsSync(artifacts.finalResponsePath)) {
+          writeFileSync(
+            artifacts.finalResponsePath,
+            `inner agent provider failed before final response\n\n${error instanceof Error ? error.message : String(error)}\n`,
+            "utf8"
+          );
+        }
+        const updated = updateAgentSession(context, {
+          agentSessionId: latest.id,
+          expectedStateVersion: latest.stateVersion,
+          status: failedStatus,
+          finalResponsePath: artifacts.finalResponsePath,
+          lock: workspaceLock
+            ? {
+                resourceKind: "workspace",
+                resourceId: workspace.id,
+                lockToken: workspaceLock.lockToken,
+                now: failureNow
+              }
+            : undefined
+        });
+        registerSessionArtifacts(context, project.id, task.id, workflowRun.attemptId, artifacts);
+        const agentActivity = buildAgentActivitySummary({
+          state: failedStatus === "unknown" ? "unknown" : "failed",
+          providerId: provider.id,
+          transcriptPath: artifacts.transcriptPath,
+          rawEventArtifactPath: artifacts.transcriptPath,
+          finalResponsePath: artifacts.finalResponsePath,
+          failureKind,
+          fallbackTimestamp: failureNow.toISOString()
+        });
+        appendEvent(context, {
+          type: "agent.session_failed",
+          summary: `inner coding agent session failed: ${updated.id}`,
+          projectId: project.id,
+          taskId: task.id,
+          attemptId: workflowRun.attemptId,
+          workspaceId: workspace.id,
+          workflowRunId: workflowRun.id,
+          agentSessionId: updated.id,
+          operationId,
+          lockToken: workspaceLock?.lockToken,
+          severity: "warn",
+          artifactRefs: [
+            artifacts.promptPath,
+            artifacts.surfaceJsonPath,
+            artifacts.surfaceMarkdownPath,
+            artifacts.transcriptPath,
+            artifacts.finalResponsePath
+          ],
+          payload: {
+            providerId: provider.id,
+            role: "inner",
+            status: failedStatus,
+            errorName: failureKind,
+            agentActivity
+          }
+        });
+      } catch {
+        // 失败路径不能掩盖原始 provider 错误；后续 daemon/reconcile 会处理不一致状态。
+      }
+    }
+    throw error;
+  } finally {
+    if (workspaceLock) {
+      releaseLock(context, "workspace", workspace.id, workspaceLock.lockToken);
+    }
+  }
+}
+
 export function inspectAgentSession(context: DbContext, input: InspectAgentSessionInput): AgentSessionInspection {
   const session = getAgentSession(context, input.agentSessionId);
   if (!session) {
@@ -752,6 +1092,13 @@ function resolveSessionRoot(context: DbContext, project: ProjectRecord, task: Ta
   return join(root, sanitizePathPart(project.id), "sessions", sessionId);
 }
 
+function resolveInnerSessionRoot(workspace: WorkspaceRecord, sessionId: string): string {
+  if (!workspace.workspacePath) {
+    throw new AgentProviderRuntimeError(`workspace ${workspace.id} missing workspacePath`);
+  }
+  return join(workspace.workspacePath, "coordinator", "sessions", sessionId);
+}
+
 function buildSessionArtifactPaths(sessionRoot: string): AgentSessionRuntimeResult["artifacts"] {
   return {
     promptPath: join(sessionRoot, "prompt.md"),
@@ -760,6 +1107,88 @@ function buildSessionArtifactPaths(sessionRoot: string): AgentSessionRuntimeResu
     transcriptPath: join(sessionRoot, "transcript.jsonl"),
     finalResponsePath: join(sessionRoot, "final-response.md")
   };
+}
+
+type InnerAgentContext = {
+  task: {
+    id: string;
+    title: string;
+    description?: string;
+    autonomy: string;
+    requestedWorkflowProfile?: string;
+  };
+  project: {
+    id: string;
+    name: string;
+    repoPath?: string;
+    workflowLauncher: string;
+    innerAgentDefaultProvider?: string;
+  };
+  workspace: {
+    id: string;
+    repoPath: string;
+    branch?: string;
+    baseBranch?: string;
+  };
+  workflowRun: {
+    id: string;
+    externalId: string;
+    profileId: string;
+    status: string;
+    stateVersion: number;
+  };
+};
+
+function buildInnerAgentContext(
+  project: ProjectRecord,
+  task: TaskRecord,
+  workspace: WorkspaceRecord,
+  workflowRun: WorkflowRunRecord
+): InnerAgentContext {
+  if (!workspace.repoPath) {
+    throw new AgentProviderRuntimeError(`workspace ${workspace.id} missing repoPath`);
+  }
+  if (!workflowRun.externalId) {
+    throw new AgentProviderRuntimeError(`workflow run ${workflowRun.id} missing external run id`);
+  }
+  return {
+    task: {
+      id: task.id,
+      title: task.title,
+      description: task.description,
+      autonomy: task.autonomy,
+      requestedWorkflowProfile: task.requestedWorkflowProfile
+    },
+    project: {
+      id: project.id,
+      name: project.name,
+      repoPath: project.repoPath,
+      workflowLauncher: project.workflowLauncher ?? "workflow",
+      innerAgentDefaultProvider: project.innerAgentDefaultProvider
+    },
+    workspace: {
+      id: workspace.id,
+      repoPath: workspace.repoPath,
+      branch: workspace.branch,
+      baseBranch: workspace.baseBranch
+    },
+    workflowRun: {
+      id: workflowRun.id,
+      externalId: workflowRun.externalId,
+      profileId: workflowRun.profileId,
+      status: workflowRun.status,
+      stateVersion: workflowRun.stateVersion
+    }
+  };
+}
+
+function writeInnerContextArtifacts(
+  innerContext: InnerAgentContext,
+  artifacts: AgentSessionRuntimeResult["artifacts"]
+): void {
+  mkdirSync(dirname(artifacts.surfaceJsonPath), { recursive: true });
+  writeFileSync(artifacts.surfaceJsonPath, `${JSON.stringify(innerContext, null, 2)}\n`, "utf8");
+  writeFileSync(artifacts.surfaceMarkdownPath, renderInnerAgentContextMarkdown(innerContext), "utf8");
 }
 
 function writeSurfaceArtifacts(surface: SurfaceEnvelope, artifacts: AgentSessionRuntimeResult["artifacts"]): void {
@@ -788,6 +1217,59 @@ function writePromptArtifact(surface: SurfaceEnvelope, provider: AgentProvider, 
     surface.markdown
   ].join("\n");
   writeFileSync(promptPath, prompt, "utf8");
+}
+
+function writeInnerPromptArtifact(innerContext: InnerAgentContext, provider: AgentProvider, promptPath: string): void {
+  const launcher = innerContext.project.workflowLauncher;
+  const prompt = [
+    "# Inner Coding Agent Prompt",
+    "",
+    "你是由 Coordinator 启动的 inner coding agent。你在当前 workspace repo 中工作，目标是按 workflow 约束推进这个单个代码工作单元。",
+    "",
+    "## 当前上下文",
+    "",
+    renderInnerAgentContextMarkdown(innerContext),
+    "",
+    "## 必须遵守",
+    "",
+    "- 只在当前 workspace repo 中修改代码；不要修改 Coordinator 数据库或外层状态。",
+    "- 可以通过 workflow protocol 或本地 workflow skill 观察并推进当前 run。",
+    `- 当前 workflow status 命令：\`${launcher} protocol status --run ${innerContext.workflowRun.externalId}\`。`,
+    "- 不要读取、解析或修改 `.workflow` private state 文件，例如 `.workflow/current-run.json` 或 `.workflow/runs/**/state.json`。",
+    "- 不要自动执行需要人类确认的 workflow gate，例如 `freeze-requirements`、`approve-planning-dossier`、review approval 或 merge approval。",
+    "- `materialize-change`、alignment checks、实现推进类动作应由你在 workflow 约束下处理；不要把 change-id 这类内部参数转交给 Web operator 手填，除非 workflow 明确要求人工输入。",
+    "- 不能自动 merge；PR/MR/review/merge 仍由 Coordinator Core 的 human approval gate 管理。",
+    "",
+    "## 停止与最终回复",
+    "",
+    "当 workflow 到达真正 operator gate、handoff、失败或你无法继续时，停止并在最终回复中给出开发者可见的确认依据。",
+    "最终回复应简洁说明：你已检查的需求或实现事实、当前 workflow stage/substate、需要人确认的具体内容、风险或缺口。",
+    "不要输出 hidden reasoning；不要粘贴完整 raw tool logs 或 provider JSONL。",
+    "",
+    `provider_id: ${provider.id}`,
+    `provider_capabilities: ${provider.capabilities.join(", ")}`
+  ].join("\n");
+  writeFileSync(promptPath, prompt, "utf8");
+}
+
+function renderInnerAgentContextMarkdown(innerContext: InnerAgentContext): string {
+  return [
+    `- task_id: ${innerContext.task.id}`,
+    `- title: ${innerContext.task.title}`,
+    `- description: ${innerContext.task.description ?? ""}`,
+    `- autonomy: ${innerContext.task.autonomy}`,
+    `- project: ${innerContext.project.name} (${innerContext.project.id})`,
+    `- workspace_id: ${innerContext.workspace.id}`,
+    `- repo_path: ${innerContext.workspace.repoPath}`,
+    `- branch: ${innerContext.workspace.branch ?? "unknown"}`,
+    `- base_branch: ${innerContext.workspace.baseBranch ?? "unknown"}`,
+    `- workflow_run_id: ${innerContext.workflowRun.id}`,
+    `- workflow_external_run_id: ${innerContext.workflowRun.externalId}`,
+    `- workflow_profile: ${innerContext.workflowRun.profileId}`,
+    `- workflow_status: ${innerContext.workflowRun.status}`,
+    `- workflow_state_version: ${innerContext.workflowRun.stateVersion}`,
+    `- workflow_launcher: ${innerContext.project.workflowLauncher}`
+  ].join("\n");
 }
 
 function appendTranscript(
@@ -892,12 +1374,37 @@ function requireTaskRecord(context: DbContext, taskId: string): TaskRecord {
   return task;
 }
 
+function requireWorkflowRunRecord(context: DbContext, workflowRunId: string): WorkflowRunRecord {
+  const workflowRun = getWorkflowRun(context, workflowRunId);
+  if (!workflowRun) {
+    throw new AgentProviderRuntimeError(`workflow run not found: ${workflowRunId}`);
+  }
+  return workflowRun;
+}
+
 function requireProjectRecord(context: DbContext, projectId: string): ProjectRecord {
   const project = getProject(context, projectId);
   if (!project) {
     throw new AgentProviderRuntimeError(`project not found: ${projectId}`);
   }
   return project;
+}
+
+function requireReadyWorkspaceForWorkflow(context: DbContext, workflowRun: WorkflowRunRecord): WorkspaceRecord {
+  const workspace = getActiveWorkspaceByAttempt(context, workflowRun.attemptId);
+  if (!workspace) {
+    throw new AgentProviderRuntimeError(`workflow run ${workflowRun.id} has no active workspace`);
+  }
+  if (workspace.status !== "ready") {
+    throw new AgentProviderRuntimeError(`workspace ${workspace.id} is not ready: ${workspace.status}`);
+  }
+  if (!workspace.repoPath) {
+    throw new AgentProviderRuntimeError(`workspace ${workspace.id} missing repoPath`);
+  }
+  if (workspace.taskId !== workflowRun.taskId || workspace.attemptId !== workflowRun.attemptId) {
+    throw new AgentProviderRuntimeError(`workspace ${workspace.id} does not match workflow run ${workflowRun.id}`);
+  }
+  return workspace;
 }
 
 function sanitizePathPart(value: string): string {
@@ -1033,10 +1540,12 @@ import { pathToFileURL } from "node:url";
 const payload = JSON.parse(await readStdin());
 const { Codex } = await import(pathToFileURL(payload.sdkImportPath).href);
 const codex = new Codex();
+const isInner = payload.role === "inner";
 const thread = codex.startThread({
   workingDirectory: payload.cwd,
-  sandboxMode: "read-only",
+  sandboxMode: isInner ? "workspace-write" : "read-only",
   approvalPolicy: "never",
+  networkAccessEnabled: false,
   skipGitRepoCheck: true
 });
 let providerSessionId;
@@ -1104,6 +1613,7 @@ import { pathToFileURL } from "node:url";
 
 const payload = JSON.parse(await readStdin());
 const { query } = await import(pathToFileURL(payload.sdkImportPath).href);
+const isInner = payload.role === "inner";
 let providerSessionId;
 let finalResponse = "";
 let executionError;
@@ -1111,9 +1621,9 @@ const stream = query({
   prompt: payload.prompt,
   options: {
     cwd: payload.cwd,
-    permissionMode: "dontAsk",
-    tools: [],
-    allowedTools: [],
+    permissionMode: isInner ? "acceptEdits" : "dontAsk",
+    tools: isInner ? { type: "preset", preset: "claude_code" } : [],
+    allowedTools: isInner ? ["Read", "Grep", "Glob", "LS", "Edit", "MultiEdit", "Write", "Bash"] : [],
     includePartialMessages: true
   }
 });

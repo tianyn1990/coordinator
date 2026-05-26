@@ -37,6 +37,30 @@ describe("workbench v2 display model", () => {
     expect(row.outerRail.map((node) => node.id)).toEqual(["task", "plan", "workspace", "workflow", "pr", "review", "merge"]);
   });
 
+  it("Run Matrix agent summary 区分 inner 和 outer activity", () => {
+    const detail = buildDetail({
+      agentSessions: [
+        {
+          id: "inner-agent-1",
+          providerKind: "codex",
+          role: "inner",
+          status: "completed",
+          finalResponsePath: "coordinator/sessions/inner/final-response.md",
+          activity: {
+            state: "completed",
+            providerId: "codex",
+            eventCount: 1,
+            artifactRefs: { finalResponsePath: "coordinator/sessions/inner/final-response.md" }
+          }
+        }
+      ]
+    });
+
+    const row = buildRunMatrixRow(baseTask, detail);
+
+    expect(row.agentSummary).toContain("inner codex / completed");
+  });
+
   it("从现有 task detail 派生 Focus gate 与 queue metrics", () => {
     const detail = buildDetail({
       humanRequests: [
@@ -360,6 +384,58 @@ describe("run until blocked stop reason", () => {
 
     expect(stop.kind).toBe("waiting-operator-gate");
     expect(stop.summary).toBe("freeze-requirements");
+  });
+
+  it("workflow gate evidence missing 时 Run Until Blocked 继续等待 inner agent", () => {
+    const detail = buildDetail({
+      events: [
+        workflowEvent({
+          status: {
+            lifecycle: "active",
+            status: "running",
+            stage: "requirements",
+            substate: "freeze",
+            allowedActions: ["freeze-requirements"]
+          }
+        })
+      ]
+    });
+
+    const stop = deriveRunUntilBlockedStopReason({
+      detail,
+      gateEvidence: {
+        workflowRunId: "workflow-1",
+        taskId: "task-1",
+        attemptId: "attempt-1",
+        workflowRunStateVersion: 4,
+        evidenceStatus: "missing",
+        canSubmit: false,
+        actionIds: ["freeze-requirements"],
+        recentMessages: [],
+        protocolFacts: {
+          handoffAvailable: false,
+          allowedActions: ["freeze-requirements"],
+          operatorActions: ["freeze-requirements"],
+          agentInternalActions: [],
+          debugOnlyActions: [],
+          deniedActions: [],
+          stageArtifacts: []
+        },
+        supportingArtifacts: [],
+        warnings: ["missing evidence"]
+      },
+      tick: { status: "ok", actions: [{ kind: "workflow", status: "blocked" }] },
+      tickIndex: 1,
+      maxTicks: 8,
+      scope: "task",
+      taskId: detail.task.id
+    });
+
+    expect(stop).toMatchObject({
+      stop: false,
+      kind: "observing-runtime",
+      summary: "waiting for inner coding agent evidence"
+    });
   });
 
   it("把 workflow handoff 展示为 handoff-ready，不用 stage/substate 推导完成态", () => {

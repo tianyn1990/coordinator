@@ -10,6 +10,7 @@ import {
   createProject,
   createTask,
   createWorkspace,
+  createWorkflowRun,
   getOperationByIdempotencyKey,
   listTaskEvents,
   runMigrations,
@@ -24,6 +25,7 @@ import {
   inspectAgentSession,
   normalizeProviderEvent,
   runCoordinatorAgentSession,
+  runInnerCodingAgentSession,
   type AgentProviderRunInput,
   type AgentProviderRunner,
   type AgentProviderSdkRunInput
@@ -63,6 +65,65 @@ function createTaskFixture(databasePath: string) {
     return { projectId: project.id, taskId: task.id };
   });
   return { ...ids, repoPath, workspaceRoot };
+}
+
+function createInnerWorkflowFixture(databasePath: string) {
+  const repoPath = createRepoPath();
+  const workspaceRoot = mkdtempSync(join(tmpdir(), "coordinator-agent-inner-workspaces-"));
+  return withDatabase(databasePath, (context) => {
+    const project = createProject(context, {
+      id: "project-inner-agent",
+      name: "inner agent",
+      repoPath,
+      defaultBranch: "main",
+      workspaceRoot,
+      workflowLauncher: "workflow",
+      innerAgentDefaultProvider: "fake-inner"
+    });
+    const task = createTask(context, {
+      id: "task-inner-agent",
+      projectId: project.id,
+      title: "inner agent task",
+      description: "run inner coding agent",
+      autonomy: "balanced"
+    });
+    const attempt = createAttempt(context, {
+      id: "attempt-inner-agent",
+      projectId: project.id,
+      taskId: task.id
+    });
+    const workspacePath = join(workspaceRoot, project.id, task.id, attempt.id);
+    const workspaceRepoPath = join(workspacePath, "repo");
+    mkdirSync(join(workspaceRepoPath, ".git"), { recursive: true });
+    const workspace = createWorkspace(context, {
+      id: "workspace-inner-agent",
+      projectId: project.id,
+      taskId: task.id,
+      attemptId: attempt.id,
+      status: "ready",
+      workspacePath,
+      repoPath: workspaceRepoPath,
+      branch: "coordinator/task-inner-agent/attempt-inner-agent",
+      baseBranch: "main"
+    });
+    const workflowRun = createWorkflowRun(context, {
+      id: "workflow-inner-agent",
+      projectId: project.id,
+      taskId: task.id,
+      attemptId: attempt.id,
+      profileId: "feature",
+      status: "running",
+      externalId: "run-inner-agent"
+    });
+    return {
+      projectId: project.id,
+      taskId: task.id,
+      attemptId: attempt.id,
+      workspaceId: workspace.id,
+      workspaceRepoPath,
+      workflowRunId: workflowRun.id
+    };
+  });
 }
 
 describe("agent provider runtime", () => {
@@ -167,6 +228,72 @@ describe("agent provider runtime", () => {
     expect(seen[0].cwd).not.toBe(workspaceRepoPath);
     expect(readFileSync(result.artifacts.promptPath, "utf8")).toContain("workspace: workspace-agent-cwd (ready)");
     expect(readFileSync(result.artifacts.promptPath, "utf8")).toContain(`workspace_path: ${workspacePath}`);
+  });
+
+  it("inner coding agent 在 workspace repo 中运行并生成 workflow-aware evidence prompt", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createInnerWorkflowFixture(databasePath);
+    const seen: AgentProviderRunInput[] = [];
+    const provider = {
+      id: "fake-inner",
+      kind: "fake",
+      capabilities: ["code-editing", "workflow-runtime"],
+      run(input: AgentProviderRunInput) {
+        seen.push(input);
+        return {
+          finalResponse: "我已检查 workflow 状态，当前需要确认需求范围。",
+          transcript: JSON.stringify({ type: "provider.raw_event", event: "inner.completed" })
+        };
+      }
+    };
+
+    const result = withDatabase(databasePath, (context) =>
+      runInnerCodingAgentSession(context, {
+        taskId: fixture.taskId,
+        workflowRunId: fixture.workflowRunId,
+        provider
+      })
+    );
+
+    expect(result.session).toMatchObject({
+      taskId: fixture.taskId,
+      attemptId: fixture.attemptId,
+      role: "inner",
+      providerKind: "fake-inner",
+      status: "completed"
+    });
+    expect(seen[0]).toMatchObject({
+      cwd: fixture.workspaceRepoPath,
+      metadata: {
+        role: "inner",
+        taskId: fixture.taskId,
+        attemptId: fixture.attemptId,
+        workspaceId: fixture.workspaceId,
+        workflowRunId: fixture.workflowRunId
+      }
+    });
+    expect(readFileSync(result.artifacts.promptPath, "utf8")).toContain("workflow protocol status --run run-inner-agent");
+    expect(readFileSync(result.artifacts.promptPath, "utf8")).toContain("不要读取、解析或修改 `.workflow` private state");
+    expect(readFileSync(result.artifacts.promptPath, "utf8")).toContain("不要自动执行需要人类确认的 workflow gate");
+    expect(readFileSync(result.artifacts.promptPath, "utf8")).not.toContain("coordinator-tool 代码块");
+    expect(readFileSync(result.artifacts.finalResponsePath, "utf8")).toContain("确认需求范围");
+
+    const persisted = withDatabase(databasePath, (context) => ({
+      operation: getOperationByIdempotencyKey(
+        context,
+        `agent:session:${fixture.taskId}:inner:fake-inner:workflow-${fixture.workflowRunId}:v0`
+      ),
+      events: listTaskEvents(context, fixture.taskId)
+    }));
+    expect(persisted.operation).toMatchObject({ status: "succeeded" });
+    expect(persisted.events.find((event) => event.type === "agent.session_completed")?.payload).toMatchObject({
+      role: "inner",
+      providerId: "fake-inner",
+      agentActivity: {
+        state: "completed",
+        artifactRefs: { finalResponsePath: result.artifacts.finalResponsePath }
+      }
+    });
   });
 
   it("拒绝同一 task 的重复 active outer agent session", () => {
@@ -330,6 +457,42 @@ describe("agent provider runtime", () => {
     });
     expect(typeof sdkCalls[0].sdkImportPath).toBe("string");
     expect(existsSync(sdkCalls[0].sdkImportPath!)).toBe(true);
+  });
+
+  it("CodexProvider inner session 使用 workspace-write profile 且不使用 danger-full-access", () => {
+    const sdkCalls: AgentProviderSdkRunInput[] = [];
+    const sdkRunner = (input: AgentProviderSdkRunInput) => {
+      sdkCalls.push(input);
+      return { finalResponse: "codex inner sdk final" };
+    };
+    const root = mkdtempSync(join(tmpdir(), "coordinator-agent-codex-inner-sdk-"));
+    const promptPath = join(root, "prompt.md");
+    const transcriptPath = join(root, "transcript.jsonl");
+    writeFileSync(promptPath, "# inner prompt", "utf8");
+
+    const provider = new CodexProvider({
+      sdkRunner,
+      cliRunner: () => {
+        throw new Error("CLI fallback should not run");
+      }
+    });
+    const result = provider.run({
+      sessionId: "inner-session-1",
+      cwd: root,
+      promptPath,
+      outputPath: join(root, "final.md"),
+      transcriptPath,
+      timeoutMs: 1234,
+      metadata: { providerId: "codex", role: "inner", taskId: "task-1", workspaceId: "workspace-1" }
+    });
+
+    expect(result.permissionProfile).toBe("codex:workspace-write:approval-never");
+    expect(result.permissionProfile).not.toContain("danger-full-access");
+    expect(sdkCalls[0]).toMatchObject({
+      cwd: root,
+      permissionProfile: "codex:workspace-write:approval-never",
+      metadata: { role: "inner" }
+    });
   });
 
   it("CodexProvider 在 SDK unavailable 时受控回落到 CLI fallback", () => {
@@ -534,6 +697,42 @@ describe("agent provider runtime", () => {
     });
     expect(typeof sdkCalls[0].sdkImportPath).toBe("string");
     expect(existsSync(sdkCalls[0].sdkImportPath!)).toBe(true);
+  });
+
+  it("ClaudeCodeProvider inner session 使用可编辑 profile 且不使用 bypassPermissions", () => {
+    const sdkCalls: AgentProviderSdkRunInput[] = [];
+    const sdkRunner = (input: AgentProviderSdkRunInput) => {
+      sdkCalls.push(input);
+      return { finalResponse: "claude inner sdk final" };
+    };
+    const root = mkdtempSync(join(tmpdir(), "coordinator-agent-claude-inner-sdk-"));
+    const promptPath = join(root, "prompt.md");
+    const transcriptPath = join(root, "transcript.jsonl");
+    writeFileSync(promptPath, "# inner prompt", "utf8");
+
+    const provider = new ClaudeCodeProvider({
+      sdkRunner,
+      cliRunner: () => {
+        throw new Error("CLI fallback should not run");
+      }
+    });
+    const result = provider.run({
+      sessionId: "inner-session-1",
+      cwd: root,
+      promptPath,
+      outputPath: join(root, "final.md"),
+      transcriptPath,
+      timeoutMs: 1234,
+      metadata: { providerId: "claude-code", role: "inner", taskId: "task-1", workspaceId: "workspace-1" }
+    });
+
+    expect(result.permissionProfile).toBe("claude-code:acceptEdits:claude-code-tools");
+    expect(result.permissionProfile).not.toContain("bypass");
+    expect(sdkCalls[0]).toMatchObject({
+      cwd: root,
+      permissionProfile: "claude-code:acceptEdits:claude-code-tools",
+      metadata: { role: "inner" }
+    });
   });
 
   it("SDK raw events 只写入 transcript artifact，不进入 Core event payload", () => {

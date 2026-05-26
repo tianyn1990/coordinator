@@ -7,12 +7,14 @@ import {
   createArtifact,
   createOperation,
   getActiveAgentSessionByTask,
+  getActiveWorkspaceByAttempt,
   getLatestPullRequestByTask,
   getActiveWorkflowRunByAttempt,
   getWorkflowRun,
   getHumanRequest,
   getLock,
   getOperationByIdempotencyKey,
+  getProject,
   getTask,
   getWorkspace,
   listExpiredLocks,
@@ -20,6 +22,7 @@ import {
   listHumanRequestsByTaskAndStatus,
   listOperationsByStatusAndKindPrefix,
   listOperationsByTaskStatusAndKindPrefix,
+  listTaskEvents,
   listHumanRequestsByStatus,
   listTasks,
   listWorkspacesByTaskAndStatus,
@@ -46,6 +49,7 @@ import {
 import {
   AgentProviderRuntimeError,
   runCoordinatorAgentSession,
+  runInnerCodingAgentSession,
   type AgentProvider,
   type RunCoordinatorAgentSessionInput
 } from "./agent-provider-runtime.js";
@@ -58,6 +62,7 @@ import {
   type WorkflowProtocolRunner
 } from "./workflow-protocol-adapter.js";
 import { inspectAgentSession } from "./agent-provider-runtime.js";
+import { buildWorkflowGateEvidence, WorkflowGateEvidenceError } from "./workflow-gate-evidence.js";
 import {
   decideAgentSessionRecovery,
   decideLockRecovery,
@@ -87,6 +92,8 @@ export type DaemonRuntimeInput = {
   now?: Date;
   provider?: AgentProvider;
   providerId?: string;
+  innerProvider?: AgentProvider;
+  innerProviderId?: string;
   workflowInspectRunner?: WorkflowProtocolRunner;
   workspaceGitRunner?: WorkspaceGitRunner;
   pullRequestProvider?: PullRequestProvider;
@@ -346,6 +353,7 @@ export function runDaemonTick(context: DbContext, input: DaemonRuntimeInput = {}
   actions.push(...reconcileWorkflowActionOperations(context, tickId, input, touchedWorkflowRunIds, touchedTaskIds));
   actions.push(...watchActiveAgentSessions(context, tickId, owner, now, input));
   actions.push(...reconcileWorkflowRuns(context, tickId, owner, input, touchedWorkflowRunIds, touchedTaskIds));
+  actions.push(...advanceInnerCodingAgentSessions(context, tickId, owner, now, input, touchedTaskIds));
   actions.push(...wakeAnsweredHumanRequests(context, tickId, owner, now, input, touchedTaskIds));
   actions.push(...advanceCandidateTasks(context, tickId, owner, now, input, touchedTaskIds));
 
@@ -387,6 +395,23 @@ function reconcileWorkspaces(
       workspaceId: workspace.id,
       gitRunner: input.workspaceGitRunner
     });
+    if (shouldDeferWorkspaceDirtyRecovery(context, workspace, observation)) {
+      appendEvent(context, {
+        type: "daemon.workspace_dirty_deferred",
+        summary: `daemon deferred workspace dirty recovery during active workflow: ${workspace.id}`,
+        projectId: workspace.projectId,
+        taskId: workspace.taskId,
+        attemptId: workspace.attemptId,
+        workspaceId: workspace.id,
+        severity: "debug",
+        payload: {
+          tickId,
+          reason: "active-workflow-execution-window",
+          invariant: "inner agent 写入 workspace 是 workflow execution 的受控状态，不应被 workspace recovery 提前拦截"
+        }
+      });
+      continue;
+    }
     const decision = decideWorkspaceRecovery({ workspace, observation });
     if (decision.kind === "no_op") {
       continue;
@@ -406,6 +431,20 @@ function reconcileWorkspaces(
     });
   }
   return actions;
+}
+
+function shouldDeferWorkspaceDirtyRecovery(
+  context: DbContext,
+  workspace: { attemptId: string },
+  observation: { kind: string }
+): boolean {
+  if (observation.kind !== "dirty_unknown") {
+    return false;
+  }
+  const activeWorkflowRun = getActiveWorkflowRunByAttempt(context, workspace.attemptId);
+  // active workflow run 的 workspace 会被 inner coding agent 正常改写；这里仅延后 workspace recovery，
+  // 让 workflow projection 与 agent lifecycle 决定下一步，避免把受控执行产物误报成人工事故。
+  return Boolean(activeWorkflowRun && activeWorkflowRun.status === "running");
 }
 
 function reconcileExpiredLocks(context: DbContext, tickId: string, now: Date, input: DaemonRuntimeInput): DaemonActionResult[] {
@@ -645,8 +684,10 @@ function isLockOwnerActive(context: DbContext, resourceKind: string, resourceId:
   if (!workspace) {
     return false;
   }
+  // inner agent 持有 workspace 写入窗口时不能释放 lock，否则会破坏 provider 运行中的 repo 状态。
   return Boolean(
     getActiveAgentSessionByTask(context, workspace.taskId, "outer") ||
+    getActiveAgentSessionByTask(context, workspace.taskId, "inner") ||
     getActiveWorkflowRunByAttempt(context, workspace.attemptId) ||
     hasActiveOperationForWorkspace(context, workspace.taskId, workspace.attemptId)
   );
@@ -753,11 +794,12 @@ function watchActiveAgentSessions(
   now: Date,
   input: DaemonRuntimeInput
 ): DaemonActionResult[] {
+  // stale watcher 同时覆盖 outer/inner；两类 session 都只由 Core recovery decision 收口。
   const rows = context.db
     .prepare(
       `SELECT id, project_id, task_id, attempt_id, provider_kind, role, status, transcript_path, updated_at
        FROM agent_sessions
-       WHERE role = 'outer' AND status IN ('starting', 'running')
+       WHERE role IN ('outer', 'inner') AND status IN ('starting', 'running')
        ORDER BY updated_at ASC, created_at ASC, id ASC`
     )
     .all() as Array<{
@@ -1026,6 +1068,227 @@ function reconcileWorkflowRun(
       summary: `workflow run ${run.id} reconcile failed`
     };
   }
+}
+
+function advanceInnerCodingAgentSessions(
+  context: DbContext,
+  tickId: string,
+  owner: string,
+  now: Date,
+  input: DaemonRuntimeInput,
+  touchedTaskIds: Set<string>
+): DaemonActionResult[] {
+  const runs = input.taskId
+    ? listWorkflowRunsByTaskAndStatus(context, input.taskId, ["running"], input.candidateLimit ?? 5)
+    : listWorkflowRunsByStatus(context, ["running"], input.candidateLimit ?? 5);
+  const actions: DaemonActionResult[] = [];
+  for (const run of runs) {
+    if (touchedTaskIds.has(run.taskId)) {
+      continue;
+    }
+    const task = getTask(context, run.taskId);
+    if (!task || isTaskBlockedForInnerAgent(task)) {
+      continue;
+    }
+    const workspace = getActiveWorkspaceByAttempt(context, run.attemptId);
+    if (!workspace || workspace.status !== "ready" || !workspace.repoPath) {
+      continue;
+    }
+    if (getActiveAgentSessionByTask(context, run.taskId, "inner")) {
+      continue;
+    }
+    const project = getProject(context, run.projectId);
+    const innerProviderId = input.innerProvider?.id ?? input.innerProviderId ?? project?.innerAgentDefaultProvider;
+    if (!input.innerProvider && !innerProviderId) {
+      appendEvent(context, {
+        type: "daemon.inner_agent_skipped",
+        summary: `inner agent provider missing for workflow run: ${run.id}`,
+        projectId: run.projectId,
+        taskId: run.taskId,
+        attemptId: run.attemptId,
+        workspaceId: workspace.id,
+        workflowRunId: run.id,
+        severity: "warn",
+        payload: {
+          tickId,
+          reason: "inner-agent-provider-missing",
+          invariant: "daemon 不把 workflow allowedActions 回落成人工 action queue"
+        }
+      });
+      actions.push({
+        kind: "retry_blocked",
+        taskId: run.taskId,
+        workflowRunId: run.id,
+        workspaceId: workspace.id,
+        status: "skipped",
+        summary: `inner agent provider missing for workflow run ${run.id}`
+      });
+      touchedTaskIds.add(run.taskId);
+      continue;
+    }
+
+    const evidence = buildWorkflowGateEvidenceSafely(context, run.id);
+    // 只有当前确实是 operator gate 且 evidence 可提交时才等待人类确认；
+    // internal action 上的旧 evidence 不能阻止 inner agent 继续执行 workflow runtime 工作。
+    if (evidence?.canSubmit) {
+      continue;
+    }
+
+    const requestId = buildInnerAgentSessionRequestId(context, run);
+    const operationKey = `agent:session:${run.taskId}:inner:${innerProviderId}:${requestId}`;
+    const previousOperation = getOperationByIdempotencyKey(context, operationKey);
+    if (previousOperation && isTerminalOperationStatus(previousOperation.status)) {
+      appendEvent(context, {
+        type: "daemon.inner_agent_skipped",
+        summary: `daemon skipped already processed inner agent boundary: ${run.id}`,
+        projectId: run.projectId,
+        taskId: run.taskId,
+        attemptId: run.attemptId,
+        workspaceId: workspace.id,
+        workflowRunId: run.id,
+        severity: "debug",
+        payload: { tickId, requestId, operationStatus: previousOperation.status }
+      });
+      actions.push({
+        kind: "agent_tool_skipped",
+        taskId: run.taskId,
+        workflowRunId: run.id,
+        workspaceId: workspace.id,
+        status: "skipped",
+        summary: `inner agent boundary already processed: ${requestId}`
+      });
+      touchedTaskIds.add(run.taskId);
+      continue;
+    }
+
+    try {
+      // daemon 只负责启动/观察 inner provider；workflow action 仍只能由 operator-only Core helper 执行。
+      const session = runInnerCodingAgentSession(context, {
+        taskId: run.taskId,
+        workflowRunId: run.id,
+        provider: input.innerProvider,
+        providerId: input.innerProviderId,
+        requestId,
+        owner
+      });
+      appendEvent(context, {
+        type: "daemon.inner_agent_session_started",
+        summary: `daemon ran inner coding agent for workflow run: ${run.id}`,
+        projectId: run.projectId,
+        taskId: run.taskId,
+        attemptId: run.attemptId,
+        workspaceId: workspace.id,
+        workflowRunId: run.id,
+        agentSessionId: session.session.id,
+        operationId: session.operationId,
+        payload: { tickId, surfaceId: session.surfaceId }
+      });
+      actions.push({
+        kind: "agent_session_started",
+        taskId: run.taskId,
+        workflowRunId: run.id,
+        workspaceId: workspace.id,
+        agentSessionId: session.session.id,
+        status: "succeeded",
+        summary: `inner coding agent session completed: ${session.session.id}`
+      });
+
+      try {
+        const inspected = inspectWorkflowRun(context, buildWorkflowInspectInput(run.id, input.workflowInspectRunner));
+        actions.push({
+          kind: "workflow_inspected",
+          taskId: run.taskId,
+          workflowRunId: run.id,
+          workspaceId: workspace.id,
+          status: "succeeded",
+          summary: `workflow run ${inspected.workflowRun.id} inspected after inner agent`
+        });
+      } catch (error) {
+        appendEvent(context, {
+          type: "daemon.workflow_reconcile_failed",
+          summary: `daemon failed to inspect workflow after inner agent: ${run.id}`,
+          projectId: run.projectId,
+          taskId: run.taskId,
+          attemptId: run.attemptId,
+          workspaceId: workspace.id,
+          workflowRunId: run.id,
+          severity: "warn",
+          payload: { tickId, error: errorSummaryFrom(error) }
+        });
+        actions.push({
+          kind: "reconcile_failed",
+          taskId: run.taskId,
+          workflowRunId: run.id,
+          workspaceId: workspace.id,
+          status: "failed",
+          summary: `workflow run ${run.id} inspect after inner agent failed`
+        });
+      }
+      touchedTaskIds.add(run.taskId);
+    } catch (error) {
+      appendEvent(context, {
+        type: "daemon.inner_agent_failed",
+        summary: `daemon failed to run inner coding agent: ${run.id}`,
+        projectId: run.projectId,
+        taskId: run.taskId,
+        attemptId: run.attemptId,
+        workspaceId: workspace.id,
+        workflowRunId: run.id,
+        severity: "warn",
+        payload: { tickId, error: errorSummaryFrom(error) }
+      });
+      actions.push({
+        kind: "reconcile_failed",
+        taskId: run.taskId,
+        workflowRunId: run.id,
+        workspaceId: workspace.id,
+        status: "failed",
+        summary: `inner coding agent failed for workflow run ${run.id}`
+      });
+      touchedTaskIds.add(run.taskId);
+    }
+  }
+  return actions;
+}
+
+function buildWorkflowGateEvidenceSafely(
+  context: DbContext,
+  workflowRunId: string
+): { canSubmit: boolean; evidenceStatus: string } | undefined {
+  try {
+    return buildWorkflowGateEvidence(context, { workflowRunId });
+  } catch (error) {
+    if (error instanceof WorkflowGateEvidenceError) {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+function isTaskBlockedForInnerAgent(task: TaskRecord): boolean {
+  return [
+    "paused",
+    "canceled",
+    "completed",
+    "handoff",
+    "failed",
+    "waiting_human",
+    "waiting_review",
+    "waiting_merge_approval",
+    "merge_waiting"
+  ].includes(task.status);
+}
+
+function buildInnerAgentSessionRequestId(context: DbContext, run: WorkflowRunRecord): string {
+  const boundary = findLastWorkflowActionBoundary(context, run) ?? "initial";
+  return `workflow-${run.id}:v${run.stateVersion}:boundary-${boundary}`;
+}
+
+function findLastWorkflowActionBoundary(context: DbContext, run: WorkflowRunRecord): string | undefined {
+  const event = [...listTaskEvents(context, run.taskId)]
+    .reverse()
+    .find((item) => item.workflowRunId === run.id && item.type === "workflow.action");
+  return event ? `event-${event.id}` : undefined;
 }
 
 function wakeAnsweredHumanRequests(

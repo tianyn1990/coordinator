@@ -156,9 +156,9 @@ P2 只预留接口和规划，不进入 V1 完成标准：
 
 ### 当前进度
 
-- 当前阶段：进入 `Iteration 16: SDK-backed Workflow Gate Evidence`，目标是让 workflow operator gate 展示 coding agent 可见确认依据，避免 Web/API 盲确认。
-- 当前 OpenSpec change：`add-sdk-backed-gate-evidence` 正在实现中；上一轮 `add-web-v2-composer-attachments-real-flow` 已归档到 `openspec/changes/archive/2026-05-26-add-web-v2-composer-attachments-real-flow/`。
-- 当前正式规格：本轮已同步 `core-data-model`、`coordinator-surface`、`observability` 和 `web-human-review-surface`；上一轮已同步 `operator-task-controls`、`agent-provider-runtime`、`daemon-runtime`、`workflow-protocol-adapter` 等相关规格。
+- 当前阶段：`Iteration 17: Inner Coding Agent Lifecycle` 的 Slice 17.1 已完成实现、review 修复、OpenSpec 归档和规格同步；目标是让 Coordinator 通过 SDK-backed inner coding agent 生成 workflow gate evidence，并在 agent 停止后结合 workflow protocol status 判断下一步。
+- 当前 OpenSpec change：`add-inner-coding-agent-lifecycle` 已归档到 `openspec/changes/archive/2026-05-26-add-inner-coding-agent-lifecycle`；上一轮 `add-sdk-backed-gate-evidence` 已完成并提交。
+- 当前正式规格：本轮已同步 `agent-provider-runtime`、`daemon-runtime`、`observability`、`web-human-review-surface` 和 `workflow-gate-evidence`；上一轮已同步 `core-data-model`、`coordinator-surface`、`operator-task-controls`、`workflow-protocol-adapter` 等相关规格。
 - 当前已落地事实：旧 Web 已将 New Task 从侧栏小表单提升为完整任务下达页面，支持更长文本编辑、acceptance criteria、constraints、autonomy、workflow hint/default 说明和附件占位；Project Admin 已支持查看 project registry 摘要和注册 project，并明确 workspace init/cleanup hook 与 retention policy 仍是 disabled 预留，不执行脚本副作用；旧 Task Cockpit 和 Workbench 已支持 `Run until blocked` operator loop，只循环调用 Core API 的 daemon tick 与 refresh/inspect，不自动执行 workflow action；旧 Task Cockpit 和 Classic Debug 已补齐 create/update PR/MR、inspect review、request merge approval 的 operator actions，approve/reject/merge 仍由 Core gate 校验；Workflow Protocol Adapter 已适配 `@hetao-ai/workflow@0.6.10` 的 `progress` 与 `stageArtifacts` display projection，并把它们持久化到 workflow event payload，供 Web Workflow Lens 展示。
 - 当前设计修正：`add-web-workflow-action-loop` 已证明 Web -> Core -> workflow protocol action 的受控链路可用，但不应把所有 workflow `allowedActions` 都转成人工待办。Coordinator 后续应围绕 inner coding agent 生命周期观察和恢复：agent 仍在运行时只观察；agent 停止/失败/stalled/handoff 后，Core 再结合 agent evidence、workflow status/events、operation ledger 和 PR/MR/human facts 判断 owner。`materialize-change <change-id>` 等 agent/internal action 不进入 needs-me。
 - 当前 protocol 约束：本期不修改 `/Users/hetao/Documents/github/workflow`，也不要求 `workflow protocol` 新增字段。`agent.state`、`blocker.owner`、`operatorActions`、`agentActions` 只作为后续可选增强方向；Coordinator 侧先用保守 action classification 避免误报人工 gate。
@@ -168,10 +168,45 @@ P2 只预留接口和规划，不进入 V1 完成标准：
 - 当前可靠性补强：`/daemon/tick` 支持 operator-only task scope；Core daemon runtime 在 task scope 下先按 task 过滤 operations、workspaces、workflow runs、human requests 和 expired workspace/pr-merge locks，再应用 candidate limit，避免单任务 run-until-blocked 被其它任务的全局候选窗口 starvation；全局 run-until-blocked 仍是 operator convenience，不成为 Core 状态机。
 - 当前 Slice 15.2 已落地：Web V2 使用单一 `Needs-Me Gate Inbox` projection 驱动 Command Bar count、Run Matrix pin 和 Focus Drawer gate card；pending human request、merge approval、PR/MR review/conflict、operator-facing workflow gate、Core recovery attention 和 failed/unknown/blocked high-risk state 才进入 needs-me；`materialize-change`、`run-alignment-checks`、inspect/resume、unknown/debug action 只进入 Workflow Lens / Debug Detail。`Run until blocked` banner 使用 observation-aware stop reason，区分 `observing-runtime`、`waiting-operator-gate`、`handoff-ready`、`recovery-attention`、`terminal`、`no-candidate`、`max-ticks` 和 `failed`，并隔离 task-scoped/global 展示。
 - 当前 Slice 15.3 已落地：Web V2 Unified Composer 支持新建 task、回复 pending human request 和追加 task note；human request 输入已收敛到 Composer，Focus Drawer 只展示 gate 摘要；本地附件通过 Web -> API -> Core 上传到 task artifact root，DB 只记录 `task_attachments` metadata，Core event、operator summary 和 Coordinator Surface 只暴露 artifact refs/短摘要，不保存 raw base64 或大块文件正文；附件校验覆盖 size、MIME/extension、空 safe filename、路径 traversal 和 artifact root containment；workflow operator gate 仍只由 Focus Drawer gate card 显式提交，Composer 不调用 workflow action endpoint。
-- 当前验证结果：`pnpm test`、`pnpm typecheck`、`pnpm --filter @coordinator/db build`、`pnpm --filter @coordinator/core build`、`pnpm --filter @coordinator/api build`、`pnpm --filter @coordinator/web build`、`openspec validate add-web-v2-composer-attachments-real-flow --strict`、`openspec validate --all --strict` 和重点回归 tests 均已通过；浏览器桌面视口 smoke 已创建 task、经同一 API/Core attachment endpoint 上传安全占位附件、追加 note、刷新 Attachment Shelf/refs，并运行 task-scoped `Run task` 到 `MAX-TICKS`，未发现 Composer/Attachment Shelf/Focus Drawer 顶层重叠。
-- 当前 review 结论：Slice 15.3 独立 subagent review 未发现 Web 直接调用 workflow CLI、读写 `.workflow` private state、daemon/outer Agent 自动执行 workflow action、扩大 Coordinator Agent Surface，或把 raw provider events / workflow debug / attachment payload 变成新状态机或 agent surface；review 指出的空 safe filename 未拒绝、human request 双输入入口、附件失败后不刷新新 task 已修复。上一轮 Web V2 shell、Gate Inbox/runtime observation 与 AgentProvider event normalization review 结论仍然有效。
-- 下一阶段：完成 `add-sdk-backed-gate-evidence` 后，真实 smoke 到 `freeze-requirements` 应能显示 gate evidence；如果当前尚无 inner agent SDK output，应明确显示 missing evidence 并阻止盲确认。
+- 当前验证结果：本轮已通过 `pnpm test`、`pnpm typecheck`、`pnpm --filter @coordinator/core build`、`openspec validate add-inner-coding-agent-lifecycle --strict`；上一轮 Web V2 验证的 `pnpm --filter @coordinator/db build`、`pnpm --filter @coordinator/api build`、`pnpm --filter @coordinator/web build`、`openspec validate --all --strict` 结论继续作为历史基线。真实 Web smoke 已走到 `implementation/implement`：`freeze-requirements` 和 `approve-planning-dossier` 在 inner final response evidence ready 后确认，`materialize-change` 未进入 needs-me，由 inner agent 创建并校验 `add-s1-signup-form-cache` 后推进。
+- 当前 review 结论：Slice 17.1 独立 subagent review 未发现修改 workflow 工程/protocol schema、Web/daemon/outer 自动执行 workflow action 或 human gate、读写 `.workflow` private state、污染 Core/Daemon/Workflow protocol/AgentProvider/Web 分层，或把 raw provider events / hidden reasoning 变成状态机或 Surface。review 指出的 gate evidence 同秒 timestamp 边界、空 provider final response 占位文本、跨 workflow run evidence 污染风险已修复，并补充 event id / workflow-run-bound lifecycle event 回归测试。
+- 当前 Slice 17.1 已落地：daemon 可在 active workflow run 中启动 SDK-backed inner coding agent，operator gate evidence ready 后才停给 Web 人工确认；`materialize-change <change-id>` 与 `continue-implementation` 保持 internal/debug，不进入 needs-me。真实 Web smoke 已验证 `freeze-requirements`、`approve-planning-dossier` evidence ready 后可确认，`materialize-change` 由 inner agent 自动创建并校验 `add-s1-signup-form-cache` 后调用 workflow action 推进；同时修复了 active workflow dirty workspace 被误标 operator attention、internal action 被旧 evidence 阻断、旧 evidence 同秒复用、空 final response 误提交和跨 run evidence 污染问题。
+- 下一阶段：继续关注 Web V2 信息架构重做和 inner agent final response 在 Focus Drawer 中的 evidence 呈现质量。
 - 下一阶段重点：继续保持 Coordinator 作为 workflow run 管理者、观察者、恢复者和人工 gate 收件箱；本期仍不修改 workflow protocol，不读取 `.workflow` private state，不让 daemon/outer Agent 自动执行 workflow action 或 human gate。
+
+### Iteration 17: Inner Coding Agent Lifecycle
+
+本阶段必须继续遵守第 4 节固定动作。每个实现切片开始前必须阅读根目录 `AGENTS.md`、`docs/AGENTS.md`、`docs/workflow-agent-lifecycle-handoff.md`、`docs/execution-workspace.md`、`docs/workflow-protocol.md`、`docs/web-developer-workbench.md`、`docs/observability.md`、`docs/daemon.md` 与相关专题文档；创建 OpenSpec change；实现和测试；交给独立 subagent review，明确检查是否符合 `docs/` 总体设计心智、是否过度设计、是否污染 Core/Daemon/Workflow protocol/AgentProvider/Web 分层、是否错误让 daemon/outer Agent 自动执行 workflow action、是否把 raw provider events 或 hidden reasoning 变成新状态机。
+
+#### Slice 17.1: SDK-backed inner coding agent lifecycle
+
+OpenSpec change：
+
+```text
+add-inner-coding-agent-lifecycle
+```
+
+目标：
+
+- Core 增加 `role=inner` coding agent runtime，复用现有 Codex / Claude SDK-first `AgentProvider`，但 cwd 指向 ready workspace 的 `repo/`。
+- inner prompt 明确要求 coding agent 在 workflow 约束下推进，遇到 operator gate、handoff、失败或无法继续时输出 human-visible final response，形成 workflow gate evidence。
+- daemon 在 active workflow run 需要 runtime/inner 继续处理、当前没有 active inner session、且当前不是 operator gate evidence 可提交时启动 inner coding agent；agent 运行中只观察，agent 完成后再通过 workflow protocol status inspect 对齐状态。
+- operator detail / Web V2 展示 inner session activity、final response artifact refs 和 gate evidence 状态，但不扩大 Workflow Action Panel、Needs-Me 或 Coordinator Agent Surface。
+
+边界：
+
+- 不修改 `/Users/hetao/Documents/github/workflow` 或 workflow protocol schema。
+- 不读取、解析或修改 `.workflow` private state。
+- daemon、outer Agent、Web 都不能自动确认 human gate、workflow operator action 或 merge。
+- `materialize-change`、`run-alignment-checks`、inspect/resume 和 unknown/debug action 仍不进入 needs-me。
+- raw provider JSONL、hidden reasoning、permission internals 和完整 transcript 只保留为 debug artifact/ref，不作为 Core 状态机真源。
+
+验收建议：
+
+- 单测覆盖 inner cwd/permission profile/prompt 边界、active inner 防重、missing evidence 启动 inner、ready evidence 不自动确认、inner 完成后 workflow inspect。
+- 单测覆盖 active workflow dirty workspace defer、internal action 不被旧 evidence 阻断、active inner lock/watchdog recovery。
+- Web/model 测试覆盖 inner activity 可见、internal action 不进 needs-me、ready/missing evidence 的按钮状态不回归。
+- 真实 Web smoke 尽量走到 `freeze-requirements`：inner final response 可见后，gate evidence 从 `missing` 变为 `ready`；确认后 workflow 离开 requirements 或进入下一停点；internal action 不要求开发者手填参数。
 
 ### Iteration 16: SDK-backed Workflow Gate Evidence
 

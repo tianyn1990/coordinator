@@ -530,6 +530,7 @@ export function deriveUnifiedComposerProjection(input: {
 
 export function deriveRunUntilBlockedStopReason(input: {
   detail?: TaskDetail;
+  gateEvidence?: WorkflowGateEvidence;
   tick: RunUntilBlockedTickSummary;
   tickIndex: number;
   maxTicks: number;
@@ -564,6 +565,10 @@ export function deriveRunUntilBlockedStopReason(input: {
     return stop("recovery-attention", "Recovery attention", attentionItem?.summary ?? row.workflow.observation.reason);
   }
   if (workflowGate || row.workflow.observation.mode === "waiting-operator-gate") {
+    // operator gate 只有在 evidence ready 后才真正“停给人”；missing 时继续 tick，让 daemon 有机会启动 inner agent。
+    if (input.gateEvidence && input.gateEvidence.evidenceStatus !== "ready") {
+      return stop("observing-runtime", "Missing gate evidence", "waiting for inner coding agent evidence", false);
+    }
     return stop("waiting-operator-gate", "Workflow gate", workflowGate?.summary ?? row.workflow.observation.reason);
   }
   if (operatorGate) {
@@ -807,7 +812,7 @@ function agentSummary(detail?: TaskDetail): string {
   const latest = detail?.agentSessions[0];
   if (!latest) return "agent none";
   const activity = latest.activity;
-  return `${latest.providerKind} / ${activity?.state ?? latest.status}${activity?.lastActivityAt ? ` / ${formatRelativeTime(activity.lastActivityAt)}` : ""}`;
+  return `${latest.role} ${latest.providerKind} / ${activity?.state ?? latest.status}${activity?.lastActivityAt ? ` / ${formatRelativeTime(activity.lastActivityAt)}` : ""}`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

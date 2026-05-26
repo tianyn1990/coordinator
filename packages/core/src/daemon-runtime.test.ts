@@ -14,6 +14,7 @@ import {
   createPullRequest,
   createTask,
   createWorkspace,
+  createWorkflowRun,
   getLock,
   getLatestPullRequestByTask,
   getOperationByIdempotencyKey,
@@ -146,6 +147,26 @@ function createWorkflowWorkspaceGitRunner(expectedBranch: string) {
     if (args[0] === "status") return "";
     return "";
   };
+}
+
+function createRunningWorkflowRunFixture(
+  context: DbContext,
+  fixture: { projectId: string; taskId: string; workspaceRoot: string },
+  workflowRunId: string,
+  externalId: string
+) {
+  const fixtureWorkspace = createWorkflowWorkspaceFixture(context, fixture, workflowRunId);
+  const workflowRun = createWorkflowRun(context, {
+    id: workflowRunId,
+    projectId: fixture.projectId,
+    taskId: fixture.taskId,
+    attemptId: fixtureWorkspace.attempt.id,
+    profileId: "feature",
+    status: "running",
+    externalId
+  });
+  context.db.prepare("UPDATE tasks SET status = ? WHERE id = ?").run("running", fixture.taskId);
+  return { ...fixtureWorkspace, workflowRun };
 }
 
 function createMigratedDatabase(): string {
@@ -629,6 +650,46 @@ describe("daemon runtime", () => {
         attemptId: fixture.attemptId,
         providerKind: "fake",
         role: "outer",
+        status: "running"
+      });
+    });
+
+    withDatabase(databasePath, (context) => runDaemonTick(context, {
+      now,
+      provider: new FakeAgentProvider("no-op"),
+      workspaceGitRunner: fixture.workspaceGitRunner
+    }));
+
+    const state = withDatabase(databasePath, (context) => ({
+      lock: getLock(context, "workspace", fixture.workspaceId),
+      events: listTaskEvents(context, fixture.taskId)
+    }));
+    expect(state.lock).toBeDefined();
+    expect(state.events.find((event) => event.type === "daemon.recovery_decision")?.payload).toMatchObject({
+      reasonCode: "expired-lock-owner-active",
+      operatorAttentionRequired: true
+    });
+  });
+
+  it("daemon 对 active inner session 持有的 expired workspace lock 不释放", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createReadyWorkspaceFixture(databasePath, "lock-inner-owner-active");
+    const now = new Date("2026-05-03T00:00:02.000Z");
+
+    withDatabase(databasePath, (context) => {
+      acquireLock(context, {
+        resourceKind: "workspace",
+        resourceId: fixture.workspaceId,
+        owner: "old-owner",
+        ttlMs: 1000,
+        now: new Date("2026-05-03T00:00:00.000Z")
+      });
+      createAgentSession(context, {
+        projectId: fixture.projectId,
+        taskId: fixture.taskId,
+        attemptId: fixture.attemptId,
+        providerKind: "fake",
+        role: "inner",
         status: "running"
       });
     });
@@ -1772,6 +1833,399 @@ describe("daemon runtime", () => {
     expect(JSON.stringify(state.surface.json)).not.toContain("change-id");
   });
 
+  it("缺少 gate evidence 时 daemon 启动 inner coding agent 并在完成后 inspect workflow", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createTaskFixture(databasePath);
+    const providerCalls: AgentProviderRunInput[] = [];
+    const innerProvider = {
+      id: "fake-inner-daemon",
+      kind: "fake",
+      capabilities: ["code-editing"],
+      run(input: AgentProviderRunInput) {
+        providerCalls.push(input);
+        return { finalResponse: "需求范围已经整理完毕，请确认 freeze requirements。" };
+      }
+    };
+    let branch = "";
+    let workflowRunId = "";
+    let workspaceRepoPath = "";
+    let inspectCount = 0;
+    const runner: WorkflowProtocolRunner = () => {
+      inspectCount += 1;
+      return JSON.stringify({
+        runId: "inner-run-daemon",
+        profile: "feature",
+        lifecycle: "active",
+        allowedActions: ["freeze-requirements"],
+        handoff: { available: false, artifacts: [] },
+        summary: "requirements await operator evidence"
+      });
+    };
+
+    withDatabase(databasePath, (context) => {
+      const setup = createRunningWorkflowRunFixture(context, fixture, "workflow-run-inner-daemon", "inner-run-daemon");
+      branch = setup.branch;
+      workflowRunId = setup.workflowRun.id;
+      workspaceRepoPath = setup.workspace.repoPath!;
+    });
+
+    const result = withDatabase(databasePath, (context) =>
+      runDaemonTick(context, {
+        taskId: fixture.taskId,
+        innerProvider,
+        workflowInspectRunner: runner,
+        workspaceGitRunner: createWorkflowWorkspaceGitRunner(branch)
+      })
+    );
+
+    expect(result.actions).toContainEqual(
+      expect.objectContaining({
+        kind: "agent_session_started",
+        workflowRunId,
+        status: "succeeded"
+      })
+    );
+    expect(result.actions.filter((action) => action.kind === "workflow_inspected" && action.workflowRunId === workflowRunId)).toHaveLength(2);
+    expect(inspectCount).toBe(2);
+    expect(providerCalls[0]).toMatchObject({
+      cwd: workspaceRepoPath,
+      metadata: { role: "inner", workflowRunId }
+    });
+
+    const events = withDatabase(databasePath, (context) => listTaskEvents(context, fixture.taskId));
+    expect(events.map((event) => event.type)).toEqual(
+      expect.arrayContaining(["agent.session_completed", "daemon.inner_agent_session_started", "workflow.status_inspected"])
+    );
+    expect(JSON.stringify(events)).not.toContain("workflow.action");
+  });
+
+  it("active workflow 的 dirty workspace 不阻断 inner coding agent 继续推进", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createTaskFixture(databasePath);
+    const providerCalls: AgentProviderRunInput[] = [];
+    const innerProvider = {
+      id: "fake-inner-daemon",
+      kind: "fake",
+      capabilities: ["code-editing"],
+      run(input: AgentProviderRunInput) {
+        providerCalls.push(input);
+        return { finalResponse: "实现产物已更新，等待 workflow 下一步。" };
+      }
+    };
+    let branch = "";
+    let workflowRunId = "";
+    const runner: WorkflowProtocolRunner = () =>
+      JSON.stringify({
+        runId: "inner-run-dirty-workspace",
+        profile: "feature",
+        lifecycle: "active",
+        allowedActions: ["continue-implementation"],
+        handoff: { available: false, artifacts: [] },
+        summary: "implementation window"
+      });
+
+    withDatabase(databasePath, (context) => {
+      const setup = createRunningWorkflowRunFixture(
+        context,
+        fixture,
+        "workflow-run-dirty-workspace",
+        "inner-run-dirty-workspace"
+      );
+      branch = setup.branch;
+      workflowRunId = setup.workflowRun.id;
+    });
+
+    const result = withDatabase(databasePath, (context) =>
+      runDaemonTick(context, {
+        taskId: fixture.taskId,
+        innerProvider,
+        workflowInspectRunner: runner,
+        workspaceGitRunner: (args) => {
+          if (args[0] === "rev-parse" && args[1] === "--is-inside-work-tree") return "true\n";
+          if (args[0] === "branch") return `${branch}\n`;
+          if (args[0] === "status") return " M src/pages/SignIn/index.tsx\n";
+          return "";
+        }
+      })
+    );
+
+    expect(providerCalls).toHaveLength(1);
+    expect(result.actions).toContainEqual(
+      expect.objectContaining({
+        kind: "agent_session_started",
+        workflowRunId,
+        status: "succeeded"
+      })
+    );
+    const state = withDatabase(databasePath, (context) => ({
+      task: context.db.prepare("SELECT status FROM tasks WHERE id = ?").get(fixture.taskId) as { status: string },
+      events: listTaskEvents(context, fixture.taskId)
+    }));
+    expect(state.task.status).toBe("running");
+    expect(state.events.map((event) => event.type)).toContain("daemon.workspace_dirty_deferred");
+    expect(JSON.stringify(state.events)).not.toContain("workspace-dirty_unknown");
+  });
+
+  it("internal workflow action 即使已有旧 evidence 也继续启动 inner coding agent", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createTaskFixture(databasePath);
+    const providerCalls: AgentProviderRunInput[] = [];
+    const innerProvider = {
+      id: "fake-inner-daemon",
+      kind: "fake",
+      capabilities: ["code-editing"],
+      run(input: AgentProviderRunInput) {
+        providerCalls.push(input);
+        return { finalResponse: "继续实现已完成，等待 test-align。" };
+      }
+    };
+    let branch = "";
+    let workflowRunId = "";
+    const runner: WorkflowProtocolRunner = () =>
+      JSON.stringify({
+        runId: "inner-run-old-evidence-internal",
+        profile: "feature",
+        lifecycle: "active",
+        allowedActions: ["continue-implementation"],
+        handoff: { available: false, artifacts: [] },
+        summary: "implementation window"
+      });
+
+    withDatabase(databasePath, (context) => {
+      const setup = createRunningWorkflowRunFixture(
+        context,
+        fixture,
+        "workflow-run-old-evidence-internal",
+        "inner-run-old-evidence-internal"
+      );
+      branch = setup.branch;
+      workflowRunId = setup.workflowRun.id;
+      const finalResponsePath = join(mkdtempSync(join(tmpdir(), "coordinator-internal-old-evidence-")), "final-response.md");
+      writeFileSync(finalResponsePath, "上一轮 gate evidence 已完成。", "utf8");
+      createAgentSession(context, {
+        id: "completed-inner-old-evidence",
+        projectId: fixture.projectId,
+        taskId: fixture.taskId,
+        attemptId: setup.attempt.id,
+        providerKind: "fake-inner-daemon",
+        role: "inner",
+        status: "completed",
+        finalResponsePath
+      });
+      appendEvent(context, {
+        type: "agent.session_completed",
+        summary: "inner session completed: completed-inner-old-evidence",
+        projectId: fixture.projectId,
+        taskId: fixture.taskId,
+        attemptId: setup.attempt.id,
+        workflowRunId,
+        agentSessionId: "completed-inner-old-evidence",
+        payload: { role: "inner" }
+      });
+    });
+
+    const result = withDatabase(databasePath, (context) =>
+      runDaemonTick(context, {
+        taskId: fixture.taskId,
+        innerProvider,
+        workflowInspectRunner: runner,
+        workspaceGitRunner: createWorkflowWorkspaceGitRunner(branch)
+      })
+    );
+
+    expect(providerCalls).toHaveLength(1);
+    expect(result.actions).toContainEqual(
+      expect.objectContaining({
+        kind: "agent_session_started",
+        workflowRunId,
+        status: "succeeded"
+      })
+    );
+    const events = withDatabase(databasePath, (context) => listTaskEvents(context, fixture.taskId));
+    expect(events.map((event) => event.type)).toContain("daemon.inner_agent_session_started");
+    expect(events.map((event) => event.type)).not.toContain("human.request_created");
+  });
+
+  it("active inner session 运行中 daemon 只观察，不重复启动 provider 或 workflow action", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createTaskFixture(databasePath);
+    const now = new Date("2026-05-04T00:00:00.000Z");
+    const providerCalls: AgentProviderRunInput[] = [];
+    let branch = "";
+    let workflowRunId = "";
+    const runner: WorkflowProtocolRunner = () =>
+      JSON.stringify({
+        runId: "inner-run-active",
+        profile: "feature",
+        lifecycle: "active",
+        allowedActions: ["freeze-requirements"],
+        handoff: { available: false, artifacts: [] }
+      });
+
+    withDatabase(databasePath, (context) => {
+      const setup = createRunningWorkflowRunFixture(context, fixture, "workflow-run-active-inner", "inner-run-active");
+      branch = setup.branch;
+      workflowRunId = setup.workflowRun.id;
+      createAgentSession(context, {
+        id: "active-inner-agent",
+        projectId: fixture.projectId,
+        taskId: fixture.taskId,
+        attemptId: setup.attempt.id,
+        providerKind: "fake-inner-daemon",
+        role: "inner",
+        status: "running"
+      });
+      context.db
+        .prepare("UPDATE agent_sessions SET updated_at = ? WHERE id = ?")
+        .run("2026-05-04T00:00:00.000Z", "active-inner-agent");
+    });
+
+    const result = withDatabase(databasePath, (context) =>
+      runDaemonTick(context, {
+        taskId: fixture.taskId,
+        now,
+        innerProvider: {
+          id: "fake-inner-daemon",
+          kind: "fake",
+          capabilities: ["code-editing"],
+          run(input: AgentProviderRunInput) {
+            providerCalls.push(input);
+            return { finalResponse: "should not run" };
+          }
+        },
+        workflowInspectRunner: runner,
+        workspaceGitRunner: createWorkflowWorkspaceGitRunner(branch)
+      })
+    );
+
+    expect(providerCalls).toHaveLength(0);
+    expect(result.actions.some((action) => action.kind === "agent_session_started" && action.workflowRunId === workflowRunId)).toBe(false);
+    const events = withDatabase(databasePath, (context) => listTaskEvents(context, fixture.taskId));
+    expect(events.map((event) => event.type)).not.toContain("workflow.action");
+  });
+
+  it("ready evidence 存在时 daemon 等待 operator，不自动确认 workflow gate", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createTaskFixture(databasePath);
+    const providerCalls: AgentProviderRunInput[] = [];
+    let branch = "";
+    let workflowRunId = "";
+    const runner: WorkflowProtocolRunner = () =>
+      JSON.stringify({
+        runId: "inner-run-ready-evidence",
+        profile: "feature",
+        lifecycle: "active",
+        allowedActions: ["freeze-requirements"],
+        handoff: { available: false, artifacts: [] }
+      });
+
+    withDatabase(databasePath, (context) => {
+      const setup = createRunningWorkflowRunFixture(
+        context,
+        fixture,
+        "workflow-run-ready-evidence",
+        "inner-run-ready-evidence"
+      );
+      branch = setup.branch;
+      workflowRunId = setup.workflowRun.id;
+      const finalResponsePath = join(mkdtempSync(join(tmpdir(), "coordinator-ready-evidence-")), "final-response.md");
+      writeFileSync(finalResponsePath, "我已整理需求，等待人工确认 freeze-requirements。", "utf8");
+      createAgentSession(context, {
+        id: "ready-inner-agent",
+        projectId: fixture.projectId,
+        taskId: fixture.taskId,
+        attemptId: setup.attempt.id,
+        providerKind: "fake-inner-daemon",
+        role: "inner",
+        status: "completed",
+        finalResponsePath
+      });
+      appendEvent(context, {
+        type: "agent.session_completed",
+        summary: "inner session completed: ready-inner-agent",
+        projectId: fixture.projectId,
+        taskId: fixture.taskId,
+        attemptId: setup.attempt.id,
+        workflowRunId,
+        agentSessionId: "ready-inner-agent",
+        payload: { role: "inner" }
+      });
+    });
+
+    const result = withDatabase(databasePath, (context) =>
+      runDaemonTick(context, {
+        taskId: fixture.taskId,
+        innerProvider: {
+          id: "fake-inner-daemon",
+          kind: "fake",
+          capabilities: ["code-editing"],
+          run(input: AgentProviderRunInput) {
+            providerCalls.push(input);
+            return { finalResponse: "should not run" };
+          }
+        },
+        workflowInspectRunner: runner,
+        workspaceGitRunner: createWorkflowWorkspaceGitRunner(branch)
+      })
+    );
+
+    expect(providerCalls).toHaveLength(0);
+    expect(result.actions.some((action) => action.kind === "agent_session_started" && action.workflowRunId === workflowRunId)).toBe(false);
+    const events = withDatabase(databasePath, (context) => listTaskEvents(context, fixture.taskId));
+    expect(events.map((event) => event.type)).not.toContain("workflow.action");
+    expect(events.map((event) => event.type)).not.toContain("human.request_created");
+  });
+
+  it("inner provider 缺失时 daemon 不把 workflow allowedActions 回落成人工 action queue", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createTaskFixture(databasePath);
+    let branch = "";
+    let workflowRunId = "";
+    const runner: WorkflowProtocolRunner = () =>
+      JSON.stringify({
+        runId: "inner-run-no-provider",
+        profile: "feature",
+        lifecycle: "active",
+        allowedActions: ["materialize-change"],
+        actionInputs: {
+          "materialize-change": {
+            requiredArgs: ["change-id"],
+            usage: "workflow protocol action --run inner-run-no-provider materialize-change <change-id>"
+          }
+        },
+        handoff: { available: false, artifacts: [] }
+      });
+
+    withDatabase(databasePath, (context) => {
+      const setup = createRunningWorkflowRunFixture(context, fixture, "workflow-run-no-inner-provider", "inner-run-no-provider");
+      branch = setup.branch;
+      workflowRunId = setup.workflowRun.id;
+    });
+
+    const result = withDatabase(databasePath, (context) =>
+      runDaemonTick(context, {
+        taskId: fixture.taskId,
+        workflowInspectRunner: runner,
+        workspaceGitRunner: createWorkflowWorkspaceGitRunner(branch)
+      })
+    );
+
+    expect(result.actions).toContainEqual(
+      expect.objectContaining({
+        kind: "retry_blocked",
+        workflowRunId,
+        status: "skipped",
+        summary: expect.stringContaining("inner agent provider missing")
+      })
+    );
+    const events = withDatabase(databasePath, (context) => listTaskEvents(context, fixture.taskId));
+    expect(events.find((event) => event.type === "daemon.inner_agent_skipped")?.payload).toMatchObject({
+      reason: "inner-agent-provider-missing"
+    });
+    expect(events.map((event) => event.type)).not.toContain("workflow.action");
+    expect(events.map((event) => event.type)).not.toContain("human.request_created");
+  });
+
   it("task-scoped workflow inspect 先按 task 过滤再 LIMIT", () => {
     const databasePath = createMigratedDatabase();
     const fixture = createTaskFixture(databasePath);
@@ -2089,6 +2543,43 @@ describe("daemon runtime", () => {
     expect(events.findIndex((event) => event.type === "agent.session_inspected")).toBeLessThan(
       events.findIndex((event) => event.type === "daemon.recovery_decision")
     );
+  });
+
+  it("stale inner session 也由 watchdog 观察并交给 Core recovery decision 收口", () => {
+    const databasePath = createMigratedDatabase();
+    const fixture = createTaskFixture(databasePath);
+    const now = new Date("2026-05-04T00:00:00.000Z");
+    withDatabase(databasePath, (context) => {
+      createAgentSession(context, {
+        id: "stale-inner-agent-session",
+        projectId: fixture.projectId,
+        taskId: fixture.taskId,
+        providerKind: "fake",
+        role: "inner",
+        status: "running"
+      });
+      context.db
+        .prepare("UPDATE agent_sessions SET updated_at = ? WHERE id = ?")
+        .run("2026-05-03T23:00:00.000Z", "stale-inner-agent-session");
+    });
+
+    const result = withDatabase(databasePath, (context) => runDaemonTick(context, { now, provider: new FakeAgentProvider("no-op") }));
+
+    expect(result.actions).toContainEqual(
+      expect.objectContaining({
+        kind: "reconcile_failed",
+        agentSessionId: "stale-inner-agent-session",
+        status: "skipped"
+      })
+    );
+    const state = withDatabase(databasePath, (context) =>
+      context.db.prepare("SELECT status FROM agent_sessions WHERE id = ?").get("stale-inner-agent-session")
+    ) as { status: string };
+    expect(state.status).toBe("stopped");
+    const events = withDatabase(databasePath, (context) => listTaskEvents(context, fixture.taskId));
+    expect(events.find((event) => event.type === "daemon.agent_session_stalled")?.payload).toMatchObject({
+      role: "inner"
+    });
   });
 
   it("watchdog 可从 session transcript 归一化 lastActivityAt，避免 recent activity 被误判 stalled", () => {

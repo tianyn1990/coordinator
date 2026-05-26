@@ -128,6 +128,13 @@ Coordinator 可以从已持久化 workflow projection 派生 operator-only `work
 
 workflow operator gate 的 evidence 由 Core 合成：agent session 可见输出提供确认正文，workflow projection 提供 protocol facts。缺少 agent 可见输出时，observability 应显示 missing evidence，而不是把 `allowedActions` 本身当作确认内容。
 
+Iteration 17.1 后，inner coding agent lifecycle 相关事件也进入同一分层：
+
+- `agent.session_started` / `agent.session_completed` / `agent.session_failed` 可以记录 `role=inner`、provider、permission profile 名称、final response artifact ref、raw event artifact ref 和 normalized activity。
+- `daemon.inner_agent_session_started` 表示 daemon 已完成一次 inner provider 调度；这不是 workflow action，也不是 human gate confirmation。
+- inner session 完成后的 `workflow.status_inspected` / `daemon.workflow_reconciled` 表示只读 protocol 对齐；final response 只作为 gate evidence，不替代 workflow handoff 或 PR/MR readiness。
+- `daemon.inner_agent_skipped` 可记录 inner provider 缺失或同 boundary 已处理等 observation，但不得创建 human request 或 action queue。
+
 ### 3.4 Git / PR Event
 
 记录：
@@ -243,9 +250,15 @@ Coordinator 可以提供 operator-only workflow gate evidence summary，用于�
 
 - 当前 workflow run record。
 - latest workflow status/action event payload 中的 protocol projection。
-- 当前 attempt/task 相关的 inner agent session。
+- 当前 attempt/task 相关，且通过 `agent.session_started` / `agent.session_completed` / `agent.session_failed` 等 lifecycle event 绑定到当前 workflow run 的 inner agent session。
 - agent final response artifact ref 与受限 excerpt。
 - normalized agent activity 摘要。
+
+Evidence 有效性必须以 append-only event 顺序为准：
+
+- 最近 `workflow.action` event 之前的 inner final response 自动失效，即使它与 action 落在同一秒也不得复用。
+- ready evidence 必须来自当前 workflow run 绑定的 terminal session event；其他 run、其他 attempt 或未绑定 event 的输出不得确认当前 gate。
+- provider 空 final response 占位文本视为 missing evidence，不得启用 operator confirm。
 
 该 summary 不触发 provider、workflow protocol、git 或外部平台 inspect，不读取 `.workflow` private state，也不读取 provider private session 文件。
 

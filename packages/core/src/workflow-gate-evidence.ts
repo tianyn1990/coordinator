@@ -15,12 +15,15 @@ export type WorkflowGateEvidenceStatus = "ready" | "partial" | "missing";
 export type WorkflowGateEvidenceMessage = {
   source: "inner-agent-final-response";
   agentSessionId: string;
+  eventId: number;
+  workflowRunId: string;
   providerKind: string;
   status: string;
   text: string;
   artifactPath?: string;
   createdAt?: string;
   updatedAt?: string;
+  eventCreatedAt?: string;
 };
 
 export type WorkflowGateEvidenceProtocolFacts = {
@@ -113,6 +116,12 @@ export function buildWorkflowGateEvidence(
   if (evidenceMessages.excludedStaleCount > 0) {
     warnings.push("已忽略早于最近 workflow action 的 inner agent 输出，当前 gate 需要新的可见确认依据。");
   }
+  if (evidenceMessages.excludedUnboundCount > 0) {
+    warnings.push("已忽略未绑定当前 workflow run lifecycle event 的 inner agent 输出。");
+  }
+  if (evidenceMessages.excludedEmptyCount > 0) {
+    warnings.push("已忽略 provider 空 final response 占位文本，当前 gate 需要 coding agent 可见确认依据。");
+  }
 
   const primaryMessage = evidenceMessages.messages[0];
   const hasOperatorAction = Boolean(primaryAction && protocolFacts.operatorActions.includes(primaryAction));
@@ -193,33 +202,79 @@ function collectInnerAgentVisibleMessages(
   context: DbContext,
   workflowRun: WorkflowRunRecord,
   events: EventRecord[]
-): { messages: WorkflowGateEvidenceMessage[]; excludedStaleCount: number } {
-  const lastWorkflowActionAt = findLastWorkflowActionAt(workflowRun.id, events);
+): { messages: WorkflowGateEvidenceMessage[]; excludedStaleCount: number; excludedUnboundCount: number; excludedEmptyCount: number } {
+  const lastWorkflowActionEventId = findLastWorkflowActionEventId(workflowRun.id, events);
+  const sessionEvents = collectWorkflowBoundSessionEvents(workflowRun.id, events);
+  let excludedUnboundCount = 0;
+  let excludedEmptyCount = 0;
   const allMessages = listAgentSessionsByTask(context, workflowRun.taskId, 20)
     .filter((session) => session.role === "inner" && session.attemptId === workflowRun.attemptId)
-    .map(readVisibleMessage)
-    .filter((message): message is WorkflowGateEvidenceMessage => Boolean(message));
-  const messages = allMessages.filter((message) => isMessageAfterWorkflowActionBoundary(message, lastWorkflowActionAt));
-  return { messages, excludedStaleCount: allMessages.length - messages.length };
+    .flatMap((session) => {
+      const text = readVisibleMessageText(session);
+      if (text.kind === "missing") {
+        return [];
+      }
+      if (text.kind === "empty-placeholder") {
+        excludedEmptyCount += 1;
+        return [];
+      }
+      const event = selectWorkflowBoundSessionEvent(session, sessionEvents.get(session.id));
+      if (!event) {
+        excludedUnboundCount += 1;
+        return [];
+      }
+      return [buildVisibleMessage(session, event, text.text)];
+    });
+  const messages = allMessages.filter((message) => isMessageAfterWorkflowActionBoundary(message, lastWorkflowActionEventId));
+  return {
+    messages,
+    excludedStaleCount: allMessages.length - messages.length,
+    excludedUnboundCount,
+    excludedEmptyCount
+  };
 }
 
-function readVisibleMessage(session: AgentSessionRecord): WorkflowGateEvidenceMessage | undefined {
+type SessionMessageText =
+  | { kind: "available"; text: string }
+  | { kind: "missing" }
+  | { kind: "empty-placeholder" };
+
+type WorkflowBoundSessionEvents = {
+  latest?: EventRecord;
+  completed?: EventRecord;
+};
+
+function readVisibleMessageText(session: AgentSessionRecord): SessionMessageText {
   if (!session.finalResponsePath || !existsSync(session.finalResponsePath)) {
-    return undefined;
+    return { kind: "missing" };
   }
   const text = truncate(readFileSync(session.finalResponsePath, "utf8").trim(), MAX_EVIDENCE_TEXT_LENGTH);
   if (!text) {
-    return undefined;
+    return { kind: "empty-placeholder" };
   }
+  if (isEmptyProviderFinalResponsePlaceholder(text)) {
+    return { kind: "empty-placeholder" };
+  }
+  return { kind: "available", text };
+}
+
+function buildVisibleMessage(
+  session: AgentSessionRecord,
+  event: EventRecord,
+  text: string
+): WorkflowGateEvidenceMessage {
   return {
     source: "inner-agent-final-response",
     agentSessionId: session.id,
+    eventId: event.id,
+    workflowRunId: event.workflowRunId!,
     providerKind: session.providerKind,
     status: session.status,
     text,
     artifactPath: session.finalResponsePath,
     createdAt: session.createdAt,
-    updatedAt: session.updatedAt
+    updatedAt: session.updatedAt,
+    eventCreatedAt: event.createdAt
   };
 }
 
@@ -228,25 +283,53 @@ function isReadyAgentSessionStatus(status: string): boolean {
   return status === "completed" || status === "stopped";
 }
 
-function findLastWorkflowActionAt(workflowRunId: string, events: EventRecord[]): string | undefined {
+function collectWorkflowBoundSessionEvents(workflowRunId: string, events: EventRecord[]): Map<string, WorkflowBoundSessionEvents> {
+  const result = new Map<string, WorkflowBoundSessionEvents>();
+  for (const event of events) {
+    if (event.workflowRunId !== workflowRunId || !event.agentSessionId || !isWorkflowBoundAgentSessionEvent(event.type)) {
+      continue;
+    }
+    const item = result.get(event.agentSessionId) ?? {};
+    item.latest = event;
+    if (event.type === "agent.session_completed") {
+      item.completed = event;
+    }
+    result.set(event.agentSessionId, item);
+  }
+  return result;
+}
+
+function isWorkflowBoundAgentSessionEvent(type: string): boolean {
+  return type === "agent.session_started" || type === "agent.session_completed" || type === "agent.session_failed";
+}
+
+function selectWorkflowBoundSessionEvent(
+  session: AgentSessionRecord,
+  events: WorkflowBoundSessionEvents | undefined
+): EventRecord | undefined {
+  // ready evidence 必须来自当前 workflow run 的 terminal event；仅靠 session timestamp 会被同秒 action 污染。
+  return isReadyAgentSessionStatus(session.status) ? events?.completed : events?.latest;
+}
+
+function isEmptyProviderFinalResponsePlaceholder(text: string): boolean {
+  return text.trim() === "provider returned empty response";
+}
+
+function findLastWorkflowActionEventId(workflowRunId: string, events: EventRecord[]): number | undefined {
   for (const event of [...events].reverse()) {
     if (event.workflowRunId === workflowRunId && event.type === "workflow.action") {
-      return event.createdAt;
+      return event.id;
     }
   }
   return undefined;
 }
 
-function isMessageAfterWorkflowActionBoundary(message: WorkflowGateEvidenceMessage, boundary: string | undefined): boolean {
-  if (!boundary) {
+function isMessageAfterWorkflowActionBoundary(message: WorkflowGateEvidenceMessage, boundaryEventId: number | undefined): boolean {
+  if (boundaryEventId === undefined) {
     return true;
   }
-  const messageTimestamp = message.updatedAt ?? message.createdAt;
-  if (!messageTimestamp) {
-    return false;
-  }
-  // 用最近 workflow action 作为 gate 分界，避免上一轮 gate 的 final response 误确认下一轮 gate。
-  return toComparableTimestamp(messageTimestamp) >= toComparableTimestamp(boundary);
+  // event id 是 append-only 严格序；比 timestamp 更适合作为 workflow action boundary。
+  return message.eventId > boundaryEventId;
 }
 
 function findLatestWorkflowProjection(
@@ -356,9 +439,4 @@ function uniqueStrings(values: string[]): string[] {
 
 function truncate(value: string, maxLength: number): string {
   return value.length > maxLength ? `${value.slice(0, maxLength)}...` : value;
-}
-
-function toComparableTimestamp(value: string): number {
-  const parsed = Date.parse(value);
-  return Number.isNaN(parsed) ? 0 : parsed;
 }

@@ -14,7 +14,8 @@ export {
   ProviderUnavailableError,
   createAgentProvider,
   inspectAgentSession,
-  runCoordinatorAgentSession
+  runCoordinatorAgentSession,
+  runInnerCodingAgentSession
 } from "./agent-provider-runtime.js";
 export { DaemonRuntimeError, parseAgentToolRequest, runDaemonTick } from "./daemon-runtime.js";
 export {
@@ -92,6 +93,7 @@ export type {
   AgentSessionInspection,
   AgentSessionRuntimeResult,
   InspectAgentSessionInput,
+  RunInnerCodingAgentSessionInput,
   RunCoordinatorAgentSessionInput,
   SdkFirstAgentProviderOptions
 } from "./agent-provider-runtime.js";

@@ -144,6 +144,25 @@ function WorkbenchShell() {
     }
   }
 
+  async function fetchGateEvidenceForRunUntilBlocked(detail: TaskDetail | undefined): Promise<WorkflowGateEvidence | undefined> {
+    // Run task 不能在 missing evidence 时提前停下；这里用 Core evidence 结果决定是否继续等待 inner agent。
+    if (!detail) return undefined;
+    const row = buildRunMatrixRow(detail.task, detail);
+    const run = detail.workflowRuns[0];
+    if (!run || !row.workflow.gate.hasOperatorGate) return undefined;
+    try {
+      const evidence = await request<WorkflowGateEvidence>(`/workflow-runs/${run.id}/gate-evidence`);
+      setGateEvidenceByRunId((current) => ({ ...current, [run.id]: { loading: false, evidence } }));
+      return evidence;
+    } catch (error) {
+      setGateEvidenceByRunId((current) => ({
+        ...current,
+        [run.id]: { loading: false, error: error instanceof Error ? error.message : String(error) }
+      }));
+      return undefined;
+    }
+  }
+
   useEffect(() => {
     void refresh();
   }, []);
@@ -222,8 +241,10 @@ function WorkbenchShell() {
         });
         logs = [...logs, { index, status: tick.status, actions: tick.actions }];
         currentDetail = await refresh(taskId ?? currentDetail?.task.id);
+        const gateEvidence = await fetchGateEvidenceForRunUntilBlocked(currentDetail);
         const stop = deriveRunUntilBlockedStopReason({
           detail: currentDetail,
+          gateEvidence,
           tick,
           tickIndex: index,
           maxTicks: RUN_UNTIL_BLOCKED_MAX_TICKS,
@@ -918,7 +939,9 @@ function AgentActivity({ detail }: { detail: TaskDetail }) {
       {sessions.length === 0 ? <p className="muted">No agent activity.</p> : null}
       {sessions.map((session) => (
         <article key={session.id} className="activity-row">
-          <strong>{session.providerKind}</strong>
+          <strong>
+            {session.role} / {session.providerKind}
+          </strong>
           <span>{session.activity?.state ?? session.status}</span>
           <small>{session.activity?.latestEvent?.summary ?? session.finalResponsePath ?? "no latest event"}</small>
         </article>

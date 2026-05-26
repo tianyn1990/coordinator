@@ -902,6 +902,16 @@ exit 1
         status: "completed",
         finalResponsePath
       });
+      appendEvent(context, {
+        type: "agent.session_completed",
+        summary: "inner session completed: inner-session-api-workflow-action",
+        projectId: project.id,
+        taskId: task.id,
+        attemptId: attempt.id,
+        workflowRunId: "workflow-run-api-action",
+        agentSessionId: "inner-session-api-workflow-action",
+        payload: { role: "inner" }
+      });
     });
 
     const previous = process.env.COORDINATOR_DB_PATH;
@@ -973,6 +983,16 @@ exit 1
         role: "inner",
         status: "completed",
         finalResponsePath
+      });
+      appendEvent(context, {
+        type: "agent.session_completed",
+        summary: "inner session completed: inner-session-api-gate-evidence",
+        projectId: project.id,
+        taskId: task.id,
+        attemptId: attempt.id,
+        workflowRunId: "workflow-api-gate-evidence",
+        agentSessionId: "inner-session-api-gate-evidence",
+        payload: { role: "inner" }
       });
     });
 

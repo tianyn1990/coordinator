@@ -31,11 +31,12 @@ Iteration 9 已落地最小 `runDaemonTick`：
 
 - 以 SQLite 为真相源执行单次 tick。
 - 扫描 active workflow run，并通过 workflow protocol `status` 做 reconciliation。
+- 在 active workflow run + ready workspace + 缺少 ready evidence + 无 active inner session 时，启动 SDK-backed inner coding agent session。
 - 扫描 answered human request，唤醒 task 并继续交给 Coordinator Agent。
 - 基于当前 Coordinator Surface 启动 outer Coordinator Agent session。
 - 从 agent final response 中解析最多一个窄格式 `coordinator-tool` 请求，并仍通过 agent tools executor 校验当前 surface 可见性。
 - 从 agent final response 中解析 `coordinator-artifact` block，由 Core 受控写入当前 surface `artifact_root`，解决 read-only outer provider 无法直接写 artifact 的问题。
-- 对 active outer agent session 做最小 stalled watcher，超时后记录 stalled event 并安排 retry。
+- 对 active outer / inner agent session 做最小 stalled watcher，超时后记录 stalled event 并安排 retry。
 - 对 `resuming` task 使用 `daemon.retry_scheduled` 的 dueAt 做最小 retry_due gate。
 - 提供 CLI/API operator-only `daemon tick` 入口；这些入口不进入 Coordinator Surface。
 
@@ -65,6 +66,19 @@ daemon 不应在 coding agent 仍在运行时，因为 inspect 到 workflow `all
 
 daemon 可以记录 Core 派生的 `workflow runtime observation`，例如 `observing-runtime`、`waiting-operator-gate` 或 `recovery-attention`，但这仍是 observation。`observing-runtime` 不创建 human request，不标记 operator attention，也不调用 operator workflow action helper；`waiting-operator-gate` 只能等待 Web/API/CLI operator-only 确认。
 
+#### 1.1.2 Inner coding agent lifecycle
+
+Iteration 17.1 已落地 Coordinator 侧 inner coding agent 生命周期调度：
+
+- daemon 只在 workflow run 为 active/running、attempt workspace ready、当前没有 active inner session、且当前不是“operator gate evidence 已可提交”时启动 inner coding agent。
+- inner session 通过 Core `runInnerCodingAgentSession` 创建，持有 workspace lock，provider cwd 固定为 workspace `repo/`。
+- inner session 完成后，daemon 只执行 workflow protocol `status` inspect/reconcile，刷新 projection；它不解析 final response 来推导 completed、handoff、PR ready 或 merge ready。
+- 若 project 未配置 inner provider，daemon 记录 `daemon.inner_agent_skipped` / recovery observation，不把 `allowedActions/actionInputs` 回落成人工 action queue。
+- operator gate evidence 可提交时，daemon 停止推进并等待 operator；确认仍只能通过 Web/API/CLI operator-only Core helper。可提交 evidence 必须由当前 workflow run 绑定的 inner lifecycle event 产生，并且 event id 晚于最近 `workflow.action`。internal action 上的旧 evidence 不能阻断 inner agent 继续处理 workflow runtime 工作。
+- active workflow run 的 workspace dirty 会先视为受控 execution window 状态，daemon 记录 `daemon.workspace_dirty_deferred` 并继续让 workflow/inner lifecycle 收口；普通 workspace dirty unknown 仍进入 operator attention。
+
+这保持了本期边界：Coordinator 管理多个 workflow run 和 agent session，inner coding agent 在 workflow 约束下处理单个代码工作单元，workflow protocol schema 不变。
+
 ### 1.2 当前已落地的 recovery hardening 子集
 
 Iteration 12.2 已补齐 daemon/Core recovery matrix 的第一层实现：
@@ -84,7 +98,7 @@ Iteration 12.3 已继续补齐 workspace/lock/fencing recovery 子集：
 - malformed ownership manifest 收敛为 `manifest_mismatch`，不能中断整个 daemon tick。
 - expired lock 释放必须先 inspect owner/resource，再由 Core 决定是否 `release_expired_lock`；daemon 不静默接管 lock。
 - workspace lock release 必须同时校验 lock token 和 leaseVersion，避免 stale owner 在 lease 已变化后继续写入或误报 recovery 成功。
-- owner active 判断至少包含 active outer agent session、active workflow run 和 active workspace operation；任一仍活跃时进入 operator attention。
+- owner active 判断至少包含 active outer/inner agent session、active workflow run 和 active workspace operation；任一仍活跃时进入 operator attention。
 - workspace recovery 进入 operator attention 后会把 workspace 标记为 `blocked`，并阻止同一 tick 继续唤醒 Coordinator Agent 或执行后续副作用。
 
 当前实现仍是 P1 hardening 子集，不代表 PR/MR merge、remote worker 的完整恢复矩阵已经完成。

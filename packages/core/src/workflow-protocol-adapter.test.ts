@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  appendEvent,
   createAttempt,
   createAgentSession,
   createProject,
@@ -173,10 +174,15 @@ function createProtocolRunner() {
   return { runner, calls };
 }
 
-function createInnerGateEvidence(context: DbContext, fixture: { projectId: string; taskId: string; attemptId: string }, text = "需求范围已整理，请确认冻结需求。"): string {
+function createInnerGateEvidence(
+  context: DbContext,
+  fixture: { projectId: string; taskId: string; attemptId: string },
+  workflowRunId: string,
+  text = "需求范围已整理，请确认冻结需求。"
+): string {
   const finalResponsePath = join(mkdtempSync(join(tmpdir(), "coordinator-inner-agent-")), "final-response.md");
   writeFileSync(finalResponsePath, text, "utf8");
-  createAgentSession(context, {
+  const session = createAgentSession(context, {
     id: `inner-session-${fixture.attemptId}`,
     projectId: fixture.projectId,
     taskId: fixture.taskId,
@@ -185,6 +191,16 @@ function createInnerGateEvidence(context: DbContext, fixture: { projectId: strin
     role: "inner",
     status: "completed",
     finalResponsePath
+  });
+  appendEvent(context, {
+    type: "agent.session_completed",
+    summary: `inner session completed: ${session.id}`,
+    projectId: fixture.projectId,
+    taskId: fixture.taskId,
+    attemptId: fixture.attemptId,
+    workflowRunId,
+    agentSessionId: session.id,
+    payload: { role: "inner" }
   });
   return finalResponsePath;
 }
@@ -733,7 +749,7 @@ describe("workflow protocol adapter", () => {
         profileId: "feature",
         runner: operatorRunner
       });
-      createInnerGateEvidence(context, fixture);
+      createInnerGateEvidence(context, fixture, started.workflowRun.id);
       return invokeWorkflowActionFromOperator(context, {
         workflowRunId: started.workflowRun.id,
         action: "freeze-requirements",
@@ -780,7 +796,7 @@ describe("workflow protocol adapter", () => {
         profileId: "feature",
         runner: planningApprovalRunner
       });
-      createInnerGateEvidence(context, fixture, "技术方案已准备，请确认 planning dossier。");
+      createInnerGateEvidence(context, fixture, started.workflowRun.id, "技术方案已准备，请确认 planning dossier。");
       return invokeWorkflowActionFromOperator(context, {
         workflowRunId: started.workflowRun.id,
         action: "approve-planning-dossier",

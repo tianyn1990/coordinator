@@ -65,6 +65,8 @@ Coordinator 应该是多个 workflow run 的管理者、观察者、恢复者和
 - Coordinator 应该等待 inner coding agent 结束、阻塞、失败或 handoff 后，再结合 agent 输出和 workflow protocol 状态综合评估。
 - 周期性 inspect / reconcile 可以存在，但不能在 coding agent 仍在运行时抢先打断开发者。
 - Coding agent 输出是 evidence，不是状态机真源。
+- Evidence 只在当前是 operator-facing gate 且 `canSubmit=true` 时阻止 inner 继续；internal action 上残留的上一轮 evidence 不能让 Coordinator 回退到 outer Agent 或 needs-me。
+- Active workflow run 中的 workspace dirty 是 inner coding agent 的正常执行窗口现象；Coordinator 可以记录 recovery observation，但不能把受控执行产物提前标成 operator attention。
 - Workflow protocol status / handoff 是 workflow run 的结构化真源。
 - Coordinator Core 是外层任务状态机和策略校验真源。
 - SDK-observed coding agent 可见输出是 human gate evidence 的首要来源。
@@ -128,7 +130,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-  A["Coordinator 启动 workflow run"] --> B["workflow 启动或恢复 inner coding agent"]
+  A["Coordinator 启动 workflow run"] --> B["Coordinator / daemon 通过 SDK 启动或恢复 inner coding agent"]
   B --> C{"inner agent 是否仍在运行?"}
   C -->|是| D["Coordinator 只展示 running / heartbeat / logs<br/>不弹人工 action"]
   C -->|否| E["收集 agent final response / artifacts / transcript 摘要"]
@@ -233,7 +235,8 @@ Codex SDK 当前提供 `runStreamed()`，可以观察 structured events、`agent
 
 - hidden chain-of-thought 不进入 evidence。
 - raw provider events 只进入 debug artifact 或 normalized activity。
-- gate evidence 默认只把 `role = inner` 的 agent session 可见输出作为 ready evidence。
+- gate evidence 默认只把 `role = inner`、通过 lifecycle event 绑定当前 workflow run、且晚于最近 `workflow.action` event id 的 agent session 可见输出作为 ready evidence。
+- provider 空 final response 占位文本不能作为 evidence；缺少 coding agent 可见说明时必须保持 missing。
 - 若只有 workflow protocol action 而没有 inner agent 可见输出，Web 应显示 missing evidence，并阻止盲确认。
 
 ### 5.4 Web Workbench
