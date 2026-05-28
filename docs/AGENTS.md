@@ -121,6 +121,10 @@ Symphony 的核心经验会被吸收为：
   - 事件、日志、artifact、UI 调试视图和审计。
 - [web-developer-workbench.md](./web-developer-workbench.md)
   - Web V2 多工程、多任务开发者工作台的产品心智、Run Matrix / Focus Drawer / Unified Composer 信息架构、视觉方向和交互边界。
+- [next-project-workflow-fleet-handoff.md](./next-project-workflow-fleet-handoff.md)
+  - 面向新工程的 Workflow Fleet Manager 交接文档，沉淀当前 `coordinator` 的经验、偏重问题、每 task Supervisor Agent 心智、React Flow 动态画布方向和新工程启动提示词。
+- [next-project-workflow-tool-protocol.md](./next-project-workflow-tool-protocol.md)
+  - 面向新工程的 workflow 工具协议交接文档，明确 workflow 作为 Coding Agent skill 的 skill-first 接入、Host 只读 observation protocol、active run discovery、debug/compat start/action 边界和 UI projection。
 - [research.md](./research.md)
   - 已调研社区方案与文章、可吸收点和拒绝吸收点。
 - [roadmap.md](./roadmap.md)
